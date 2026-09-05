@@ -189,8 +189,9 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
     # 05 연면적은 01_시설마스터(노란 셀, 사용자 수정 가능)를 참조 → 01 에서 고치면 ㎡당 공사비에 반영
     fac_cols = list(fac.columns)
     area_col = get_column_letter(fac_cols.index("연면적_m2") + 1)
-    fac_rng = f"'01_시설마스터'!${area_col}:${area_col}"
-    fac_id_rng = "'01_시설마스터'!$A:$A"
+    n_fac = max(len(fac), 1) + 1                     # 열 전체($V:$V) 대신 행 범위를 지정(수식 검증 도구·구형 Excel 호환)
+    fac_rng = f"'01_시설마스터'!${area_col}$2:${area_col}${n_fac}"
+    fac_id_rng = f"'01_시설마스터'!$A$2:$A${n_fac}"
     for r in range(2, ws.max_row + 1):
         for tr in TRADES:
             ws[f"{fc[f'{tr}(수식)']}{r}"] = f'=SUMIFS({tot_rng},{id_rng},$A{r},{tr_rng},"{tr}")'

@@ -23,6 +23,7 @@
   | Excel | API 금액이 없을 때 문서 추출 금액으로 총공사비 산출, 공종누락경고를 '누락'(공고 없음)/'금액없음'으로 구분, 05 연면적은 01 시트(노란 셀) 참조, 검증로그 숫자 컬럼 통일 |
   | CLI | `doctor` 단계(파이썬·패키지·키 존재·네트워크 점검), `config.yaml paths` 를 프로젝트 폴더 기준으로 해석(어느 폴더에서 실행해도 동일), Excel 파일이 열려 있을 때 안내, cp949 콘솔 보호 |
 - 회귀 테스트 `tests/test_regressions.py` 추가(위 수정사항 대부분을 검증), `tests/check_excel.py`(수식 오류 점검) 추가.
+- **가짜 나라장터 서버(`tests/mock_g2b.py`) + 통합 테스트(`tests/test_e2e_mock.py`)** 추가: probe(잘못된 키 → 30 오류 안내, 정상 키 → 매핑 OK·면허제한 필드 후보 안내) → collect(데이터 없는 달 03, 재실행 시 호출 0) → discover(시설 3개, 재실행 시 ID 유지) → research(lcnsLmtNm 자동 탐색, 유지보수 제외, 수요기관 범위) → dedup(변경차수·재공고·소액 분리) → attach(HWPX/DOCX/cp949 TXT, HTML 실패 기록) → extract(견적 → 모의 --yes) → excel(수식 오류 0) 전 단계 통과.
 - 문서 갱신: README.md(실행 순서·doctor·extract --yes), CLAUDE.md(단계·성공기준), PROMPTS.md(세션 1·6 지시문), config.yaml(새 설정 `api.license_query`, `dedup.minor_notice_ratio`, `llm.structured_output`, `llm.usd_krw`, `max_tokens 8000`).
 
 ## 3. 생성·변경된 파일
@@ -34,7 +35,7 @@
 1. PowerShell 에서 `cd <저장소>\g2b_costdb` → `pip install -r requirements.txt` → `pip install pyhwp`
 2. 공공데이터포털에서 「조달청_나라장터 입찰공고정보서비스」 활용신청 후 **일반 인증키(Decoding)** 를 `setx G2B_SERVICE_KEY "키"` 로 설정(새 터미널 열기)
 3. `python -m g2b_costdb.pipeline doctor` → 모두 OK 인지 확인
-4. `python -m tests.test_dedup_and_excel` → `OK` 두 줄 확인
+4. `python -m tests.test_dedup_and_excel` → `OK` 두 줄 확인, `python -m tests.test_e2e_mock` → `OK: 통합 실행 통과` 확인
 5. `python -m g2b_costdb.pipeline probe --ym 2026-08` → `[매핑 확인 필요]` 항목이 있으면 `config.yaml fields` 수정. 면허제한 표본에서 업종명 필드 안내(`lcnsLmtNm` 등)가 나오면 `fields.license_name` 수정, 오류 10/11 이면 `api.license_query.inqryDiv` 조정
 6. 이후 PROMPTS.md 세션 2(3개월 시험 수집: `period` 를 2026-06~2026-08 로) → 세션 3(본 수집) 순서
 

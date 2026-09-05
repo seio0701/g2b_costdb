@@ -59,8 +59,16 @@ _MAGIC = [(b"%PDF", ".pdf"), (b"\xd0\xcf\x11\xe0", ".hwp"), (b"PK\x03\x04", ".zi
 
 
 def sniff_ext(head: bytes) -> str:
+    """앞부분 바이트로 확장자 추정. ZIP 계열은 내부 파일명으로 HWPX/DOCX/XLSX 를 구분."""
     for magic, ext in _MAGIC:
         if head.startswith(magic):
+            if ext == ".zip":
+                if b"Contents/section" in head or b"application/hwp+zip" in head:
+                    return ".hwpx"
+                if b"word/document.xml" in head or b"word/_rels" in head:
+                    return ".docx"
+                if b"xl/workbook.xml" in head or b"xl/_rels" in head:
+                    return ".xlsx"
             return ext
     return ""
 

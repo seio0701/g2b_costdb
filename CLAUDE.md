@@ -45,4 +45,4 @@ Excel 공사비 DB(`output/공사비DB.xlsx`)를 만드는 파이프라인이다
 ## 코드 수정 원칙
 - 버그 수정은 최소 범위로, 수정한 파일·함수·이유를 보고한다. 새 의존성 추가 시 `requirements.txt`에 반영한다.
 - 실제 API 응답으로 필드명·구조가 다르게 확인되면 `config.yaml`(매핑) → `discover.standardize`(표준화) 순으로 고친다. 원문 JSONL은 항상 보존되므로 재수집 없이 재표준화가 가능하다.
-- `python -m tests.test_dedup_and_excel`(회귀 테스트 `tests/test_regressions.py` 포함)이 항상 통과해야 한다. 분류·중복정리·Excel·API 클라이언트 로직을 고쳤으면 실행해서 확인한다.
+- `python -m tests.test_dedup_and_excel`(회귀 테스트 `tests/test_regressions.py` 포함)과 `python -m tests.test_e2e_mock`(가짜 서버 통합 실행)이 항상 통과해야 한다. 파이프라인 코드를 고쳤으면 둘 다 실행해서 확인한다. 실제 API 응답으로 필드명이 다르게 확인되면 `tests/mock_g2b.py` 의 가짜 데이터도 같은 필드명으로 맞춘다.

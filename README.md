@@ -38,8 +38,11 @@ python -m g2b_costdb.pipeline doctor       # 파이썬·패키지·키 존재 �
 ```powershell
 python -m tests.test_dedup_and_excel     # 분류·중복정리·Excel 수식 점검 → sample_output/공사비DB_샘플.xlsx, 이어서 회귀 테스트 실행
 python -m tests.test_regressions         # 회귀 테스트만
+python -m tests.test_e2e_mock            # 가짜 나라장터 서버로 probe→collect→discover→research→dedup→attach→extract→excel 전 단계 통합 실행(약 20초)
+python -m tests.check_excel output/공사비DB.xlsx   # 생성된 Excel 의 수식 오류 점검(LibreOffice 또는 formulas 패키지)
 ```
-`sample_output/공사비DB_샘플.xlsx`는 **가상 공고**로 만든 스키마 예시다(실데이터 아님).
+`sample_output/공사비DB_샘플.xlsx`는 **가상 공고**로 만든 스키마 예시다(실데이터 아님). 통합 테스트의 가짜 서버(`tests/mock_g2b.py`)는
+포털 오류 응답(키 오류 XML, 데이터 없음 03), 면허제한 필드명 차이, HTML 응답 첨부, cp949 텍스트 등을 재현한다.
 
 ## 4. 주요 설계 포인트
 - **전량 수집 후 로컬 검색**: 키워드마다 API를 반복 호출하지 않고 월 단위로 공사 공고를 전량 내려받아 pandas에서 검색·재검색(호출량 최소화, 재분류 무제한).
