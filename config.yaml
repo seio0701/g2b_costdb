@@ -1,0 +1,72 @@
+# ── 나라장터 공사비 DB 파이프라인 설정 ─────────────────────────────
+api:
+  base_url: "https://apis.data.go.kr/1230000/ad/BidPublicInfoService"
+  service_key_env: "G2B_SERVICE_KEY"       # 공공데이터포털 일반 인증키(Decoding)를 환경변수로
+  num_of_rows: 999
+  timeout_sec: 60
+  max_retries: 5
+  sleep_between_calls_sec: 0.3
+  daily_call_budget: 950                   # 개발계정 1,000회/일 → 여유분
+  # 오퍼레이션명 (활용가이드 1.2 기준; 변경 시 여기만 수정)
+  ops:
+    cnstwk_list: "getBidPblancListInfoCnstwk"
+    cnstwk_search: "getBidPblancListInfoCnstwkPPSSrch"
+    cnstwk_bsis_amount: "getBidPblancListInfoCnstwkBsisAmount"
+    license_limit: "getBidPblancListInfoLicenseLimit"
+    chg_history: "getBidPblancListInfoChgHstryCnstwk"
+  license_query:                           # 면허제한 조회 파라미터(공고번호는 자동 추가). probe 결과 오류 10/11 이면 inqryDiv 값을 조정
+    inqryDiv: "2"
+
+period:
+  start: "2019-01"                          # 공사비정보광장 개통 시점
+  end: "2026-09"
+
+paths:
+  data_dir: "data"
+  raw_dir: "data/raw"
+  cache_db: "data/cache.sqlite"
+  text_dir: "data/text"
+  files_dir: "data/files"
+  out_dir: "output"
+  excel_name: "공사비DB.xlsx"
+
+# API 응답 필드 매핑 (probe 결과에 따라 조정). 왼쪽=내부명, 오른쪽=API 필드명
+fields:
+  bid_no: "bidNtceNo"
+  bid_ord: "bidNtceOrd"
+  name: "bidNtceNm"
+  kind: "ntceKindNm"          # 공고종류(일반/변경/취소/재공고 등)
+  re_notice: "reNtceYn"
+  reg_type: "rgstTyNm"
+  notice_dt: "bidNtceDt"
+  close_dt: "bidClseDt"
+  open_dt: "opengDt"
+  notice_inst: "ntceInsttNm"
+  demand_inst: "dminsttNm"
+  presmpt_price: "presmptPrce"            # 추정가격
+  main_cnstty: "mainCnsttyNm"             # 주공종명
+  site_region: "cnstrtsiteRgnNm"
+  detail_url: "bidNtceDtlUrl"
+  ref_no: "refNo"
+  prespec_no: "bfSpecRgstNo"
+  bsis_amount: "bssamt"                   # 기초금액 (BsisAmount 오퍼레이션)
+  license_name: "indstrytyNm"             # 면허제한 업종명 (probe 로 확인: lcnsLmtNm 등일 수 있음 — 코드가 후보를 자동 탐색)
+  attach_url_prefix: "ntceSpecDocUrl"     # ntceSpecDocUrl1..10
+  attach_name_prefix: "ntceSpecFileNm"    # ntceSpecFileNm1..10
+  attach_max: 10
+
+dedup:
+  price_change_warn_ratio: 0.30            # 대체 전후 추정가격 ±30% 초과 → 설계변경 의심
+  minor_notice_ratio: 0.30                 # 같은 프로젝트·공종에서 추정가격이 최대치의 30% 미만인 공고는 부대공사로 보고 대표에서 제외(경고 기록)
+
+llm:
+  model: "claude-sonnet-5"                 # https://docs.claude.com/en/api/overview 에서 최신 모델명 확인 (정확도 우선이면 claude-opus-5)
+  max_tokens: 8000                         # 사고(thinking) 토큰 포함. 잘리면 자동으로 2배 재시도
+  max_input_chars: 60000
+  api_key_env: "ANTHROPIC_API_KEY"
+  structured_output: true                  # JSON 스키마 강제(output_config.format). 오류 시 자동으로 일반 응답 파싱으로 폴백
+  usd_krw: 1400                            # extract 비용 견적용 환율
+
+verify:
+  price_diff_warn_ratio: 0.005             # API vs 문서 금액 차이 0.5% 초과 → 경고
+  vat_ratio: 0.10

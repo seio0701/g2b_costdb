@@ -1,0 +1,10 @@
+requests>=2.31
+pandas>=2.0
+pyarrow>=14.0
+openpyxl>=3.1
+PyYAML>=6.0
+olefile>=0.47
+pdfplumber>=0.11
+python-docx>=1.1
+anthropic>=0.40
+# 선택: pip install pyhwp  (hwp5txt CLI 폴백), pytesseract (스캔 PDF OCR), pywin32 (Windows 한컴 COM 폴백)
