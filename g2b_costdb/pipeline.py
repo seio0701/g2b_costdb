@@ -82,7 +82,7 @@ def _excel_busy(path: str) -> str:
 # ── doctor ──────────────────────────────────────────────────────
 def stage_doctor(cfg):
     print(f"Python {platform.python_version()} ({sys.executable}) / OS {platform.system()} {platform.release()}")
-    ok = platform.python_version_tuple() >= ("3", "10")
+    ok = tuple(int(x) for x in platform.python_version_tuple()[:2]) >= (3, 10)
     print(f"  파이썬 3.10 이상: {'OK' if ok else '아님 → 3.10+ 설치 필요'}")
     print("필수 패키지:")
     for mod, pkg in [("requests", "requests"), ("pandas", "pandas"), ("pyarrow", "pyarrow"), ("openpyxl", "openpyxl"),

@@ -9,6 +9,7 @@
 cd <저장소>\g2b_costdb                     # ★ 모든 명령은 이 폴더에서 실행
 pip install -r requirements.txt
 pip install pyhwp                          # 선택: HWP 폴백(hwp5txt)
+pip install formulas                       # 선택: Excel 수식 오류 점검(tests/check_excel.py). 없으면 Excel 에서 직접 열어 확인
 # 공공데이터포털 → 「조달청_나라장터 입찰공고정보서비스」 활용신청(자동승인) → 마이페이지에서 '일반 인증키(Decoding)' 복사
 setx G2B_SERVICE_KEY "발급받은키"           # 영구 설정(새 터미널·새 Claude Code 세션부터 적용). 키를 채팅·파일에 붙여 넣지 말 것
 $env:G2B_SERVICE_KEY="발급받은키"           # 지금 열려 있는 터미널에서 바로 쓰려면 이것도 실행
