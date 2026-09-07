@@ -1,6 +1,6 @@
 # PROMPTS.md — Claude Code에 붙여 넣을 세션별 지시문
 
-각 세션은 프로젝트 폴더(`<저장소>\g2b_costdb`, config.yaml 이 있는 곳)에서 `claude`를 실행한 뒤 아래 글을 그대로 붙여 넣는다.
+각 세션은 프로젝트 폴더(`C:\DB_WORK\g2b_costdb`, config.yaml 이 있는 곳)에서 `claude`를 실행한 뒤 아래 글을 그대로 붙여 넣는다.
 한 세션에 한 단계씩. 세션이 끝나면 Claude Code가 `HANDOFF.md`를 갱신하므로 다음 세션은 이어서 진행된다.
 API 키는 채팅에 붙이지 말고 PowerShell에서 `setx`로 직접 설정한다(README 0단계).
 

@@ -1,0 +1,7 @@
+# 수집 원문·캐시·첨부·결과물 (용량 크고 재생성 가능)
+data/
+output/
+*.sqlite
+__pycache__/
+*.pyc
+.env

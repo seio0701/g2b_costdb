@@ -29,27 +29,30 @@ git --version
 
 ## 1단계. 저장소 받기 → 프로젝트 폴더로 이동 (5분)
 
-### 방법 A. Git 으로 받기 (권장)
+이 프로젝트의 전용 저장소는 **https://github.com/seio0701/g2b_costdb** (비공개) 이다. 작업 폴더는 `C:\DB_WORK\g2b_costdb` 로 한다.
+
+### 방법 A. Git 으로 받기 (권장 — 이후 수정본을 `git pull` 한 번으로 받을 수 있음)
 ```powershell
-cd $HOME\Documents
-git clone -b claude/step-by-step-task-q2xkba https://github.com/seio0701/research-eval-web.git
-cd research-eval-web\g2b_costdb
+mkdir C:\DB_WORK
+git clone https://github.com/seio0701/g2b_costdb.git C:\DB_WORK\g2b_costdb
+cd C:\DB_WORK\g2b_costdb
 dir
 ```
 - 기대 결과: `dir` 목록에 `config.yaml`, `keywords.yaml`, `README.md`, `HANDOFF.md`, `g2b_costdb`, `tests` 가 보인다.
 - 비공개 저장소라 GitHub 로그인 창이 뜨면 본인 계정으로 로그인한다.
+- 나중에 수정본을 받을 때: `cd C:\DB_WORK\g2b_costdb` → `git pull` (`data\`, `output\` 은 Git 이 건드리지 않는다. 직접 고친 `config.yaml` 이 충돌하면 화면의 안내를 Claude Code 에 붙여 넣는다)
 
 ### 방법 B. ZIP 으로 받기
-1. 브라우저에서 https://github.com/seio0701/research-eval-web 접속 → 왼쪽 위 브랜치 선택(`main`)을 눌러 `claude/step-by-step-task-q2xkba` 선택
-2. 초록색 **Code** 버튼 → **Download ZIP** → 다운로드 폴더의 ZIP 을 "압축 풀기"
-3. PowerShell 에서 압축 푼 폴더 안의 `g2b_costdb` 로 이동:
+1. 브라우저에서 https://github.com/seio0701/g2b_costdb 접속 → 초록색 **Code** 버튼 → **Download ZIP**
+2. ZIP 을 `C:\DB_WORK` 에 "압축 풀기" → 폴더 이름을 `g2b_costdb` 로 바꾼다(`g2b_costdb-main` 으로 풀릴 수 있음)
+3. PowerShell 에서 이동:
 ```powershell
-cd $HOME\Downloads\research-eval-web-claude-step-by-step-task-q2xkba\g2b_costdb
+cd C:\DB_WORK\g2b_costdb
 dir
 ```
 
-> ★ 이후 모든 명령은 **이 `g2b_costdb` 폴더 안에서** 실행한다. PowerShell 을 새로 열 때마다 `cd <위 경로>` 를 먼저 한다.
-> 현재 폴더는 명령줄 맨 앞(`PS C:\Users\...\g2b_costdb>`)에서 확인할 수 있다.
+> ★ 이후 모든 명령은 **이 `g2b_costdb` 폴더 안에서** 실행한다. PowerShell 을 새로 열 때마다 `cd C:\DB_WORK\g2b_costdb` 를 먼저 한다.
+> 현재 폴더는 명령줄 맨 앞(`PS C:\DB_WORK\g2b_costdb>`)에서 확인할 수 있다.
 
 ---
 

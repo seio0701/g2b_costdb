@@ -8,7 +8,7 @@
   API 키(`G2B_SERVICE_KEY`)도 설정되어 있지 않았다. 따라서 `probe` 이후 단계는 모두 사용자 PC(Windows)에서 진행해야 한다.
 
 ## 2. 이번 세션에서 한 일
-- 파이프라인(`g2b_costdb/`)을 저장소에 편입하고 설계 문서를 `docs/나라장터_공사비DB_자동화_울트라플랜.md` 로 이동.
+- 파이프라인을 전용 저장소 **github.com/seio0701/g2b_costdb** 로 분리(research-eval-web 과 무관한 별도 프로젝트). 설계 문서는 `docs/나라장터_공사비DB_자동화_울트라플랜.md`, PC 설치 절차는 `docs/PC_설치_및_첫실행_가이드.md`.
 - 합성 데이터 테스트(`python -m tests.test_dedup_and_excel`) 통과 확인 → `sample_output/공사비DB_샘플.xlsx` 생성(수식 오류 0건, `formulas` 패키지로 평가).
 - 실데이터 첫 실행에서 터질 결함을 모듈별 적대적 검토(7개 관점 × 재현 검증)로 찾아 수정. 주요 항목:
   | 영역 | 수정 |
@@ -32,7 +32,7 @@
 - 데이터 산출물(`data/`, `output/`)은 아직 없음(API 미실행). `sample_output/공사비DB_샘플.xlsx` 는 가상 데이터 예시.
 
 ## 4. 다음 할 일 (사용자 PC, PROMPTS.md 세션 1)
-1. PowerShell 에서 `cd <저장소>\g2b_costdb` → `pip install -r requirements.txt` → `pip install pyhwp`
+1. PowerShell 에서 `git clone https://github.com/seio0701/g2b_costdb.git C:\DB_WORK\g2b_costdb` → `cd C:\DB_WORK\g2b_costdb` → `pip install -r requirements.txt` → `pip install pyhwp`
 2. 공공데이터포털에서 「조달청_나라장터 입찰공고정보서비스」 활용신청 후 **일반 인증키(Decoding)** 를 `setx G2B_SERVICE_KEY "키"` 로 설정(새 터미널 열기)
 3. `python -m g2b_costdb.pipeline doctor` → 모두 OK 인지 확인
 4. `python -m tests.test_dedup_and_excel` → `OK` 두 줄 확인, `python -m tests.test_e2e_mock` → `OK: 통합 실행 통과` 확인

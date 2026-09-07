@@ -6,7 +6,8 @@
 
 ## 1. 준비 (한 번만)
 ```powershell
-cd <저장소>\g2b_costdb                     # ★ 모든 명령은 이 폴더에서 실행
+git clone https://github.com/seio0701/g2b_costdb.git C:\DB_WORK\g2b_costdb   # 처음 한 번
+cd C:\DB_WORK\g2b_costdb                   # ★ 모든 명령은 이 폴더에서 실행 (config.yaml 이 있는 곳)
 pip install -r requirements.txt
 pip install pyhwp                          # 선택: HWP 폴백(hwp5txt)
 pip install formulas                       # 선택: Excel 수식 오류 점검(tests/check_excel.py). 없으면 Excel 에서 직접 열어 확인
