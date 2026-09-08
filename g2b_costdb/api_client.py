@@ -267,10 +267,20 @@ class G2BClient:
                 total = None  # totalCount 없음 → 짧은 페이지가 나올 때까지 계속
                 if page == 1 and items:
                     log.warning("%s: 응답에 totalCount 가 없어 페이지가 짧아질 때까지 계속 조회합니다", op)
+            if page == 1 and items and len(items) < self.cfg.num_of_rows and (total or 0) > len(items):
+                log.info("%s: 서버가 페이지당 %d건만 반환(요청 %d) → 페이지 수가 늘어남", op, len(items), self.cfg.num_of_rows)
             for it in items:
                 yield it
             seen += len(items)
-            if not items or len(items) < self.cfg.num_of_rows or (total is not None and seen >= total):
+            if not items:
+                break
+            if total is not None:
+                if seen >= total:
+                    break
+            elif len(items) < self.cfg.num_of_rows:
+                break
+            if page > 5000:  # 안전장치
+                log.warning("%s: 페이지 5000 초과 — 중단", op)
                 break
             page += 1
 

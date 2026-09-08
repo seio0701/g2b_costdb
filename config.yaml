@@ -14,7 +14,8 @@ api:
     cnstwk_bsis_amount: "getBidPblancListInfoCnstwkBsisAmount"
     license_limit: "getBidPblancListInfoLicenseLimit"
     chg_history: "getBidPblancListInfoChgHstryCnstwk"
-  license_query:                           # 면허제한 조회 파라미터(공고번호는 자동 추가). probe 결과 오류 10/11 이면 inqryDiv 값을 조정
+  use_license_limit: false                 # true 면 research 단계에서 공고별 면허제한 조회(호출량 큼). 목록 응답의 주공종명·부공종명이 업종명이므로 기본 false
+  license_query:                           # 면허제한 조회 파라미터(공고번호는 자동 추가). probe 가 여러 조회구분을 시험해 결과를 보여줌
     inqryDiv: "2"
 
 period:
@@ -50,6 +51,22 @@ fields:
   ref_no: "refNo"
   prespec_no: "bfSpecRgstNo"
   bsis_amount: "bssamt"                   # 기초금액 (BsisAmount 오퍼레이션)
+  bsis_pure_cost: "bssAmtPurcnstcst"      # 기초금액 순공사비
+  # ── 2026-09 probe 로 실제 응답에서 확인된 추가 필드 (없으면 공란 처리) ──
+  bdgt_amt: "bdgtAmt"                     # 예산금액(사업예산)
+  vat: "VAT"                              # 부가가치세
+  govsply_amt: "govsplyAmt"               # 관급자재 금액(합계)
+  contractor_govsply: "contrctrcnstrtnGovsplyMtrlAmt"   # 도급자 설치 관급자재 금액(도급자관급액)
+  gov_govsply: "govcnstrtnGovsplyMtrlAmt"               # 관급자 설치 관급자재 금액(관급자관급액)
+  prev_bid_no: "befBidBbancNo"            # 이전 입찰공고번호(재공고 연결)
+  chg_reason: "chgNtceRsn"                # 변경공고 사유
+  demand_inst_cd: "dminsttCd"             # 수요기관 코드
+  sub_cnstty_prefix: "subsiCnsttyNm"      # 부공종명 1..9
+  sub_cnstty_max: 9
+  spt_url_prefix: "sptDscrptDocUrl"       # 현장설명서 첨부 URL 1..5
+  spt_max: 5
+  std_notice_url: "stdNtceDocUrl"         # 표준공고문 URL
+  sucsfbid_rate: "sucsfbidLwltRate"       # 낙찰하한율(참고)
   license_name: "indstrytyNm"             # 면허제한 업종명 (probe 로 확인: lcnsLmtNm 등일 수 있음 — 코드가 후보를 자동 탐색)
   attach_url_prefix: "ntceSpecDocUrl"     # ntceSpecDocUrl1..10
   attach_name_prefix: "ntceSpecFileNm"    # ntceSpecFileNm1..10

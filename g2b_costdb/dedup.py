@@ -141,6 +141,24 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
             d.at[i, "대표선정사유"] = "구차수(이후 차수로 대체)"
             d.at[i, "대체공고번호"] = d.at[i, "공고번호"]
 
+    # 3) API 의 이전공고번호(befBidBbancNo) 연결: B 가 A 를 이전 공고로 가리키면 A 는 B 에 대체됨(프로젝트키가 달라도)
+    if "이전공고번호" in d.columns:
+        prev = d[d["최신차수여부"] & d["이전공고번호"].map(lambda v: bool(v) and str(v).strip() not in ("", "nan", "None"))]
+        for _, b in prev.iterrows():
+            targets = d.index[(d["시설ID"] == b["시설ID"]) & (d["공고번호"].astype(str) == str(b["이전공고번호"]).strip()) & d["최신여부"]]
+            for i in targets:
+                if i == b.name:
+                    continue
+                d.at[i, "최신여부"] = False
+                d.at[i, "대체공고번호"] = b["공고번호"]
+                d.at[i, "대표선정사유"] = "대체됨(API 이전공고번호 연결)"
+                logs.append({"공고번호": d.at[i, "공고번호"], "항목": "이전공고번호 연결", "판정": "참고",
+                             "비고": f"{b['공고번호']} 의 이전 공고로 지정되어 대표에서 제외"})
+                # 대체한 공고가 대표가 아니면(소액 등) 대표로 승격
+                if not d.at[b.name, "최신여부"] and d.at[b.name, "공고종류"] != "취소":
+                    d.at[b.name, "최신여부"] = True
+                    d.at[b.name, "대표선정사유"] = "재공고(API 이전공고번호 연결)"
+
     latest = d[d["최신여부"]].copy()
     d = d.drop(columns=["_ord", "_dt", "_price"])
     latest = latest.drop(columns=["_ord", "_dt", "_price"])

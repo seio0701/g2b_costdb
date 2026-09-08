@@ -404,6 +404,20 @@ def extract_zip(path: str) -> Tuple[str, str]:
     return "\n\n".join(out), "zip(" + ",".join(sorted(set(parsers))) + ")"
 
 
+_EXT_PREF = {".pdf": 0, ".hwpx": 1, ".hwp": 2, ".docx": 3, ".xlsx": 4, ".xlsm": 4, ".zip": 5, ".txt": 6}
+
+
+def _stem_key(pr: int, url: str, name: str):
+    stem, _ = os.path.splitext(name.lower()) if name else ("", "")
+    return (pr, stem) if stem else (pr, url)
+
+
+def _dedupe_same_stem(cands):
+    """같은 문서가 hwp·pdf 로 중복 첨부된 경우(예: '공고문.hwp' + '공고문.pdf') 추출 신뢰도가 높은 형식이 먼저 오도록 정렬만 한다.
+    (실제 건너뛰기는 process_notice_attachments 에서 앞 형식의 추출이 성공했을 때만 수행 → 실패 시 다른 형식으로 폴백)"""
+    return sorted(cands, key=lambda c: (c[0], _stem_key(*c)[1] or c[1], _EXT_PREF.get(os.path.splitext(c[2].lower())[1] if c[2] else "", 9)))
+
+
 # ── 공고 단위 처리 ───────────────────────────────────────────────
 def process_notice_attachments(row: Dict, files_dir: str, text_dir: str, attach_max: int = 10,
                                max_files: int = 4) -> Tuple[str, List[Dict]]:
@@ -419,10 +433,23 @@ def process_notice_attachments(row: Dict, files_dir: str, text_dir: str, attach_
         pr = file_priority(name or url)
         if pr is not None:
             cands.append((pr, url, name))
+    # 현장설명서 첨부(sptDscrptDocUrl1..5): 이름 없음 → 우선순위 20, 실제 이름은 Content-Disposition 으로
+    for i in range(1, 6):
+        url = str(row.get(f"현장설명서URL{i}") or "").strip()
+        if len(url) >= 5 and url.lower() not in _EMPTY:
+            cands.append((20, url, ""))
     cands.sort(key=lambda x: x[0])
+    cands = _dedupe_same_stem(cands)
     notes, texts = [], []
     os.makedirs(text_dir, exist_ok=True)
-    for pr, url, name in cands[:max_files]:
+    done_stems, n_proc = set(), 0
+    for pr, url, name in cands:
+        if n_proc >= max_files:
+            break
+        key = _stem_key(pr, url, name)
+        if key in done_stems:      # 같은 문서의 다른 형식(hwp↔pdf)은 앞 형식이 성공했으면 건너뜀
+            continue
+        n_proc += 1
         note = {"공고번호": bid_no, "파일명": name, "우선순위": pr, "URL": url, "다운로드": "N", "추출성공": "N",
                 "추출글자수": 0, "파서": "", "오류": ""}
         path = download(url, os.path.join(files_dir, bid_no), hint_name=name)
@@ -439,6 +466,7 @@ def process_notice_attachments(row: Dict, files_dir: str, text_dir: str, attach_
             with open(tpath, "w", encoding="utf-8") as f:
                 f.write(text)
             texts.append(f"===== [{os.path.basename(path)}] =====\n{text}")
+            done_stems.add(key)
         except Exception as e:  # noqa: BLE001
             note["오류"] = str(e)[:200]
         notes.append(note)

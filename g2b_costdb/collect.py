@@ -19,7 +19,7 @@ from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 
-from .api_client import ApiConfig, ApiError, DailyBudgetExceeded, G2BClient
+from .api_client import ApiConfig, ApiError, DailyBudgetExceeded, G2BClient, explain_code
 from .classify import load_config, parse_amount
 
 log = logging.getLogger(__name__)
@@ -279,22 +279,31 @@ def probe(cfg: dict, ym: str) -> None:
             print("[매핑 OK] config.yaml fields 의 관련 항목이 모두 응답에 존재합니다.")
         if op_key == "cnstwk_list" and f["bid_no"] in items[0]:
             first_bid_no = str(items[0][f["bid_no"]])
-    # 면허제한 (공고번호 1건)
+    # 면허제한: 조회구분(inqryDiv) 변형을 차례로 시험하여 결과가 나오는 파라미터를 안내 (config api.use_license_limit 가 false 면 참고용)
     if first_bid_no:
         op = cfg["api"]["ops"]["license_limit"]
-        params = license_query_params(cfg, first_bid_no)
-        try:
-            body = client.call(op, params, use_cache=False)
+        variants = [dict(cfg["api"].get("license_query") or {"inqryDiv": "2"}),
+                    {"inqryDiv": "3"}, {"inqryDiv": "1", "inqryBgnDt": bgn, "inqryEndDt": end}]
+        seen_ok = None
+        for v in variants:
+            params = dict(v); params[f["bid_no"]] = first_bid_no; params.setdefault("pageNo", "1"); params.setdefault("numOfRows", "100")
+            try:
+                body = client.call(op, params, use_cache=False)
+            except ApiError as e:
+                print(f"\n=== {op} params={v} 실패: API 오류 {e.code} ({explain_code(e.code)})")
+                continue
             items = client._items(body)
-            print(f"\n=== {op} (공고번호 {first_bid_no}, params={params}) totalCount={body.get('totalCount')} ===")
+            print(f"\n=== {op} params={v} (공고번호 {first_bid_no}) totalCount={body.get('totalCount')} 항목 {len(items)}건 ===")
             if items:
                 keys = sorted(set().union(*[it.keys() for it in items]))
                 print("필드:", keys)
-                print("표본:", json.dumps(items[0], ensure_ascii=False, indent=1)[:1500])
+                print("표본:", json.dumps(items[0], ensure_ascii=False, indent=1)[:1200])
                 col = next((c for c in [f.get("license_name", "")] + LICENSE_NAME_CANDIDATES if c and c in keys), None)
                 print(f"[업종명 필드] {'config 매핑 ' + f.get('license_name', '') + ' 존재' if f.get('license_name') in keys else ('후보 ' + col + ' 발견 → config.yaml fields.license_name 을 이 값으로 수정' if col else '후보 없음 → 표본에서 업종명 필드를 찾아 config.yaml fields.license_name 수정')}")
-            else:
-                print("항목 없음 — 이 공고에 면허제한이 없거나 조회 파라미터(inqryDiv)가 다를 수 있음. config.yaml api.license_query 확인")
-        except ApiError as e:
-            print(f"\n=== {op} 실패: {e}\n→ config.yaml api.license_query 의 inqryDiv 값을 활용가이드에 맞게 조정하세요.")
+                seen_ok = v
+                break
+        if seen_ok:
+            print(f"[면허제한] 결과가 나온 파라미터: {seen_ok} → 사용하려면 config.yaml api.license_query 를 이 값으로, api.use_license_limit 를 true 로")
+        else:
+            print("[면허제한] 어떤 조회구분으로도 항목이 없음 — 이 공고에 면허제한이 없을 수 있음. 공종 분류는 주공종명·부공종명으로 충분하므로 use_license_limit 는 false 유지")
     print(f"\n오늘 API 호출 {client.calls_today()}회 (예산 {cfg['api']['daily_call_budget']})")

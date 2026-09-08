@@ -61,6 +61,7 @@ def run():
     cfg["api"]["base_url"] = base + "/BidPublicInfoService"
     cfg["api"]["sleep_between_calls_sec"] = 0
     cfg["api"]["max_retries"] = 2
+    cfg["api"]["use_license_limit"] = True                          # 가짜 서버로 면허제한 경로도 검증
     cfg["period"] = {"start": "2024-01", "end": "2024-04"}          # 2024-04 는 데이터 없음(03) 경로
     cfg["paths"] = {"data_dir": "data", "raw_dir": "data/raw", "cache_db": "data/cache.sqlite", "text_dir": "data/text",
                     "files_dir": "data/files", "out_dir": "output", "excel_name": "공사비DB.xlsx"}
@@ -110,7 +111,7 @@ def run():
         latest = pd.read_parquet(data("notices_latest.parquet"))
         rep = latest.set_index("프로젝트키")
         gid = ids_before["가상군"]
-        assert rep.loc[f"{gid}-N|건축|", "공고번호"] == "R24010001" and rep.loc[f"{gid}-N|건축|", "공고차수"] == "01"
+        assert rep.loc[f"{gid}-N|건축|", "공고번호"] == "R24010001" and rep.loc[f"{gid}-N|건축|", "공고차수"] == "001"
         assert rep.loc[f"{gid}-N|소방|", "공고번호"] == "R24020004"
         assert "R24030005" not in set(latest["공고번호"]) and "소액 공고 분리" in out
         assert len(latest) == 5, latest[["프로젝트키", "공고번호"]]
@@ -118,11 +119,11 @@ def run():
         out = _run(["attach", "--config", cfg_path])
         texts = json.load(open(data("texts.json"), encoding="utf-8"))
         notes = pd.read_parquet(data("notes_attach.parquet"))
-        assert "연면적 15,200㎡" in texts["R24010001-01"] and "관급자관급액" in texts["R24010001-01"] and "건축면적 6,300㎡" in texts["R24010001-01"]
-        assert "추정가격 2,600,000,000원" in texts["R24010002-00"], "cp949 텍스트 복원"
+        assert "연면적 15,200㎡" in texts["R24010001-001"] and "관급자관급액" in texts["R24010001-001"] and "건축면적 6,300㎡" in texts["R24010001-001"], "현장설명서(sptDscrptDocUrl) 포함"
+        assert "추정가격 2,600,000,000원" in texts["R24010002-000"], "cp949 텍스트 복원"
         html_note = notes[notes["URL"].str.endswith("login.html")].iloc[0]
         assert html_note["다운로드"] == "N", html_note.to_dict()
-        assert "객석 1,200석" in texts["R24020006-00"]
+        assert "객석 1,200석" in texts["R24020006-000"]
         n_file_calls = sum(v for k, v in server.calls.items() if k.startswith("file:"))
         _run(["attach", "--config", cfg_path])
         assert sum(v for k, v in server.calls.items() if k.startswith("file:")) == n_file_calls, "이미 처리한 공고는 재요청 없음"
@@ -133,7 +134,7 @@ def run():
         with mock.patch.object(extract_llm, "extract_with_claude", side_effect=_fake_extract):
             out = _run(["extract", "--yes", "--config", cfg_path])
         docs = json.load(open(data("llm_docs.json"), encoding="utf-8"))
-        assert docs["R24010001-01"]["연면적_m2"] == 15200.0 and docs["R24010001-01"]["관급자관급액_원"] == 2100000000
+        assert docs["R24010001-001"]["연면적_m2"] == 15200.0 and docs["R24010001-001"]["관급자관급액_원"] == 2100000000
         ver = pd.read_parquet(data("logs_verify.parquet"))
         assert ((ver["공고번호"] == "R24010001") & (ver["항목"] == "추정가격") & (ver["판정"] == "정상")).any(), ver
         assert set(ver["판정"]) <= {"정상", "경고", "오류", "참고", "미확인"}
@@ -144,6 +145,13 @@ def run():
         import openpyxl
         wb = openpyxl.load_workbook(xlsx)
         assert wb["04_공사비DB_공종별"].max_row - 1 == len(latest) and wb["01_시설마스터"].max_row - 1 == 3
+        ws4 = wb["04_공사비DB_공종별"]; h4 = [c.value for c in ws4[1]]
+        r4 = next(r for r in range(2, ws4.max_row + 1) if ws4.cell(r, h4.index("공고번호") + 1).value == "R24010001")
+        assert ws4.cell(r4, h4.index("관급자관급액_API") + 1).value == 2100000000, "API 관급자재 금액이 04 시트에"
+        assert ws4.cell(r4, h4.index("예산금액_API") + 1).value == 35100000000
+        hist_df = pd.read_parquet(data("notices_hist.parquet"))
+        assert hist_df[hist_df["공고번호"] == "R24020004"]["이전공고번호"].iloc[0] == "R24010003" and \
+            set(hist_df[hist_df["공고번호"] == "R24010001"]["부공종명"]) <= {"토목공사업 / 조경공사업", "토목공사업"}
         assert wb["06_검증로그"].max_row > 1 and wb["07_추출노트"].max_row > 1
         from tests.check_excel import check
         rc = check(xlsx)

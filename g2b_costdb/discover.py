@@ -64,13 +64,34 @@ def standardize(df_raw: pd.DataFrame, cfg: dict, bsis: Optional[pd.DataFrame] = 
         "참조번호": g("ref_no"),
         "사전규격번호": g("prespec_no"),
     })
+    # 실제 응답에서 확인된 추가 필드(없으면 공란)
+    opt = lambda k: _s(df_raw[f[k]]) if (k in f and f[k] in df_raw.columns) else empty
+    df["수요기관코드"] = opt("demand_inst_cd")
+    df["예산금액"] = opt("bdgt_amt").map(parse_amount)
+    df["부가세_API"] = opt("vat").map(parse_amount)
+    df["관급자재_API"] = opt("govsply_amt").map(parse_amount)
+    df["도급자관급액_API"] = opt("contractor_govsply").map(parse_amount)
+    df["관급자관급액_API"] = opt("gov_govsply").map(parse_amount)
+    df["이전공고번호"] = opt("prev_bid_no")
+    df["변경사유"] = opt("chg_reason")
+    df["낙찰하한율"] = opt("sucsfbid_rate")
+    df["표준공고문URL"] = opt("std_notice_url")
+    subs = []
+    for i in range(1, int(f.get("sub_cnstty_max", 0) or 0) + 1):
+        c = f"{f.get('sub_cnstty_prefix', '')}{i}"
+        if c in df_raw.columns:
+            subs.append(_s(df_raw[c]))
+    df["부공종명"] = [" / ".join(x for x in row if x) for row in zip(*subs)] if subs else ""
+    for i in range(1, int(f.get("spt_max", 0) or 0) + 1):
+        c = f"{f.get('spt_url_prefix', '')}{i}"
+        df[f"현장설명서URL{i}"] = _s(df_raw[c]) if c in df_raw.columns else ""
     # 첨부파일
     for i in range(1, int(f["attach_max"]) + 1):
         u, nm = f"{f['attach_url_prefix']}{i}", f"{f['attach_name_prefix']}{i}"
         df[f"첨부URL{i}"] = _s(df_raw[u]) if u in df_raw.columns else ""
         df[f"첨부파일명{i}"] = _s(df_raw[nm]) if nm in df_raw.columns else ""
     df["첨부파일수"] = sum((df[f"첨부URL{i}"].str.len() > 4).astype(int) for i in range(1, int(f["attach_max"]) + 1))
-    df["공고차수"] = df["공고차수"].map(lambda s: s.zfill(2) if s.isdigit() else (s or "00"))
+    df["공고차수"] = df["공고차수"].map(lambda s: s.zfill(3) if s.isdigit() else (s or "000"))   # 나라장터 차수는 '000' 3자리
     df["공고키"] = df["공고번호"] + "-" + df["공고차수"]
 
     # 기초금액 병합(공고번호+차수 기준, 없으면 공고번호)
@@ -79,8 +100,8 @@ def standardize(df_raw: pd.DataFrame, cfg: dict, bsis: Optional[pd.DataFrame] = 
         b = bsis.copy()
         if "_bsis_amount" not in b.columns:
             b["_bsis_amount"] = b[f["bsis_amount"]].map(parse_amount) if f["bsis_amount"] in b.columns else None
-        ords = _s(b[f["bid_ord"]]) if f["bid_ord"] in b.columns else pd.Series(["00"] * len(b), index=b.index)
-        b["_k"] = _s(b[f["bid_no"]]) + "-" + ords.map(lambda s: s.zfill(2) if s.isdigit() else (s or "00"))
+        ords = _s(b[f["bid_ord"]]) if f["bid_ord"] in b.columns else pd.Series(["000"] * len(b), index=b.index)
+        b["_k"] = _s(b[f["bid_no"]]) + "-" + ords.map(lambda s: s.zfill(3) if s.isdigit() else (s or "000"))
         b = b[b["_bsis_amount"].notna()]
         m = b.drop_duplicates("_k", keep="last").set_index("_k")["_bsis_amount"]
         df["기초금액"] = df["공고키"].map(m)

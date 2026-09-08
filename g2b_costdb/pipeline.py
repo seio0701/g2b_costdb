@@ -201,9 +201,16 @@ def stage_research(cfg):
     hits = discover.research_by_facility(std, reviewed)
     if hits.empty:
         raise SystemExit("재검색 결과 없음")
-    # 면허제한: 재검색 공고에 대해서만 조회 → 공종 재분류
-    lic = collect.collect_license_limits(cfg, sorted(hits["공고번호"].astype(str).unique()))
-    col = collect.license_name_column(cfg, lic)
+    # 면허제한: config api.use_license_limit 가 true 일 때만 공고별 조회(호출량 큼). 기본은 목록 응답의 주공종명·부공종명(업종명) 사용
+    lic, col = None, None
+    if cfg["api"].get("use_license_limit", False):
+        lic = collect.collect_license_limits(cfg, sorted(hits["공고번호"].astype(str).unique()))
+        col = collect.license_name_column(cfg, lic)
+    if not col and "부공종명" in hits.columns:
+        from .classify import classify_trade
+        tr = [classify_trade(n, (mc or "") + (" / " + sub if sub else ""), l)
+              for n, mc, sub, l in zip(hits["공고명"], hits["주공종명"], hits["부공종명"], hits["면허제한업종"])]
+        hits["공종"], hits["공종근거"] = [t[0] for t in tr], [t[1] for t in tr]
     if col:
         m = lic.groupby("_bid_no")[col].apply(lambda s: " / ".join(sorted(set(str(x) for x in s if x))))
         hits["면허제한업종"] = hits["공고번호"].astype(str).map(m).fillna("")
@@ -214,8 +221,10 @@ def stage_research(cfg):
             print(f"[안내] 면허제한 업종명 필드로 '{col}' 를 사용했습니다. config.yaml fields.license_name 을 이 값으로 바꾸세요.")
     elif lic is not None and not lic.empty:
         print(f"[경고] 면허제한 응답에서 업종명 필드를 찾지 못했습니다. 응답 컬럼: {list(lic.columns)[:15]} → config.yaml fields.license_name 확인")
+    elif cfg["api"].get("use_license_limit", False):
+        print("[안내] 면허제한 정보 없음(조회 실패 또는 예산 소진) → 공종은 주공종명·부공종명·공고명 규칙으로 분류")
     else:
-        print("[안내] 면허제한 정보 없음(조회 실패 또는 예산 소진) → 공종은 주공종명·공고명 규칙으로 분류")
+        print("[안내] 공종은 목록 응답의 주공종명·부공종명(업종명)과 공고명 규칙으로 분류 (면허제한 API 미사용: config api.use_license_limit)")
     hits.to_parquet(_p(cfg, "notices_research.parquet"), index=False)
     print(f"재검색 공고 {len(hits)}건 저장 (시설 {hits['시설ID'].nunique()}개)")
     piv = hits.pivot_table(index=["시설ID", "시설명"], columns="공종", values="공고번호", aggfunc="nunique", fill_value=0)
@@ -342,6 +351,8 @@ def assemble_trade_table(latest: pd.DataFrame, docs: dict) -> pd.DataFrame:
             "공종": r["공종"], "공고번호": r["공고번호"], "공고차수": r["공고차수"],
             "공고명": r["공고명"], "공고일시": r["공고일시"], "수요기관": r["수요기관"],
             "추정가격_API": r.get("추정가격"), "기초금액_API": r.get("기초금액"),
+            "관급자재_API": r.get("관급자재_API"), "도급자관급액_API": r.get("도급자관급액_API"), "관급자관급액_API": r.get("관급자관급액_API"),
+            "예산금액_API": r.get("예산금액"),
             "도급자관급액_문서": d.get("도급자관급액_원"), "관급자관급액_문서": d.get("관급자관급액_원"),
             "공사기간_일_문서": d.get("공사기간_일"), "추정가격_문서": d.get("추정가격_원"), "기초금액_문서": d.get("기초금액_원"),
             "신뢰도": d.get("신뢰도"), "근거문구": json.dumps(ev, ensure_ascii=False) if ev else "",

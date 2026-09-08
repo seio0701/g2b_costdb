@@ -53,18 +53,23 @@ def _docx(paragraphs: List[str]) -> bytes:
 def build_dataset(base: str) -> Dict:
     """가상 공고 데이터셋. base: 파일 서버 URL 접두어."""
     f = lambda name: f"{base}/files/{quote(name)}"
-    common = dict(rgstTyNm="일반", bidClseDt="", opengDt="", refNo="", bfSpecRgstNo="", bidNtceDtlUrl="https://example.invalid/detail")
+    common = dict(rgstTyNm="조달청 또는 나라장터 자체 공고건", bidClseDt="", opengDt="", refNo="", bfSpecRgstNo="",
+                  bidNtceDtlUrl="https://example.invalid/detail", dminsttCd="", bdgtAmt="", VAT="", govsplyAmt="0",
+                  contrctrcnstrtnGovsplyMtrlAmt="0", govcnstrtnGovsplyMtrlAmt="0", befBidBbancNo="", chgNtceRsn="",
+                  subsiCnsttyNm1="", sptDscrptDocUrl1="", stdNtceDocUrl="", sucsfbidLwltRate="")
     N = [
         # 가상군 문화예술회관 — 건축 본공사(첨부: 공고문.hwpx + 현장설명서.docx)
-        dict(common, bidNtceNo="R24010001", bidNtceOrd="00", bidNtceNm="가상군 문화예술회관 건립공사", ntceKindNm="일반공고", reNtceYn="N",
+        dict(common, bidNtceNo="R24010001", bidNtceOrd="000", bidNtceNm="가상군 문화예술회관 건립공사", ntceKindNm="등록공고", reNtceYn="N",
              bidNtceDt="2024-01-10 10:00:00", ntceInsttNm="가상군", dminsttNm="가상군", presmptPrce="30000000000", mainCnsttyNm="건축공사",
              cnstrtsiteRgnNm="전라남도 가상군", ntceSpecDocUrl1=f("입찰공고문.hwpx"), ntceSpecFileNm1="입찰공고문.hwpx",
-             ntceSpecDocUrl2=f("현장설명서.docx"), ntceSpecFileNm2="현장설명서.docx"),
-        # 같은 공고의 변경 차수(01)
-        dict(common, bidNtceNo="R24010001", bidNtceOrd="01", bidNtceNm="가상군 문화예술회관 건립공사 [변경]", ntceKindNm="변경공고", reNtceYn="N",
+             sptDscrptDocUrl1=f("현장설명서.docx"), dminsttCd="4790000", bdgtAmt="35100000000", VAT="3000000000",
+             govsplyAmt="2100000000", govcnstrtnGovsplyMtrlAmt="2100000000", subsiCnsttyNm1="토목공사업", subsiCnsttyNm2="조경공사업"),
+        # 같은 공고의 변경 차수(001)
+        dict(common, bidNtceNo="R24010001", bidNtceOrd="001", bidNtceNm="가상군 문화예술회관 건립공사 [변경]", ntceKindNm="변경공고", reNtceYn="N",
              bidNtceDt="2024-01-17 10:00:00", ntceInsttNm="가상군", dminsttNm="가상군", presmptPrce="30000000000", mainCnsttyNm="건축공사",
              cnstrtsiteRgnNm="전라남도 가상군", ntceSpecDocUrl1=f("입찰공고문.hwpx"), ntceSpecFileNm1="입찰공고문.hwpx",
-             ntceSpecDocUrl2=f("현장설명서.docx"), ntceSpecFileNm2="현장설명서.docx"),
+             sptDscrptDocUrl1=f("현장설명서.docx"), dminsttCd="4790000", bdgtAmt="35100000000", VAT="3000000000",
+             govsplyAmt="2100000000", govcnstrtnGovsplyMtrlAmt="2100000000", subsiCnsttyNm1="토목공사업", chgNtceRsn="공고 기간 정정"),
         # 전기 — 차수가 정수 0, 추정가격이 숫자형(타입 혼재), 첨부는 cp949 txt
         dict(common, bidNtceNo="R24010002", bidNtceOrd=0, bidNtceNm="가상군 문화예술회관 건립 전기공사", ntceKindNm="일반공고", reNtceYn="N",
              bidNtceDt="2024-01-12 10:00:00", ntceInsttNm="가상군", dminsttNm="가상군", presmptPrce=2600000000, mainCnsttyNm="전기공사",
@@ -73,7 +78,7 @@ def build_dataset(base: str) -> Dict:
         dict(common, bidNtceNo="R24010003", bidNtceOrd="00", bidNtceNm="가상군 문화예술회관 건립 소방시설공사", ntceKindNm="취소공고", reNtceYn="N",
              bidNtceDt="2024-01-15 10:00:00", ntceInsttNm="가상군", dminsttNm="가상군", presmptPrce="", mainCnsttyNm="소방공사",
              cnstrtsiteRgnNm="전라남도 가상군"),
-        dict(common, bidNtceNo="R24020004", bidNtceOrd="00", bidNtceNm="가상군 문화예술회관 건립 소방시설공사(취소 후 재공고)", ntceKindNm="일반공고", reNtceYn="Y",
+        dict(common, bidNtceNo="R24020004", bidNtceOrd="00", bidNtceNm="가상군 문화예술회관 건립 소방시설공사(취소 후 재공고)", ntceKindNm="재공고", reNtceYn="Y", befBidBbancNo="R24010003",
              bidNtceDt="2024-02-20 10:00:00", ntceInsttNm="가상군", dminsttNm="가상군", presmptPrce="530000000", mainCnsttyNm="소방공사",
              cnstrtsiteRgnNm="전라남도 가상군"),
         # 부대공사(소액) — 대표를 대체하면 안 됨
@@ -104,8 +109,8 @@ def build_dataset(base: str) -> Dict:
     for n in N:
         p = str(n["presmptPrce"]).strip()
         if p and n["bidNtceNo"] != "R24020007":          # 다른군 건은 기초금액 없음(문서 폴백 검증용)
-            bsis.append(dict(bidNtceNo=n["bidNtceNo"], bidNtceOrd=str(n["bidNtceOrd"]).zfill(2), bssamt=str(int(int(p) * 1.1)),
-                             bidNtceDt=n["bidNtceDt"]))
+            bsis.append(dict(bidNtceNo=n["bidNtceNo"], bidNtceOrd=str(n["bidNtceOrd"]).zfill(3), bssamt=str(int(int(p) * 1.1)),
+                             bssAmtPurcnstcst=str(int(int(p) * 0.9)), bidNtceDt=n["bidNtceDt"]))
     lic = {
         "R24010001": [{"lcnsLmtNm": "건축공사업"}, {"lcnsLmtNm": "토목건축공사업"}],
         "R24010002": [{"lcnsLmtNm": "전기공사업"}],

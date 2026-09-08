@@ -269,6 +269,17 @@ def cross_verify(bid_no: str, api_row: Dict, doc: Dict, warn_ratio: float = 0.00
     fl = _num(doc.get("지상층수"))
     if fl is not None and fl > 60:
         logs.append({"공고번호": bid_no, "항목": "층수 범위", "문서값": fl, "판정": "경고", "비고": "층수 오독 의심"})
+    for item, ak, dk in (("도급자관급액", "도급자관급액_API", "도급자관급액_원"), ("관급자관급액", "관급자관급액_API", "관급자관급액_원")):
+        a, dv = _num(api_row.get(ak)), _num(doc.get(dk))
+        if a is None and dv is None:
+            continue
+        if a is not None and dv is not None and (a or dv):
+            base = a if a else dv
+            r = (dv - a) / base
+            logs.append({"공고번호": bid_no, "항목": item, "API값": a, "문서값": dv, "차이": dv - a, "차이율": round(r, 5),
+                         "판정": "정상" if abs(r) <= 0.01 else "경고", "비고": "" if abs(r) <= 0.01 else "관급자재 금액 불일치(API 우선 사용)"})
+        else:
+            logs.append({"공고번호": bid_no, "항목": item, "API값": a, "문서값": dv, "판정": "참고", "비고": "한쪽만 존재 → 존재하는 값 사용"})
     tot = _num(doc.get("총공사금액_원"))
     if tot and b:
         comp = b + (_num(doc.get("도급자관급액_원")) or 0) + (_num(doc.get("관급자관급액_원")) or 0)

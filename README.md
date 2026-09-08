@@ -24,10 +24,10 @@ python -m g2b_costdb.pipeline doctor       # 파이썬·패키지·키 존재 �
 |---|---|---|---|
 | 환경 점검 | `python -m g2b_costdb.pipeline doctor` | 콘솔 보고 | 1회(키 없이 연결 확인) |
 | 필드 확인 | `python -m g2b_costdb.pipeline probe --ym 2026-08` | 응답 필드명·표본 + `config.yaml fields` 매핑 대조 결과(없는 항목 표시), 면허제한 표본 | 3회 |
-| S1 전량수집 | `python -m g2b_costdb.pipeline collect` | `data/raw/*.jsonl`, `data/notices_all.parquet`, `data/bsis_all.parquet` | 월×페이지(약 800~1,100회). 일일예산 초과 시 `[미완료]` 표시와 남은 월을 보여주며 정상 종료 → 다음날 같은 명령 |
+| S1 전량수집 | `python -m g2b_costdb.pipeline collect` | `data/raw/*.jsonl`, `data/notices_all.parquet`, `data/bsis_all.parquet` | 월×페이지(2026-08 기준 공고 약 8,800건=9페이지, 기초금액 약 6,200건=7페이지 → 93개월 약 1,500회). 일일예산 초과 시 `[미완료]` 표시와 남은 월을 보여주며 정상 종료 → 다음날 같은 명령 |
 | S2 후보탐색 | `python -m g2b_costdb.pipeline discover` | `output/facility_candidates.xlsx` (노란 셀 검수) | 0 |
 | **검수** | Excel에서 `검수_포함여부 / 검수_시설명 / 검수_별칭 / 검수_수요기관` 수정 후 저장·닫기 | — | — |
-| S3 재검색 | `python -m g2b_costdb.pipeline research` | `data/notices_research.parquet` (전 공종 공고 + 면허제한 업종), 시설별 공종 분포 표 | 재검색 공고 수만큼(캐시됨) |
+| S3 재검색 | `python -m g2b_costdb.pipeline research` | `data/notices_research.parquet` (전 공종 공고), 시설별 공종 분포 표 | 0 (기본). `config.yaml api.use_license_limit: true` 로 바꾸면 공고별 면허제한 조회(공고 수만큼) |
 | S4 중복정리 | `python -m g2b_costdb.pipeline dedup` | `data/notices_hist.parquet`, `data/notices_latest.parquet`, `data/logs_dedup.parquet` | 0 |
 | S5 첨부수집 | `python -m g2b_costdb.pipeline attach` | `data/files/`, `data/text/`, `data/texts.json`, `data/notes_attach.parquet` | 0 (파일 다운로드만, 중단 후 재실행 시 이어서) |
 | S6 LLM추출 | `python -m g2b_costdb.pipeline extract` → 견적 확인 → `extract --yes` | `data/llm_docs.json`, `data/logs_verify.parquet` | Claude API(`--yes` 없이는 비용 견적만 출력) |
@@ -51,13 +51,15 @@ python -m tests.check_excel output/공사비DB.xlsx   # 생성된 Excel 의 수�
 - **시설 후보 단위 = (표2 분류, 검색어, 시설키, 수요기관)**: 같은 이름의 시설이 여러 지자체에 있어도 섞이지 않는다. 재검색도 `검수_수요기관`이 있으면 그 기관의 공고만 찾는다.
 - **사업유형**: 신축·증축·리모델링 모두 DB 대상(유지보수만 제외). 같은 시설의 신축과 리모델링은 프로젝트ID(시설ID-N/E/R/ER)로 분리 집계.
 - **재발주 처리**: 프로젝트키(프로젝트ID×공종×단계토큰)별로 취소공고 제외 후 최신 공고 1건을 대표로 채택. 구공고는 `대체됨` 표시로 이력 보존, 금액 ±30% 변동은 경고. 같은 프로젝트·공종에서 추정가격이 최대치의 30% 미만인 공고(무대기계·승강기 설치 등 부대공사)는 대표가 되지 않고 경고로 남긴다.
-- **공종 분류 우선순위**: 면허제한 업종명 → 주공종명 → 공고명 규칙('토목건축공사업'은 건축). 유지보수(방수·도색·교체 등) 공고는 기본 제외.
-- **금액 기준**: 추정가격(API)·기초금액(API)·관급자재(문서). 총공사비 = 기초금액 + 도급자관급액 + 관급자관급액(Excel 수식). LLM에는 금액을 힌트로 주지 않아 교차검증이 독립적이다.
+- **공종 분류 우선순위**: 면허제한 업종명(선택) → 주공종명·부공종명(목록 응답의 업종명, 예: '기계설비ㆍ가스공사업') → 공고명 규칙('토목건축공사업'은 건축). 유지보수(방수·도색·교체 등) 공고는 기본 제외.
+- **금액 기준**: 추정가격·기초금액·관급자재는 모두 API 값이 1순위(2026-09 실제 응답에서 `presmptPrce`, `bssamt`, `govsplyAmt`, 도급자/관급자 설치 관급액 `contrctrcnstrtnGovsplyMtrlAmt`/`govcnstrtnGovsplyMtrlAmt`, `VAT`, `bdgtAmt` 확인). 문서 추출값은 API 값이 없을 때의 대체·교차검증용. 총공사비 = 기초금액 + 도급자관급액 + 관급자관급액(Excel 수식). LLM에는 금액을 힌트로 주지 않아 교차검증이 독립적이다.
+- **재공고 연결**: API 의 이전공고번호(`befBidBbancNo`)로 재공고↔원공고 관계를 확정하고, 이름 규칙으로 못 묶은 경우도 대체 처리한다.
 - **교차검증**: 문서 추출 추정가격·기초금액 vs API 값(0.5%), 기초금액≈추정가격×1.1, 연면적·층수 범위, 총공사금액 구성 정합성 → `06_검증로그`.
 
 ## 5. 알려진 제약
-- 응답 필드명은 활용가이드(1.2)와 `probe` 결과로 확정할 것. 코드는 미존재 필드를 공란 처리하며, 면허제한 업종명 필드는 후보(`lcnsLmtNm` 등)를 자동 탐색한다.
-- 면허제한 조회 파라미터(`config.yaml api.license_query.inqryDiv`)는 활용가이드 버전에 따라 다를 수 있음 — `probe` 가 오류 10/11 을 보이면 조정.
+- 응답 필드명은 2026-09-08 `probe` 로 확인됨(공고목록·기초금액 `[매핑 OK]`, 공고차수는 `000` 처럼 3자리). 코드는 미존재 필드를 공란 처리한다.
+- 면허제한 조회는 기본 꺼져 있음(`api.use_license_limit: false`). 필요하면 `probe` 가 시험한 조회구분 결과를 보고 `license_query` 를 맞춘 뒤 켠다.
+- 첨부 URL 은 `https://www.g2b.go.kr/pn/pnp/pnpe/UntyAtchFile/downloadFile.do?...` 형식이며, 로그인 페이지가 돌아오면 `07_추출노트`에 'HTML 응답' 실패로 기록된다(수동 다운로드 후 `data/files/<공고번호>/` 에 넣고 `attach` 재실행).
 - HWP 파서: HWP 5.0 규격(olefile+zlib 레코드) 기반이며 실제 공고문으로 첫 실행 시 확인 필요. 실패 시 `hwp5txt`(pyhwp) → Windows 한컴 COM 순으로 폴백. 배포용(DRM)·암호 문서는 수동 처리.
 - 스캔 PDF는 `pytesseract`+`pdf2image` 설치 시 OCR. 연면적이 공고문에 없으면 현장설명서·설계설명서를 함께 파싱해도 공란일 수 있음(경고 기록).
 - LH 자체 조달(ebid.lh.or.kr) 발주분은 나라장터 API 범위 밖.

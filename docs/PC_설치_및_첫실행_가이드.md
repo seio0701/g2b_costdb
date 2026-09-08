@@ -174,7 +174,10 @@ python -m g2b_costdb.pipeline probe --ym 2026-08
 ### 7-2. `[업종명 필드] 후보 lcnsLmtNm 발견 → ...` 이 나오면
 `config.yaml` 의 `license_name: "indstrytyNm"` 을 `license_name: "lcnsLmtNm"` 으로 바꾼다. (안 바꿔도 프로그램이 후보를 자동으로 쓰지만, 바꿔 두면 안내 문구가 사라진다)
 
-### 7-3. 면허제한 덩어리가 `실패: API 오류 10` 또는 `11` 이면
+### 7-3. 면허제한 덩어리 (참고용)
+2026-09-08 실행에서는 조회 결과가 비어 있었고, 공종 분류에는 목록 응답의 주공종명·부공종명이 쓰이므로 기본적으로 면허제한 조회를 하지 않는다(`config.yaml api.use_license_limit: false`). probe 는 여러 조회구분을 시험해 결과가 나오면 알려 준다. 아래는 그때 조정하는 방법이다.
+
+### 7-3-1. 면허제한 덩어리가 `실패: API 오류 10` 또는 `11` 이면
 면허제한 조회의 "조회구분(inqryDiv)" 값이 활용가이드와 다른 경우다.
 1. data.go.kr 서비스 페이지 하단 **참고문서**에서 활용가이드(docx/hwp)를 내려받아 `getBidPblancListInfoLicenseLimit` 항목의 `inqryDiv` 설명(예: "1:공고게시일시, 2:개찰일시, 3:공고번호")을 확인한다.
 2. `config.yaml` 의 `license_query:` 아래 `inqryDiv: "2"` 를 그 값(예: `"3"`)으로 바꾸고 probe 를 다시 실행한다.

@@ -84,6 +84,14 @@ def test_api_client(tmp):
         return _Resp(json.dumps({"response": {"header": {"resultCode": "00"}, "body": {"items": pages[params["pageNo"]]}}}))
     with mock.patch.object(c3.session, "get", side_effect=fake_get), mock.patch("time.sleep"):
         assert [it["i"] for it in c3.iter_all("op", {"a": "4"})] == [1, 2, 3, 4, 5]
+    # 서버가 요청보다 작은 페이지(예: 100건)만 돌려줘도 totalCount 까지 계속 조회
+    c6 = _client(tmp); c6.cfg.num_of_rows = 999
+    pages6 = {"1": [{"i": i} for i in range(100)], "2": [{"i": i} for i in range(100, 150)]}
+
+    def fake_get6(url, params=None, timeout=None):
+        return _Resp(json.dumps({"response": {"header": {"resultCode": "00"}, "body": {"items": pages6.get(params["pageNo"], []), "totalCount": 150}}}))
+    with mock.patch.object(c6.session, "get", side_effect=fake_get6), mock.patch("time.sleep"):
+        assert len(list(c6.iter_all("op", {"a": "6"}))) == 150
     # Encoding 키 자동 변환
     c4 = G2BClient(ApiConfig(base_url="http://x", service_key="ab%2Bcd%3D%3D"), os.path.join(tmp, "d.sqlite"))
     assert c4.cfg.service_key == "ab+cd=="
@@ -130,7 +138,7 @@ def test_discover_and_dedup(tmp):
              dminsttNm="셋째군", presmptPrce="7100000000", mainCnsttyNm="건축공사"),
     ])
     std = discover.standardize(raw, cfg, None)
-    assert std["주공종명"].iloc[0] == "" and std["첨부URL1"].iloc[0] == "" and std["공고차수"].iloc[1] == "00", "None/NaN 은 공란으로"
+    assert std["주공종명"].iloc[0] == "" and std["첨부URL1"].iloc[0] == "" and std["공고차수"].iloc[1] == "000", "None/NaN 은 공란으로, 차수는 3자리"
     assert "nan" not in set(std["주공종명"]) and "None" not in set(std["첨부파일명1"])
     agg = discover.discover_candidates(std)
     # 같은 이름이라도 수요기관이 다르면 별도 시설
@@ -176,6 +184,11 @@ def test_discover_and_dedup(tmp):
     assert l3.empty and h3["대표선정사유"].str.contains("취소").all()
     # 빈 입력에서도 facility_summary 스키마 유지
     assert "프로젝트ID" in dedup.facility_summary(l3, h3).columns
+    # API 이전공고번호 연결: 프로젝트키가 달라도(단계토큰 유무) 재공고가 이전 공고를 대체
+    a = hits[hits["공고번호"] == "A1"].copy(); a["공고명"] = "가상군 문화예술회관 건립공사(1단계)"; a["이전공고번호"] = ""
+    b = hits[hits["공고번호"] == "A1"].copy(); b["공고번호"], b["공고키"], b["공고명"], b["이전공고번호"], b["공고일시"] = "A9", "A9-00", "가상군 문화예술회관 건립공사 재공고", "A1", "2024-06-01 10:00:00"
+    h4, l4, lg4 = dedup.dedup_latest(pd.concat([a, b], ignore_index=True))
+    assert set(l4["공고번호"]) == {"A9"} and h4[h4["공고번호"] == "A1"]["대체공고번호"].iloc[0] == "A9"
 
 
 def test_extract_and_verify():
@@ -252,6 +265,23 @@ def test_attachments(tmp):
         assert g.call_count == 1
         attachments.download("http://x/f?fileSeq=3", d, "공고문.pdf")
         assert g.call_count == 1, "이미 받은 파일은 요청하지 않음"
+    # 같은 문서의 hwp/pdf 중복: 앞 형식이 성공하면 뒤 형식은 건너뛰고, 실패하면 다른 형식으로 폴백
+    row2 = {"공고번호": "N8", "첨부URL1": "http://x/f?fileSeq=11", "첨부파일명1": "공고문.hwp", "첨부URL2": "http://x/f?fileSeq=12", "첨부파일명2": "공고문.pdf"}
+    calls = []
+    def fake_extract(path):
+        calls.append(os.path.basename(path))
+        if path.endswith(".pdf"):
+            raise ValueError("PDF 텍스트 없음")
+        return "본문 " * 40, "olefile"
+    with mock.patch("requests.get", side_effect=lambda *a, **k: R([b"\xd0\xcf\x11\xe0" + b"x" * 100])), \
+            mock.patch.object(attachments, "extract_any", side_effect=fake_extract):
+        text, notes2 = attachments.process_notice_attachments(row2, os.path.join(tmp, "files2"), os.path.join(tmp, "text2"))
+    assert [n["파일명"] for n in notes2] == ["공고문.pdf", "공고문.hwp"] and notes2[0]["추출성공"] == "N" and notes2[1]["추출성공"] == "Y" and text
+    row3 = dict(row2, 공고번호="N7")
+    with mock.patch("requests.get", side_effect=lambda *a, **k: R([b"%PDF-1.4 " + b"x" * 100])), \
+            mock.patch.object(attachments, "extract_any", return_value=("본문 " * 40, "pdfplumber")):
+        text, notes3 = attachments.process_notice_attachments(row3, os.path.join(tmp, "files3"), os.path.join(tmp, "text3"))
+    assert [n["파일명"] for n in notes3] == ["공고문.pdf"], "pdf 성공 시 hwp 는 건너뜀"
     # 첨부파일명 'None'/'nan' 은 빈 이름으로 취급되어 매직바이트 확장자로 저장
     row = {"공고번호": "N9", "첨부URL1": "http://x/f?fileSeq=9", "첨부파일명1": "None", "첨부URL2": "nan", "첨부파일명2": ""}
     with mock.patch("requests.get", return_value=R([b"%PDF-1.4 body of pdf " * 20])):
