@@ -172,8 +172,10 @@ class MockG2B:
                     return self._send(200, body, ctype, {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
                 op = parts[-1]
                 mock.calls[op] += 1
-                if q.get("serviceKey") != KEY:
-                    return self._send(200, _xml_error("30", "SERVICE_KEY_IS_NOT_REGISTERED_ERROR"), "application/xml")
+                if q.get("serviceKey") != KEY:   # 실제 게이트웨이는 type=json 요청에 HTTP 403 + JSON 형식 오류를 돌려준다
+                    body = {"cmmMsgHeader": {"errMsg": "SERVICE ERROR", "returnAuthMsg": "SERVICE_KEY_IS_NOT_REGISTERED_ERROR",
+                                             "returnReasonCode": "30"}}
+                    return self._send(403, json.dumps(body).encode("utf-8"))
                 rows = 999 if not q.get("numOfRows") else int(q["numOfRows"])
                 page = int(q.get("pageNo", "1"))
                 if op == "getBidPblancListInfoCnstwk":

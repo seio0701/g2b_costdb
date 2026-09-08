@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import importlib.util
 import io
 import logging
 import os
@@ -12,6 +13,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import zipfile
 import zlib
 from typing import Dict, List, Optional, Tuple
@@ -221,12 +223,19 @@ def extract_hwp_with_fallbacks(path: str) -> Tuple[str, str]:
         return extract_hwp(path)
     except Exception as e:  # noqa: BLE001
         log.info("olefile 파서 실패(%s) → hwp5txt 시도", e)
+    # pyhwp(hwp5txt): 실행 파일이 PATH 에 없어도(Windows 사용자 설치) 모듈 방식으로 호출
+    cmd = None
     if shutil.which("hwp5txt"):
+        cmd = ["hwp5txt", path]
+    elif importlib.util.find_spec("hwp5") is not None:
+        cmd = [sys.executable, "-m", "hwp5.hwp5txt", path]
+    if cmd:
         try:
-            out = subprocess.run(["hwp5txt", path], capture_output=True, timeout=180)
+            out = subprocess.run(cmd, capture_output=True, timeout=180)
             txt = out.stdout.decode("utf-8", errors="ignore")
             if len(txt.strip()) > 50:
                 return txt, "hwp5txt"
+            log.info("hwp5txt 출력 부족(rc=%s): %s", out.returncode, out.stderr.decode("utf-8", errors="ignore")[:200])
         except (subprocess.SubprocessError, OSError) as e:
             log.info("hwp5txt 실패: %s", e)
     if os.name == "nt":

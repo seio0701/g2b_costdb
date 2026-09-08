@@ -69,13 +69,39 @@ def explain_code(code: str) -> str:
     return _CODE_EXPLAIN.get(str(code), "포털 활용가이드의 오류코드표 참조")
 
 
-def parse_portal_error_xml(text: str) -> Optional[Dict[str, str]]:
-    """<OpenAPI_ServiceResponse><cmmMsgHeader>…</cmmMsgHeader> 형태의 오류 응답 → {'code','msg'} (아니면 None)."""
-    if not text or "cmmMsgHeader" not in text and "OpenAPI_ServiceResponse" not in text:
+def parse_portal_error(text: str) -> Optional[Dict[str, str]]:
+    """공공데이터포털 게이트웨이 오류 응답 → {'code','msg'} (오류 응답이 아니면 None).
+    형식 두 가지를 모두 해석한다:
+      XML : <OpenAPI_ServiceResponse><cmmMsgHeader><returnReasonCode>30</returnReasonCode>…
+      JSON: {"cmmMsgHeader": {"returnReasonCode": "30", "returnAuthMsg": "…"}}  (type=json 요청 시, HTTP 403 과 함께 오기도 함)
+            {"response": {"header": {"resultCode": "30", "resultMsg": "…"}}}"""
+    t = (text or "").strip()
+    if not t:
         return None
-    code = re.search(r"<returnReasonCode>\s*(\d+)\s*</returnReasonCode>", text)
-    msg = re.search(r"<returnAuthMsg>(.*?)</returnAuthMsg>", text, re.S) or re.search(r"<errMsg>(.*?)</errMsg>", text, re.S)
-    return {"code": code.group(1).zfill(2) if code else "99", "msg": (msg.group(1).strip() if msg else text[:120])}
+    if t.startswith("{"):
+        try:
+            data = json.loads(t)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            h = data.get("cmmMsgHeader")
+            if not isinstance(h, dict) and isinstance(data.get("OpenAPI_ServiceResponse"), dict):
+                h = data["OpenAPI_ServiceResponse"].get("cmmMsgHeader")
+            if isinstance(h, dict):
+                return {"code": str(h.get("returnReasonCode") or "99").strip().zfill(2),
+                        "msg": str(h.get("returnAuthMsg") or h.get("errMsg") or "")[:200]}
+            hdr = (data.get("response") or {}).get("header") if isinstance(data.get("response"), dict) else None
+            if isinstance(hdr, dict) and hdr.get("resultCode") not in (None, "") and str(hdr["resultCode"]).strip().zfill(2) != "00":
+                return {"code": str(hdr["resultCode"]).strip().zfill(2), "msg": str(hdr.get("resultMsg", ""))[:200]}
+            return None
+    if "cmmMsgHeader" not in t and "OpenAPI_ServiceResponse" not in t:
+        return None
+    code = re.search(r"<returnReasonCode>\s*(\d+)\s*</returnReasonCode>", t)
+    msg = re.search(r"<returnAuthMsg>(.*?)</returnAuthMsg>", t, re.S) or re.search(r"<errMsg>(.*?)</errMsg>", t, re.S)
+    return {"code": code.group(1).zfill(2) if code else "99", "msg": (msg.group(1).strip() if msg else t[:120])}
+
+
+parse_portal_error_xml = parse_portal_error  # 하위 호환
 
 
 @dataclass
@@ -132,14 +158,14 @@ class G2BClient:
         """HTTP 응답 → body(dict). 재시도 대상은 RuntimeError, 비재시도는 ApiError, 트래픽 초과는 DailyBudgetExceeded."""
         text = r.text or ""
         if r.status_code != 200:
-            err = parse_portal_error_xml(text)
+            err = parse_portal_error(text)
             if err and err["code"] not in RETRYABLE_CODES:
-                G2BClient._raise_for_code(err["code"], err["msg"], op, p)
+                G2BClient._raise_for_code(err["code"], err["msg"], op, p)   # 키·권한 오류는 즉시 중단, 22는 예산 소진
             raise RuntimeError(f"HTTP {r.status_code}: {text[:200]}")
         try:
             data = r.json()
         except ValueError:
-            err = parse_portal_error_xml(text)
+            err = parse_portal_error(text)
             if err:
                 G2BClient._raise_for_code(err["code"], err["msg"], op, p)
                 raise RuntimeError(f"API {err['code']}: {err['msg']}")

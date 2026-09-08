@@ -48,6 +48,19 @@ def test_api_client(tmp):
         except ApiError as e:
             assert e.code == "30" and "G2B_SERVICE_KEY" in str(e)
     assert c.calls_today() == 1, "키 오류는 재시도 없이 1회만 호출해야 함"
+    # 실제 게이트웨이 형식: HTTP 403 + JSON {"cmmMsgHeader": {...}} → 역시 재시도 없이 30
+    cj = _client(tmp)
+    jerr = json.dumps({"cmmMsgHeader": {"errMsg": "SERVICE ERROR", "returnAuthMsg": "SERVICE_KEY_IS_NOT_REGISTERED_ERROR", "returnReasonCode": "30"}})
+    with mock.patch.object(cj.session, "get", return_value=_Resp(jerr, status=403)), mock.patch("time.sleep"):
+        try:
+            cj.call("op", {"a": "1"})
+            raise AssertionError("ApiError 기대")
+        except ApiError as e:
+            assert e.code == "30"
+    assert cj.calls_today() == 1
+    from g2b_costdb.api_client import parse_portal_error
+    assert parse_portal_error('{"response":{"header":{"resultCode":"20","resultMsg":"SERVICE_ACCESS_DENIED_ERROR"}}}')["code"] == "20"
+    assert parse_portal_error('{"response":{"header":{"resultCode":"00"},"body":{}}}') is None
     # 22 트래픽 초과 → DailyBudgetExceeded + 오늘 예산 소진 처리
     xml22 = xml.replace("30", "22").replace("SERVICE_KEY_IS_NOT_REGISTERED_ERROR", "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR")
     with mock.patch.object(c.session, "get", return_value=_Resp(xml22)), mock.patch("time.sleep"):

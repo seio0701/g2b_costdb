@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -101,7 +102,8 @@ def stage_doctor(cfg):
             print(f"  {pkg:12s} OK ({use})")
         except BaseException:  # noqa: BLE001
             print(f"  {pkg:12s} 없음 ({use}; 필요 시 pip install {pkg})")
-    print(f"  hwp5txt      {'OK' if shutil.which('hwp5txt') else '없음 (HWP 폴백; pip install pyhwp)'}")
+    hwp5 = shutil.which("hwp5txt") or (importlib.util.find_spec("hwp5") is not None)
+    print(f"  pyhwp        {'OK (hwp5txt 사용 가능)' if hwp5 else '없음 (HWP 폴백; pip install pyhwp)'}")
     print("환경변수(값은 출력하지 않음):")
     for env in (cfg["api"]["service_key_env"], cfg["llm"].get("api_key_env", "ANTHROPIC_API_KEY")):
         v = os.environ.get(env, "")
@@ -127,10 +129,15 @@ def stage_doctor(cfg):
     try:
         r = requests.get(base + "/" + cfg["api"]["ops"]["cnstwk_list"], params={"serviceKey": "test", "numOfRows": "1", "pageNo": "1",
                          "inqryDiv": "1", "inqryBgnDt": "202601010000", "inqryEndDt": "202601312359", "type": "json"}, timeout=15)
-        from .api_client import parse_portal_error_xml
-        e = parse_portal_error_xml(r.text)
-        print(f"네트워크: {base} 연결 OK (HTTP {r.status_code}"
-              f"{', 포털 응답 코드 ' + e['code'] + ' — 키 없이 호출했으므로 30/20 이면 정상' if e else ''})")
+        from .api_client import explain_code, parse_portal_error
+        e = parse_portal_error(r.text)
+        if e and e["code"] in ("30", "20", "33"):
+            note = f", 포털 응답 코드 {e['code']} — 키 없이 시험 호출했으므로 정상"
+        elif e:
+            note = f", 포털 응답 코드 {e['code']}: {explain_code(e['code'])}"
+        else:
+            note = ""
+        print(f"네트워크: {base} 연결 OK (HTTP {r.status_code}{note})")
     except Exception as e:  # noqa: BLE001
         print(f"네트워크: {base} 연결 실패 → {type(e).__name__}: {str(e)[:120]}")
     cache = cfg["paths"]["cache_db"]
