@@ -82,7 +82,7 @@ def build_dataset(base: str) -> Dict:
              bidNtceDt="2024-02-20 10:00:00", ntceInsttNm="가상군", dminsttNm="가상군", presmptPrce="530000000", mainCnsttyNm="소방공사",
              cnstrtsiteRgnNm="전라남도 가상군"),
         # 부대공사(소액) — 대표를 대체하면 안 됨
-        dict(common, bidNtceNo="R24030005", bidNtceOrd="00", bidNtceNm="가상군 문화예술회관 무대기계 설치공사", ntceKindNm="일반공고", reNtceYn="N",
+        dict(common, bidNtceNo="R24030005", bidNtceOrd="00", bidNtceNm="가상군 문화예술회관 관리사무소 건립공사", ntceKindNm="일반공고", reNtceYn="N",
              bidNtceDt="2024-03-05 10:00:00", ntceInsttNm="가상군", dminsttNm="가상군", presmptPrce="400000000", mainCnsttyNm="건축공사",
              cnstrtsiteRgnNm="전라남도 가상군"),
         # 야외공연장 — 두 분류(공연장/야외공연장)에 걸림, 첨부 1은 로그인 HTML(실패), 첨부 2는 hwpx

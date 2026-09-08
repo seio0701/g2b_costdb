@@ -146,7 +146,7 @@ def _collect_monthly(cfg: dict, op_key: str, prefix: str, start: Optional[str], 
     else:
         log.info("[완료] %s: %d개월 수집 완료", op, len(done))
     df = _load_jsonl_dir(raw_dir, prefix)
-    return _stringify(df) if not df.empty else df
+    return _stringify(df).copy() if not df.empty else df
 
 
 def incomplete_months(cfg: dict, prefix: str) -> List[str]:

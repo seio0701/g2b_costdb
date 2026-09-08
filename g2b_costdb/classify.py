@@ -31,11 +31,13 @@ def load_keywords(path: Optional[str] = None) -> dict:
 
 
 # ── 정규화 ──────────────────────────────────────────────────────
-_STATUS_TOKENS = r"(재공고|재입찰|긴급|변경|취소|정정|수정|연기|일부변경|재발주|2차공고|3차공고)"
+_STATUS_TOKENS = (r"(재공고|재입찰|긴급|변경|취소|정정|수정|연기|일부변경|재발주|\d차공고|수의계약|수의견적|소액수의|전자견적|견적\s*제출|안내\s*공고|"
+                  r"입찰\s*공고|업체\s*선정|제한경쟁|일반경쟁|장기계속|민간입찰대행|일부특허|혁신|총괄|전체분|\d+차분|국체전\s*대비|전국체전\s*대비|"
+                  r"전국체육대회|\d{4}년도?)")
 _BRACKET = re.compile(r"[\(\[\{（【].*?[\)\]\}）】]")
 _PHASE = re.compile(r"(\d+\s*단계|\d+\s*차|\d+\s*공구|\d+\s*차분|골조|마감)")
 _TRADE_WORDS = re.compile(
-    r"(건축\s*공사|전기\s*공사|정보통신\s*공사|통신\s*공사|소방\s*공사|소방시설\s*공사|조경\s*공사|기계설비\s*공사|"
+    r"(건축\s*공사|전기\s*공사|정보통신\s*공사|통신\s*공사|소방\s*공사|소방시설\s*공사|조경\s*공사|기계설비\s*공사|기계\s*공사|설비\s*공사|"
     r"토목\s*공사|건립\s*공사|신축\s*공사|증축\s*공사|건설\s*공사|조성\s*공사|공사|건립|신축|증축|건설|조성|사업|용역)"
 )
 _YEAR = re.compile(r"(20\d{2})\s*년(도)?")
@@ -46,7 +48,11 @@ def clean_notice_name(name: str) -> str:
     """상태어·괄호·연도 제거 후 공백 정리 (시설명 추출·프로젝트키용)."""
     s = name or ""
     s = _BRACKET.sub(" ", s)
-    s = re.sub(_STATUS_TOKENS, " ", s)
+    for _ in range(3):                      # '입찰 취소 공고' 처럼 상태어가 겹쳐 있으면 반복 제거
+        s2 = re.sub(_STATUS_TOKENS, " ", s)
+        if s2 == s:
+            break
+        s = s2
     s = _YEAR.sub(" ", s)
     s = re.sub(r"[「」『』<>《》\"'“”‘’]", " ", s)
     s = _SPACES.sub(" ", s).strip(" -–—·,.")
@@ -75,7 +81,25 @@ def extract_facility_name(notice_name: str, keyword: str) -> str:
     if idx is None:
         idx = next((i for i, t in enumerate(tokens) if keyword.replace(" ", "") in t), None)
     if idx is None:
-        return s
+        # 검색어가 어절 두세 개에 걸쳐 있는 경우('지하 공영주차장' ← '지하공영주차장') → 어절을 합쳐 찾는다
+        kw_ns = keyword.replace(" ", "")
+        for span in (2, 3):
+            for i in range(len(tokens) - span + 1):
+                if kw_ns in "".join(tokens[i:i + span]):
+                    tokens[i:i + span] = [" ".join(tokens[i:i + span])]
+                    idx, kw_head = i, tokens[i]
+                    break
+            if idx is not None:
+                break
+    if idx is None:
+        # 검색어가 괄호 안에만 있는 경우: '제2안식의 집(봉안당) 건립공사' → 괄호 밖 이름('제2안식의 집')을 시설명으로,
+        # 괄호 밖이 상태어뿐이면('입찰 취소 공고[진해아트홀 시설 개선공사]') 괄호 안 문구로 다시 추출
+        inner = [m.group(1) for m in re.finditer(r"[\(\[\{（【]([^\)\]\}）】]*)[\)\]\}）】]", notice_name or "")
+                 if kw_head in m.group(1) or keyword.replace(" ", "") in m.group(1).replace(" ", "")]
+        outer = _SPACES.sub(" ", _TRADE_WORDS.sub(" ", s)).strip(" -–—·,.")
+        if inner and len(re.sub(r"[^가-힣A-Za-z]", "", outer)) < 2:
+            return extract_facility_name(inner[0], keyword)
+        return outer if outer else s
     # 앞 어절 중 지자체/수식어로 보이는 것 최대 2개 포함 (공종어·숫자만 있는 어절·'제1' 같은 순번 제외)
     start = idx
     for j in range(idx - 1, max(-1, idx - 3), -1):
@@ -96,18 +120,36 @@ def extract_facility_name(notice_name: str, keyword: str) -> str:
 WORK_TYPE_CODE = {"신축": "N", "증축": "E", "리모델링": "R", "증축·리모델링": "ER", "유지보수": "M", "미분류": "U"}
 
 
-def classify_work_type(notice_name: str, rules: Optional[Dict[str, List[str]]] = None) -> str:
+def classify_work_type(notice_name: str, rules: Optional[Dict[str, List[str]]] = None,
+                       ancillary: Optional[List[str]] = None) -> str:
     """사업유형: 신축 / 증축 / 리모델링 / 증축·리모델링 / 유지보수 / 미분류.
-    yaml 순서 = 우선순위(리모델링 → 증축 → 신축 → 유지보수). 증축과 리모델링 어휘가 함께 있으면 '증축·리모델링'."""
-    rules = rules or load_keywords()["work_type_rules"]
+    yaml 순서 = 우선순위(리모델링 → 증축 → 신축 → 유지보수). 증축과 리모델링 어휘가 함께 있으면 '증축·리모델링'.
+    부속·외부 공사 어휘(진입로·주차장·조명·설비 등)가 있으면: 리모델링/증축은 유지, 신축이면 '미분류'(검토필요), 아니면 '유지보수'."""
+    kw = None
+    if rules is None or ancillary is None:
+        kw = load_keywords()
+    rules = rules or kw["work_type_rules"]
+    ancillary = ancillary if ancillary is not None else (kw.get("ancillary_words") or [])
     s = (notice_name or "").replace(" ", "")
     hits = [label for label, words in rules.items() if any(w.replace(" ", "") in s for w in words)]
+    anc = any(w.replace(" ", "") in s for w in ancillary)
     if "리모델링" in hits and "증축" in hits:
         return "증축·리모델링"
     for label in rules:                      # 첫 매칭 우선
         if label in hits:
+            if label == "신축" and anc:
+                return "미분류"
             return label
-    return "미분류"
+    return "유지보수" if anc else "미분류"
+
+
+def work_type_for(notice_name: str, keyword: str = "", facility_name: str = "") -> str:
+    """검색어·시설명에 들어 있는 부속어는 제외하고 사업유형 판정.
+    예) '지하 공영주차장 조성 소방공사' 는 시설 자체가 주차장이므로 '주차장' 을 부속어로 보지 않는다 → 신축."""
+    kw = load_keywords()
+    ctx = ((keyword or "") + (facility_name or "")).replace(" ", "")
+    anc = [w for w in (kw.get("ancillary_words") or []) if w.replace(" ", "") not in ctx]
+    return classify_work_type(notice_name, kw["work_type_rules"], anc)
 
 
 def classify_trade(notice_name: str = "", main_cnstty: str = "", license_names: str = "",
@@ -116,10 +158,10 @@ def classify_trade(notice_name: str = "", main_cnstty: str = "", license_names: 
     rules = rules or load_keywords()["trade_rules"]
 
     def _match(text: str) -> Optional[str]:
-        t = (text or "").replace(" ", "")
+        t = re.sub(r"[\sㆍ·・∙]", "", text or "")     # '기계설비ㆍ가스공사업' 같은 구분자 제거
         if not t:
             return None
-        hits = [label for label, words in rules.items() if any(w.replace(" ", "") in t for w in words)]
+        hits = [label for label, words in rules.items() if any(re.sub(r"[\sㆍ·・∙]", "", w) in t for w in words)]
         if not hits:
             return None
         # '토목건축공사업' 처럼 토목·건축이 함께 걸리면 건축(건물 본공사)으로 본다

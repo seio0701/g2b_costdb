@@ -15,8 +15,8 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from g2b_costdb import attachments, dedup, discover, extract_llm  # noqa: E402
 from g2b_costdb.api_client import ApiConfig, ApiError, DailyBudgetExceeded, G2BClient  # noqa: E402
-from g2b_costdb.classify import (classify_notice_kind, classify_trade, extract_facility_name, load_config,  # noqa: E402
-                                 match_categories, parse_amount)
+from g2b_costdb.classify import (classify_notice_kind, classify_trade, classify_work_type, extract_facility_name,  # noqa: E402
+                                 load_config, match_categories, parse_amount, work_type_for)
 
 
 class _Resp:
@@ -113,6 +113,22 @@ def test_classify():
     assert classify_notice_kind("취소공고", "N", "", "x") == "취소"
     assert classify_notice_kind("일반공고", "N", "", "OO 건립공사 취소공고") == "취소"
     assert [h[2] for h in match_categories("○○시 야외공연장 조성공사")] == ["야외공연장"]
+    # 2026-09 실데이터에서 확인된 오탐·오분류
+    assert match_categories("2정수장 고압 간선케이블 교체 전기공사") == [] and match_categories("경일고등학교 학과재구조화(호텔앤리조트과) 실습실 환경개선사업 전기공사") == []
+    assert match_categories("경북고등학교 학교체육시설(야구장) 환경개선공사") == [] and match_categories("서천군 유소년 축구장 관리동 건립공사(건축)")
+    assert classify_work_type("영구임대주택 승강기 안전장치(부품) 설치공사") == "유지보수"
+    assert classify_work_type("정남면 야외공연장 설치공사") == "미분류" and classify_work_type("죽전야외음악당 주차장 및 진입도로 조성공사") == "미분류"
+    assert classify_work_type("화성예술의전당 소공연장 조성 건축(기계) 공사 (전체분 및 1차분)") == "신축"
+    assert classify_work_type("상주박물관 수장고 증축사업 건축공사(총괄, 1차분)") == "증축"
+    assert extract_facility_name("입찰 취소 공고[진해아트홀 시설 개선공사] ", "아트홀") == "진해아트홀"
+    assert extract_facility_name("제2안식의 집(봉안당) 건립공사(조경)", "봉안당") == "제2안식의 집"
+    assert work_type_for("이현삼거리 서편 지하 공영주차장 조성 소방공사", "지하공영주차장") == "신축"
+    assert extract_facility_name("이현삼거리 서편 지하 공영주차장 조성 기계공사", "지하공영주차장") == "이현삼거리 서편 지하 공영주차장"
+    assert work_type_for("종합운동장 부설주차장 유료화 대비 조성 공사", "종합운동장") == "미분류"
+    assert classify_work_type("홍천군 추모공원 봉안묘 석축 설치 공사") == "미분류"
+    assert extract_facility_name("화성예술의전당 소공연장 조성 건축(기계) 공사 (전체분 및 1차분)", "예술의전당") == "화성예술의전당"
+    assert classify_trade("x", "기계설비ㆍ가스공사업", "")[0] == "기계설비" and classify_trade("x", "실내건축공사업", "")[0] == "건축"
+    assert classify_trade("x", "조경식재ㆍ시설물공사업", "")[0] == "조경" and classify_trade("x", "지반조성ㆍ포장공사업", "")[0] == "토목"
     assert match_categories("○○군 매입임대주택 리모델링") == []
     assert parse_amount(float("nan")) is None and parse_amount("nan") is None and parse_amount("1,000") == 1000
     cfg = load_config()
@@ -126,7 +142,7 @@ def test_discover_and_dedup(tmp):
              dminsttNm="가상군", presmptPrce="30000000000", mainCnsttyNm=None, ntceSpecDocUrl1=None, ntceSpecFileNm1=None),
         dict(bidNtceNo="A2", bidNtceOrd=0, bidNtceNm="가상군 문화예술회관 건립 전기공사", ntceKindNm="일반공고", bidNtceDt="2024-01-06 10:00:00",
              dminsttNm="가상군", presmptPrce=None, mainCnsttyNm="전기공사"),
-        dict(bidNtceNo="A3", bidNtceOrd="00", bidNtceNm="가상군 문화예술회관 무대기계 설치공사", ntceKindNm="일반공고", bidNtceDt="2025-03-01 10:00:00",
+        dict(bidNtceNo="A3", bidNtceOrd="00", bidNtceNm="가상군 문화예술회관 관리사무소 건립공사", ntceKindNm="일반공고", bidNtceDt="2025-03-01 10:00:00",
              dminsttNm="가상군", presmptPrce="400000000", mainCnsttyNm="건축공사"),
         dict(bidNtceNo="B1", bidNtceOrd="00", bidNtceNm="다른군 문화예술회관 건립공사", ntceKindNm="일반공고", bidNtceDt="2024-02-05 10:00:00",
              dminsttNm="다른군", presmptPrce="25000000000", mainCnsttyNm="건축공사"),

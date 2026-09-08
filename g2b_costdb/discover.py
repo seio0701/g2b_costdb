@@ -17,7 +17,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from .classify import (classify_notice_kind, classify_trade, classify_work_type, extract_facility_name,
-                       load_keywords, match_categories, normalize_facility_key, parse_amount)
+                       load_keywords, match_categories, normalize_facility_key, parse_amount, work_type_for)
 
 log = logging.getLogger(__name__)
 
@@ -137,7 +137,8 @@ def discover_candidates(std: pd.DataFrame, previous_review: Optional[pd.DataFram
         for major, minor, w in match_categories(r["공고명"], kw):
             fac = extract_facility_name(r["공고명"], w)
             rows.append({**r.to_dict(), "표2_대분류": major, "표2_중분류": minor, "검색어": w,
-                         "시설명_후보": fac, "시설키": normalize_facility_key(fac)})
+                         "시설명_후보": fac, "시설키": normalize_facility_key(fac),
+                         "사업유형": work_type_for(r["공고명"], w, fac)})   # 시설 자체가 주차장 등이면 부속어에서 제외
     cand = pd.DataFrame(rows)
     if cand.empty:
         return cand
@@ -292,6 +293,7 @@ def research_by_facility(std: pd.DataFrame, reviewed: pd.DataFrame, max_hits_war
             log.warning("시설 %s '%s': %d건 매칭 — 검수_시설명이 너무 일반적인지 확인", fac.get("시설ID"), fac["검수_시설명"], len(hit))
         hit["시설ID"] = fac["시설ID"]
         hit["시설명"] = fac["검수_시설명"]
+        hit["사업유형"] = [work_type_for(n, str(fac.get("검색어") or ""), fac["검수_시설명"]) for n in hit["공고명"]]
         hit["표2_대분류"] = fac["표2_대분류"]
         hit["표2_중분류"] = fac["표2_중분류"]
         hit["검색어"] = fac["검색어"]
