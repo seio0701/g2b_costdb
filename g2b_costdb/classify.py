@@ -31,23 +31,59 @@ def load_keywords(path: Optional[str] = None) -> dict:
 
 
 # ── 정규화 ──────────────────────────────────────────────────────
-_STATUS_TOKENS = (r"(재공고|재입찰|긴급|변경|취소|정정|수정|연기|일부변경|재발주|\d차공고|수의계약|수의견적|소액수의|전자견적|견적\s*제출|안내\s*공고|"
-                  r"입찰\s*공고|업체\s*선정|제한경쟁|일반경쟁|장기계속|민간입찰대행|일부특허|혁신|총괄|전체분|\d+차분|국체전\s*대비|전국체전\s*대비|"
-                  r"전국체육대회|\d{4}년도?)")
-_BRACKET = re.compile(r"[\(\[\{（【].*?[\)\]\}）】]")
+_STATUS_TOKENS = (r"(재공고|재입찰|긴급|변경|취소|정정|수정|연기|일부변경|재발주|\d차공고|수의계약|수의견적|소액수의|수액수의|전자견적|견적\s*제출|안내\s*공고|"
+                  r"입찰\s*공고|업체\s*선정|제한경쟁|일반경쟁|장기계속|민간입찰대행|입찰대행|전자입찰|일부특허|혁신|총괄|전체분|\d+차분|국체전\s*대비|전국체전\s*대비|"
+                  r"전국체육대회|\d{4}년도?|"
+                  r"견적공고|견적제출|제출안내|(?<![가-힣])(입찰|공고|제출|안내|시행|견적서|견적)(?![가-힣]))")      # 홀로 선 상태어만('부산공고'·'안내판' 같은 이름의 일부는 보존)
+_BRACKET_INNER = re.compile(r"[\(（]([^()（）\[\]{}【】]*)[\)）]|[\[【]([^()（）\[\]{}【】]*)[\]】]|\{([^()（）\[\]{}【】]*)\}")
+# 상태어만 남은 괄호 밖 문구('시설공사 수의견적 제출 안내 공고[…]' → '시설') 판정용
+_GENERIC_OUTER = re.compile(r"^(학교|시설|공사|건축|기타|긴급|소액|수의|견적|제출|안내|공고|시행|사업|시행공고|외\d*\S*)*$")
 _PHASE = re.compile(r"(\d+\s*단계|\d+\s*차|\d+\s*공구|\d+\s*차분|골조|마감)")
 _TRADE_WORDS = re.compile(
     r"(건축\s*공사|전기\s*공사|정보통신\s*공사|통신\s*공사|소방\s*공사|소방시설\s*공사|조경\s*공사|기계설비\s*공사|기계\s*공사|설비\s*공사|"
     r"토목\s*공사|건립\s*공사|신축\s*공사|증축\s*공사|건설\s*공사|조성\s*공사|공사|건립|신축|증축|건설|조성|사업|용역)"
 )
-_YEAR = re.compile(r"(20\d{2})\s*년(도)?")
+# '2019년도', '23년~24년', '25~26년', '26,27년' 같은 연도 접두어(뒤에 글자가 붙는 '2024목동주경기장' 은 건드리지 않음)
+_YEAR = re.compile(r"(?<![\d가-힣])(?:20)?\d{2}(?:\s*년도?)?(?:\s*[~∼\-,]\s*(?:20)?\d{2})*\s*년도?(?![\d가-힣])")
 _SPACES = re.compile(r"\s+")
+
+
+def strip_brackets(text: str) -> str:
+    """괄호를 안쪽부터 반복 제거(중첩 '[…(리모델링)공사 (전기공사)]' 도 남김없이)."""
+    s = text or ""
+    for _ in range(6):
+        s2 = _BRACKET_INNER.sub(" ", s)
+        if s2 == s:
+            break
+        s = s2
+    return s
+
+
+def bracket_contents(text: str) -> List[str]:
+    """최상위 괄호 안 문구 목록(중첩 괄호는 안쪽을 포함한 채로). '공고[A(리모델링) (전기)]' → ['A(리모델링) (전기)']"""
+    opens, closes = "([{（【", ")]}）】"
+    out, depth, buf = [], 0, []
+    for ch in text or "":
+        if ch in opens:
+            if depth > 0:
+                buf.append(ch)
+            depth += 1
+        elif ch in closes and depth > 0:
+            depth -= 1
+            if depth == 0:
+                out.append("".join(buf)); buf = []
+            else:
+                buf.append(ch)
+        elif depth > 0:
+            buf.append(ch)
+    return out
 
 
 def clean_notice_name(name: str) -> str:
     """상태어·괄호·연도 제거 후 공백 정리 (시설명 추출·프로젝트키용)."""
     s = name or ""
-    s = _BRACKET.sub(" ", s)
+    s = strip_brackets(s)
+    s = re.sub(r"[()\[\]{}（）【】]", " ", s)          # 짝이 없는 괄호('구)문화예술회관', '긴급) …')는 공백으로
     for _ in range(3):                      # '입찰 취소 공고' 처럼 상태어가 겹쳐 있으면 반복 제거
         s2 = re.sub(_STATUS_TOKENS, " ", s)
         if s2 == s:
@@ -94,10 +130,11 @@ def extract_facility_name(notice_name: str, keyword: str) -> str:
     if idx is None:
         # 검색어가 괄호 안에만 있는 경우: '제2안식의 집(봉안당) 건립공사' → 괄호 밖 이름('제2안식의 집')을 시설명으로,
         # 괄호 밖이 상태어뿐이면('입찰 취소 공고[진해아트홀 시설 개선공사]') 괄호 안 문구로 다시 추출
-        inner = [m.group(1) for m in re.finditer(r"[\(\[\{（【]([^\)\]\}）】]*)[\)\]\}）】]", notice_name or "")
-                 if kw_head in m.group(1) or keyword.replace(" ", "") in m.group(1).replace(" ", "")]
+        inner = [c for c in bracket_contents(notice_name or "")
+                 if kw_head in c or keyword.replace(" ", "") in c.replace(" ", "")]
         outer = _SPACES.sub(" ", _TRADE_WORDS.sub(" ", s)).strip(" -–—·,.")
-        if inner and len(re.sub(r"[^가-힣A-Za-z]", "", outer)) < 2:
+        outer_core = re.sub(r"[^가-힣A-Za-z0-9]", "", outer)
+        if inner and (len(re.sub(r"[^가-힣A-Za-z]", "", outer)) < 2 or _GENERIC_OUTER.fullmatch(outer_core)):
             return extract_facility_name(inner[0], keyword)
         return outer if outer else s
     # 앞 어절 중 지자체/수식어로 보이는 것 최대 2개 포함 (공종어·숫자만 있는 어절·'제1' 같은 순번 제외)
@@ -112,7 +149,16 @@ def extract_facility_name(notice_name: str, keyword: str) -> str:
     kw_pos = head.find(kw_head)
     if kw_pos >= 0:
         head = head[: kw_pos + len(kw_head)]
-    parts = tokens[start:idx] + [head]
+    tail = []
+    if len(kw_parts) > 1 and head.endswith(kw_head):
+        # '스마트팜 온실 설비…' 처럼 띄어쓴 검색어의 나머지 어절이 이어지면 시설명에 포함('스마트팜' → '스마트팜 온실')
+        for k, part in enumerate(kw_parts[1:], start=1):
+            # '온실 건립' 의 '건립' 처럼 공종·사업유형 어휘는 시설명이 아니다
+            if idx + k < len(tokens) and tokens[idx + k].startswith(part) and not _TRADE_WORDS.fullmatch(part):
+                tail.append(part)
+            else:
+                break
+    parts = tokens[start:idx] + [head] + tail
     return " ".join(parts).strip()
 
 
@@ -201,6 +247,8 @@ def match_categories(notice_name: str, kw: Optional[dict] = None, best_only: boo
     (예: '야외공연장 조성공사'는 '공연장'과 '야외공연장' 모두 매칭 → '야외공연장'만 채택하여 시설 중복 생성을 막음)."""
     kw = kw or load_keywords()
     s = (notice_name or "").replace(" ", "")
+    if any(x.replace(" ", "") in s for x in kw.get("exclude_common", []) or []):   # 모든 분류 공통 제외어(지하철역·도로 공사 등)
+        return []
     hits = []
     for cat in kw["categories"]:
         if any(x.replace(" ", "") in s for x in cat.get("exclude", [])):

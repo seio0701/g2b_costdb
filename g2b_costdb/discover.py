@@ -171,6 +171,19 @@ def _mode(s: pd.Series, default: str = "") -> str:
     return str(vc.index[0]) if len(vc) else default
 
 
+_PROJECT_TYPE_PRIORITY = ("신축", "증축·리모델링", "증축", "리모델링")
+
+
+def _facility_work_type(s: pd.Series) -> str:
+    """시설의 사업유형: 공고 하나라도 신축·증축·리모델링이면 그 유형(우선순위 순). 유지보수 공고가 아무리 많아도 본공사 1건을 묻지 않는다.
+    프로젝트 유형이 없으면 미분류/유지보수 중 최빈값."""
+    present = set(s.dropna().astype(str))
+    for t in _PROJECT_TYPE_PRIORITY:
+        if t in present:
+            return t
+    return _mode(s, "미분류")
+
+
 def discover_candidates(std: pd.DataFrame, previous_review: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """공고명에 표2 검색어가 포함된 공고 → 시설명 후보 + 분류 (검수용).
     previous_review: 이전 facility_candidates.xlsx 내용(있으면 시설ID·검수 컬럼을 (시설키, 수요기관) 기준으로 이어받음)."""
@@ -196,7 +209,7 @@ def discover_candidates(std: pd.DataFrame, previous_review: Optional[pd.DataFram
            .agg(시설명_후보=("시설명_후보", lambda s: _mode(s)),
                 공고건수=("공고번호", "nunique"),
                 최초공고일=("공고일시", "min"), 최종공고일=("공고일시", "max"),
-                사업유형=("사업유형", lambda s: _mode(s, "미분류")),
+                사업유형=("사업유형", _facility_work_type),
                 사업유형_분포=("사업유형", lambda s: ", ".join(f"{k} {v}" for k, v in s.value_counts().items())),
                 공종목록=("공종", lambda s: "/".join(sorted(set(s)))),
                 추정가격_합계=("추정가격", lambda s: pd.to_numeric(s, errors="coerce").fillna(0).sum()),

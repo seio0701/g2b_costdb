@@ -27,7 +27,7 @@ python -m g2b_costdb.pipeline doctor       # 파이썬·패키지·키 존재 �
 | 필드 확인 | `python -m g2b_costdb.pipeline probe --ym 2026-08` | 응답 필드명·표본 + `config.yaml fields` 매핑 대조 결과(없는 항목 표시), 면허제한 표본, (`use_awards` 켜면) 낙찰 표본과 `[award_*]` 매핑 상태 | 3~6회 |
 | S1 전량수집 | `python -m g2b_costdb.pipeline collect` | `data/raw/*.jsonl`, `data/notices_all.parquet`, `data/bsis_all.parquet`, (`use_awards`) `data/award_all.parquet` | 월×페이지(2026-08 기준 공고 약 8,800건=9페이지, 기초금액 약 6,200건=7페이지 → 93개월 약 1,500회). 일일예산 초과 시 `[미완료]` 표시와 남은 월을 보여주며 정상 종료 → 다음날 같은 명령 |
 | S2 후보탐색 | `python -m g2b_costdb.pipeline discover` | `output/facility_candidates.xlsx` (노란 셀 검수) | 0 |
-| **검수** | Excel에서 `검수_포함여부 / 검수_시설명 / 검수_별칭 / 검수_수요기관` 수정 후 저장·닫기 | — | — |
+| **검수** | Excel에서 `검수_포함여부 / 검수_시설명 / 검수_별칭 / 검수_수요기관` 수정 후 저장·닫기. `추정가격_합계` 내림차순으로 '포함'·'검토필요'부터 보고, 공동주택은 단지·지구명을 `검수_시설명`에 넣는다 | — | — |
 | S3 재검색 | `python -m g2b_costdb.pipeline research` | `data/notices_research.parquet` (전 공종 공고), 시설별 공종 분포 표 | 0 (기본). `config.yaml api.use_license_limit: true` 로 바꾸면 공고별 면허제한 조회(공고 수만큼) |
 | S4 중복정리 | `python -m g2b_costdb.pipeline dedup` | `data/notices_hist.parquet`, `data/notices_latest.parquet`, `data/logs_dedup.parquet` | 0 |
 | S5 첨부수집 | `python -m g2b_costdb.pipeline attach` | `data/files/`, `data/text/`, `data/texts.json`, `data/notes_attach.parquet` | 0 (파일 다운로드만, 중단 후 재실행 시 이어서) |
@@ -56,7 +56,7 @@ python -m tests.check_excel output/공사비DB.xlsx   # 생성된 Excel 의 수�
 ## 4. 주요 설계 포인트
 - **전량 수집 후 로컬 검색**: 키워드마다 API를 반복 호출하지 않고 월 단위로 공사 공고를 전량 내려받아 pandas에서 검색·재검색(호출량 최소화, 재분류 무제한).
 - **시설 후보 단위 = (표2 분류, 검색어, 시설키, 수요기관)**: 같은 이름의 시설이 여러 지자체에 있어도 섞이지 않는다. 재검색도 `검수_수요기관`이 있으면 그 기관의 공고만 찾는다.
-- **사업유형**: 신축·증축·리모델링 모두 DB 대상(유지보수만 제외). 같은 시설의 신축과 리모델링은 프로젝트ID(시설ID-N/E/R/ER)로 분리 집계.
+- **사업유형**: 신축·증축·리모델링 모두 DB 대상(유지보수만 제외). 시설 후보의 사업유형은 공고 중 하나라도 신축·증축·리모델링이면 그 유형(우선순위 신축 > 증축·리모델링 > 증축 > 리모델링)으로 두어, 유지보수 공고가 많은 시설의 본공사가 묻히지 않게 한다. 같은 시설의 신축과 리모델링은 프로젝트ID(시설ID-N/E/R/ER)로 분리 집계.
 - **재발주 처리**: 프로젝트키(프로젝트ID×공종×단계토큰)별로 취소공고 제외 후 최신 공고 1건을 대표로 채택. 구공고는 `대체됨` 표시로 이력 보존, 금액 ±30% 변동은 경고. 같은 프로젝트·공종에서 추정가격이 최대치의 30% 미만인 공고(무대기계·승강기 설치 등 부대공사)는 대표가 되지 않고 경고로 남긴다.
 - **공종 분류 우선순위**: 면허제한 업종명(선택) → 주공종명·부공종명(목록 응답의 업종명, 예: '기계설비ㆍ가스공사업') → 공고명 규칙('토목건축공사업'은 건축). 유지보수(방수·도색·교체 등) 공고는 기본 제외.
 - **금액 기준**: 추정가격·기초금액·관급자재는 모두 API 값이 1순위(2026-09 실제 응답에서 `presmptPrce`, `bssamt`, `govsplyAmt`, 도급자/관급자 설치 관급액 `contrctrcnstrtnGovsplyMtrlAmt`/`govcnstrtnGovsplyMtrlAmt`, `VAT`, `bdgtAmt` 확인). 문서 추출값은 API 값이 없을 때의 대체·교차검증용. 총공사비 = 기초금액 + 도급자관급액 + 관급자관급액(Excel 수식). LLM에는 금액을 힌트로 주지 않아 교차검증이 독립적이다.
