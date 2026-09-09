@@ -231,6 +231,54 @@ def test_extract_and_verify():
     assert schema["additionalProperties"] is False and set(schema["required"]) == set(schema["properties"])
 
 
+def test_handoff_and_batch(tmp):
+    """파일 인수인계(export/import)와 Message Batches 흐름(가짜 클라이언트)."""
+    from types import SimpleNamespace as NS
+    cfg_llm = {"model": "claude-sonnet-5", "max_input_chars": 60000, "structured_output": True}
+    texts = {"K1-000": "연면적 1,000㎡ 추정가격 100,000,000원", "K2-000": "본문"}
+    hints = {"K1-000": {"공고번호": "K1", "공고명": "가상 미술관 건립공사", "수요기관": "가상시"}}
+    in_dir, out_dir = os.path.join(tmp, "llm_in"), os.path.join(tmp, "llm_out")
+    assert extract_llm.export_prompts(["K1-000", "K2-000"], texts, hints, cfg_llm, in_dir, out_dir) == 2
+    body = open(os.path.join(in_dir, "K1-000.txt"), encoding="utf-8").read()
+    assert "llm_out/K1-000.json" in body and "연면적 1,000㎡" in body and os.path.exists(os.path.join(in_dir, "README_지시문.md"))
+    open(os.path.join(out_dir, "K1-000.json"), "w", encoding="utf-8").write('```json\n{"연면적_m2": "1,000", "추정가격_원": 100000000, "근거문구": {"연면적_m2": "연면적 1,000㎡"}}\n```')
+    open(os.path.join(out_dir, "K2-000.json"), "w", encoding="utf-8").write('{"공사명": null}')
+    open(os.path.join(out_dir, "K9-000.json"), "w", encoding="utf-8").write('{"연면적_m2": 5}')
+    open(os.path.join(out_dir, "bad.json"), "w", encoding="utf-8").write('{not json')
+    docs, errors = extract_llm.import_results(out_dir, {"K1-000", "K2-000", "bad"})
+    assert set(docs) == {"K1-000"} and docs["K1-000"]["연면적_m2"] == 1000.0 and docs["K1-000"]["_model"] == "manual/cowork"
+    assert {fn for fn, _ in errors} == {"K2-000.json", "K9-000.json", "bad.json"}, errors
+    # Batches: 제출 → 진행중 → 완료(성공 1, 오류 1)
+    calls = {"create": 0, "retrieve": 0}
+
+    class FakeBatches:
+        def create(self, requests):
+            calls["create"] += 1
+            assert all("output_config" in r["params"] for r in requests) and requests[0]["custom_id"] == "K1-000"
+            return NS(id="msgbatch_1", processing_status="in_progress")
+
+        def retrieve(self, bid):
+            calls["retrieve"] += 1
+            st = "in_progress" if calls["retrieve"] == 1 else "ended"
+            return NS(processing_status=st, request_counts=NS(processing=0, succeeded=1, errored=1, canceled=0, expired=0))
+
+        def results(self, bid):
+            ok = NS(custom_id="K1-000", result=NS(type="succeeded", message=NS(content=[NS(type="text", text='{"연면적_m2": 1000, "추정가격_원": 100000000, "근거문구": []}')],
+                                                                                   usage=NS(input_tokens=500, output_tokens=80))))
+            bad = NS(custom_id="K2-000", result=NS(type="errored", error=NS(type="invalid_request", message="too long")))
+            return [ok, bad]
+    client = NS(messages=NS(batches=FakeBatches()))
+    sub = extract_llm.submit_batches(client, [(k, texts[k], hints.get(k, {})) for k in ("K1-000", "K2-000")], cfg_llm)
+    assert sub[0]["id"] == "msgbatch_1" and sub[0]["keys"] == ["K1-000", "K2-000"] and calls["create"] == 1
+    st, got, counts = extract_llm.fetch_batch(client, "msgbatch_1", "claude-sonnet-5")
+    assert st == "in_progress" and got == {}
+    st, got, counts = extract_llm.fetch_batch(client, "msgbatch_1", "claude-sonnet-5")
+    assert st == "ended" and got["K1-000"]["연면적_m2"] == 1000.0 and got["K1-000"]["_usage_in"] == 500 and "_error" in got["K2-000"]
+    assert counts["succeeded"] == 1 and counts["errored"] == 1
+    params = extract_llm.build_request_params("본문", {"공고명": "x"}, cfg_llm)
+    assert params["model"] == "claude-sonnet-5" and params["output_config"]["format"]["type"] == "json_schema" and "본문" in params["messages"][0]["content"]
+
+
 def _hwp_record(tag: int, payload: bytes, level: int = 0) -> bytes:
     size = len(payload)
     if size < 0xFFF:
@@ -312,6 +360,7 @@ def run():
         test_classify()
         test_discover_and_dedup(tmp)
         test_extract_and_verify()
+        test_handoff_and_batch(tmp)
         test_attachments(tmp)
     print("OK: 회귀 테스트 통과")
 

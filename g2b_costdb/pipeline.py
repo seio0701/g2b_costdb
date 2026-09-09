@@ -8,7 +8,7 @@ python -m g2b_costdb.pipeline discover                    # S2 후보 시설 검
 python -m g2b_costdb.pipeline research                    # S3 시설명 재검색 + 면허제한 조회
 python -m g2b_costdb.pipeline dedup                       # S4 최신 공고 선별
 python -m g2b_costdb.pipeline attach                      # S5 첨부 다운로드·텍스트 추출
-python -m g2b_costdb.pipeline extract                     # S6 비용 견적만 출력 (--yes 를 붙이면 실제 LLM 추출·교차검증)
+python -m g2b_costdb.pipeline extract                     # S6 비용 견적만 출력 (--yes: API 호출 / --batch --yes: 배치 제출 후 --batch 로 수거 / --export → --import: 파일 인수인계)
 python -m g2b_costdb.pipeline excel                       # S7 Excel DB
 """
 from __future__ import annotations
@@ -282,7 +282,7 @@ def stage_attach(cfg):
         print("형식별 추출 결과:\n" + s.to_string())
 
 
-def stage_extract(cfg, yes: bool = False):
+def _extract_context(cfg):
     latest = _read(cfg, "notices_latest.parquet")
     texts_path = _p(cfg, "texts.json")
     if not os.path.exists(texts_path):
@@ -295,23 +295,133 @@ def stage_extract(cfg, yes: bool = False):
         with open(cache_path, encoding="utf-8") as f:
             docs = json.load(f)
     todo = [k for k in latest["공고키"] if k in texts and not (k in docs and "_error" not in docs[k])]
+    hints = {r["공고키"]: {"공고번호": r["공고번호"], "공고명": r["공고명"], "수요기관": r["수요기관"]} for _, r in latest.iterrows()}
+    return latest, texts, docs, todo, hints, cache_path
+
+
+def _save_docs(cache_path, docs):
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(docs, f, ensure_ascii=False, default=str)
+
+
+def _verify_and_report(cfg, latest, docs, n_ok=None, n_err=None):
+    logs = []
+    for _, row in latest.iterrows():
+        d = docs.get(row["공고키"], {})
+        if d and "_error" not in d:
+            logs.extend(extract_llm.cross_verify(row["공고번호"], row.to_dict(), d,
+                                                 cfg["verify"]["price_diff_warn_ratio"], cfg["verify"]["vat_ratio"]))
+    _logs_frame(logs).to_parquet(_p(cfg, "logs_verify.parquet"), index=False)
+    done = len([k for k in latest["공고키"] if k in docs and "_error" not in docs[k]])
+    usage_in = sum((d.get("_usage_in") or 0) for d in docs.values() if isinstance(d, dict))
+    usage_out = sum((d.get("_usage_out") or 0) for d in docs.values() if isinstance(d, dict))
+    head = f"LLM 추출 성공 {n_ok}건 / 실패 {n_err}건, " if n_ok is not None else ""
+    print(f"{head}대표 공고 {len(latest)}건 중 추출 완료 {done}건 (누적 토큰 입력 {usage_in:,} 출력 {usage_out:,}), 검증로그 {len(logs)}건")
+    if logs:
+        print(pd.DataFrame(logs)["판정"].value_counts().to_string())
+
+
+def _print_estimate(cfg, texts, todo, docs, latest, batch=False):
     est = extract_llm.estimate_cost(texts, todo, cfg["llm"], float(cfg["llm"].get("usd_krw", 1400)))
+    if batch:
+        est["usd"], est["krw"] = round(est["usd"] / 2, 2), est["krw"] // 2
     print(f"LLM 추출 대상: {len(todo)}건 (이미 완료 {len([k for k in docs if '_error' not in docs[k]])}건, 텍스트 없음 "
           f"{len([k for k in latest['공고키'] if k not in texts])}건)")
-    print(f"예상 입력 {est['input_tokens']:,} 토큰 / 출력 {est['output_tokens']:,} 토큰, 모델 {est['model']} → 약 ${est['usd']} (≈{est['krw']:,}원, 환율 {cfg['llm'].get('usd_krw', 1400)})")
-    if not yes:
-        print("실제 추출을 실행하려면:  python -m g2b_costdb.pipeline extract --yes")
+    print(f"예상 입력 {est['input_tokens']:,} 토큰 / 출력 {est['output_tokens']:,} 토큰, 모델 {est['model']}"
+          f"{' (Batches 50% 할인 적용)' if batch else ''} → 약 ${est['usd']} (≈{est['krw']:,}원, 환율 {cfg['llm'].get('usd_krw', 1400)})")
+    return est
+
+
+def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = False, import_: bool = False):
+    """LLM 추출. 세 가지 방식:
+      (기본)   extract            → 견적만 / extract --yes → API 로 한 건씩 호출
+      --batch  extract --batch    → 대기 중인 배치가 있으면 결과 수거, 없으면 견적 / --batch --yes → Message Batches 제출(50% 할인, 최대 24h)
+      --export extract --export   → data/llm_in/<공고키>.txt 로 내보내기(Cowork·사람이 채움) → extract --import 로 data/llm_out/*.json 수거"""
+    latest, texts, docs, todo, hints, cache_path = _extract_context(cfg)
+    in_dir, out_dir = _p(cfg, "llm_in"), _p(cfg, "llm_out")
+
+    if export:
+        n = extract_llm.export_prompts(todo, texts, hints, cfg["llm"], in_dir, out_dir)
+        print(f"내보내기 완료: {n}건 → {os.path.join(in_dir, '<공고키>.txt')}  (지시문: README_지시문.md)")
+        print(f"채운 JSON 은 {os.path.join(out_dir, '<공고키>.json')} 으로 저장한 뒤  python -m g2b_costdb.pipeline extract --import")
         return
+
+    if import_:
+        found, errors = extract_llm.import_results(out_dir, set(latest["공고키"]))
+        for k, d in found.items():
+            docs[k] = d
+        _save_docs(cache_path, docs)
+        print(f"가져오기: JSON {len(found)}건 반영, 문제 파일 {len(errors)}건")
+        for fn, why in errors[:20]:
+            print(f"  - {fn}: {why}")
+        remaining = [k for k in latest["공고키"] if k in texts and not (k in docs and "_error" not in docs[k])]
+        print(f"아직 미추출 {len(remaining)}건" + (f" (예: {', '.join(remaining[:5])})" if remaining else ""))
+        _verify_and_report(cfg, latest, docs)
+        return
+
     env = cfg["llm"].get("api_key_env", "ANTHROPIC_API_KEY")
+    if batch:
+        state_path = _p(cfg, "llm_batch.json")
+        state = json.load(open(state_path, encoding="utf-8")) if os.path.exists(state_path) else {"batches": []}
+        pending = [b for b in state["batches"] if b.get("status") != "ended"]
+        if pending:
+            if not os.environ.get(env, "").strip():
+                raise SystemExit(f"환경변수 {env} 가 없습니다.")
+            import anthropic  # type: ignore
+            client = anthropic.Anthropic(api_key=os.environ.get(env) or None)
+            n_ok = n_err = 0
+            for b in pending:
+                status, got, counts = extract_llm.fetch_batch(client, b["id"], cfg["llm"].get("model", ""))
+                if status != "ended":
+                    print(f"배치 {b['id']}: {status} (처리중 {counts.get('processing', 0)}, 성공 {counts.get('succeeded', 0)}, 오류 {counts.get('errored', 0)}) — 나중에 같은 명령으로 다시 확인")
+                    continue
+                for k in b["keys"]:
+                    d = got.get(k, {"_error": "배치 결과에 없음"})
+                    docs[k] = d
+                    n_ok += 0 if "_error" in d else 1
+                    n_err += 1 if "_error" in d else 0
+                b["status"] = "ended"
+                print(f"배치 {b['id']}: 완료 (성공 {counts.get('succeeded', 0)}, 오류 {counts.get('errored', 0)}, 만료 {counts.get('expired', 0)})")
+            _save_docs(cache_path, docs)
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=1)
+            if any(b.get("status") != "ended" for b in state["batches"]):
+                return
+            _verify_and_report(cfg, latest, docs, n_ok, n_err)
+            return
+        _print_estimate(cfg, texts, todo, docs, latest, batch=True)
+        if not todo:
+            print("제출할 공고가 없습니다.")
+            return
+        if not yes:
+            print("배치 제출을 실행하려면:  python -m g2b_costdb.pipeline extract --batch --yes   (결과 수거도 같은 명령 extract --batch)")
+            return
+        if not os.environ.get(env, "").strip():
+            raise SystemExit(f"환경변수 {env} 가 없습니다. PowerShell 에서 setx {env} \"키\" 로 설정한 뒤 새 터미널에서 다시 실행하세요.")
+        import anthropic  # type: ignore
+        client = anthropic.Anthropic(api_key=os.environ.get(env) or None)
+        try:
+            submitted = extract_llm.submit_batches(client, [(k, texts[k], hints.get(k, {})) for k in todo], cfg["llm"])
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
+            raise SystemExit(f"[중단] Claude API 인증 실패: {e}. {env} 값을 확인하세요.")
+        state["batches"].extend(submitted)
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=1)
+        print(f"배치 {len(submitted)}개 제출 (공고 {len(todo)}건). 대개 1시간 안에, 늦어도 24시간 안에 끝납니다.")
+        print("결과 수거:  python -m g2b_costdb.pipeline extract --batch")
+        return
+
+    _print_estimate(cfg, texts, todo, docs, latest)
+    if not yes:
+        print("실제 추출을 실행하려면:  python -m g2b_costdb.pipeline extract --yes   (50% 저렴한 배치: extract --batch --yes / 파일 인수인계: extract --export)")
+        return
     if not os.environ.get(env, "").strip():
         raise SystemExit(f"환경변수 {env} 가 없습니다. PowerShell 에서 setx {env} \"키\" 로 설정한 뒤 새 터미널에서 다시 실행하세요.")
     import anthropic  # type: ignore
     n_ok = n_err = 0
     for k in todo:
-        row = latest[latest["공고키"] == k].iloc[0]
-        hint = {"공고번호": row["공고번호"], "공고명": row["공고명"], "수요기관": row["수요기관"]}   # 금액은 넣지 않음(교차검증 독립성)
         try:
-            docs[k] = extract_llm.extract_with_claude(texts[k], hint, cfg["llm"])
+            docs[k] = extract_llm.extract_with_claude(texts[k], hints.get(k, {}), cfg["llm"])
             n_ok += 1
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
             raise SystemExit(f"[중단] Claude API 인증 실패: {e}. {env} 값을 확인하세요.")
@@ -322,21 +432,8 @@ def stage_extract(cfg, yes: bool = False):
             log.warning("LLM 추출 실패 %s: %s", k, e)
             docs[k] = {"_error": str(e)[:300]}
             n_err += 1
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(docs, f, ensure_ascii=False, default=str)
-    logs = []
-    for _, row in latest.iterrows():
-        d = docs.get(row["공고키"], {})
-        if d and "_error" not in d:
-            logs.extend(extract_llm.cross_verify(row["공고번호"], row.to_dict(), d,
-                                                 cfg["verify"]["price_diff_warn_ratio"], cfg["verify"]["vat_ratio"]))
-    _logs_frame(logs).to_parquet(_p(cfg, "logs_verify.parquet"), index=False)
-    usage_in = sum((d.get("_usage_in") or 0) for d in docs.values() if isinstance(d, dict))
-    usage_out = sum((d.get("_usage_out") or 0) for d in docs.values() if isinstance(d, dict))
-    print(f"LLM 추출 성공 {n_ok}건 / 실패 {n_err}건 (누적 완료 {len([k for k in docs if '_error' not in docs[k]])}건, "
-          f"누적 토큰 입력 {usage_in:,} 출력 {usage_out:,}), 검증로그 {len(logs)}건")
-    if logs:
-        print(pd.DataFrame(logs)["판정"].value_counts().to_string())
+        _save_docs(cache_path, docs)
+    _verify_and_report(cfg, latest, docs, n_ok, n_err)
 
 
 def assemble_trade_table(latest: pd.DataFrame, docs: dict) -> pd.DataFrame:
@@ -412,7 +509,10 @@ def main(argv=None):
     ap.add_argument("stage", choices=["doctor", "probe", "collect", "discover", "research", "dedup", "attach", "extract", "excel"])
     ap.add_argument("--config", default=None)
     ap.add_argument("--ym", default="2026-08", help="probe 대상 월(YYYY-MM)")
-    ap.add_argument("--yes", action="store_true", help="extract: 비용 견적 확인 후 실제 LLM 호출 실행")
+    ap.add_argument("--yes", action="store_true", help="extract: 비용 견적 확인 후 실제 LLM 호출(또는 배치 제출) 실행")
+    ap.add_argument("--batch", action="store_true", help="extract: Message Batches 로 제출/수거 (50%% 할인, 최대 24시간)")
+    ap.add_argument("--export", action="store_true", help="extract: 공고별 작업지시 txt 를 data/llm_in 에 내보내기 (Cowork·사람이 채움)")
+    ap.add_argument("--import", dest="import_", action="store_true", help="extract: data/llm_out 의 JSON 을 가져와 반영")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = load_config(a.config)
@@ -423,7 +523,7 @@ def main(argv=None):
     elif a.stage == "probe":
         collect.probe(cfg, a.ym)
     elif a.stage == "extract":
-        stage_extract(cfg, yes=a.yes)
+        stage_extract(cfg, yes=a.yes, batch=a.batch, export=a.export, import_=a.import_)
     else:
         {"collect": stage_collect, "discover": stage_discover, "research": stage_research, "dedup": stage_dedup,
          "attach": stage_attach, "excel": stage_excel}[a.stage](cfg)

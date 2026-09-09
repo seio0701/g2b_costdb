@@ -30,9 +30,15 @@ python -m g2b_costdb.pipeline doctor       # 파이썬·패키지·키 존재 �
 | S3 재검색 | `python -m g2b_costdb.pipeline research` | `data/notices_research.parquet` (전 공종 공고), 시설별 공종 분포 표 | 0 (기본). `config.yaml api.use_license_limit: true` 로 바꾸면 공고별 면허제한 조회(공고 수만큼) |
 | S4 중복정리 | `python -m g2b_costdb.pipeline dedup` | `data/notices_hist.parquet`, `data/notices_latest.parquet`, `data/logs_dedup.parquet` | 0 |
 | S5 첨부수집 | `python -m g2b_costdb.pipeline attach` | `data/files/`, `data/text/`, `data/texts.json`, `data/notes_attach.parquet` | 0 (파일 다운로드만, 중단 후 재실행 시 이어서) |
-| S6 LLM추출 | `python -m g2b_costdb.pipeline extract` → 견적 확인 → `extract --yes` | `data/llm_docs.json`, `data/logs_verify.parquet` | Claude API(`--yes` 없이는 비용 견적만 출력) |
+| S6 LLM추출 | `python -m g2b_costdb.pipeline extract` → 견적 확인 → 아래 세 방식 중 택일 | `data/llm_docs.json`, `data/logs_verify.parquet` | Claude API(`--yes` 없이는 비용 견적만 출력) |
 | S7 Excel | `python -m g2b_costdb.pipeline excel` | `output/공사비DB.xlsx` | 0 |
 
+- **S6 추출 방식 세 가지** (뒤 단계는 동일하게 이어짐, 섞어 써도 됨 — 이미 추출된 공고는 건너뜀):
+  | 방식 | 명령 | 특징 |
+  |---|---|---|
+  | 즉시 호출 | `extract --yes` | 한 건씩 바로 처리. 정가 |
+  | 배치(권장) | `extract --batch --yes` 로 제출 → 나중에 `extract --batch` 로 수거 | Message Batches, **50% 할인**, 대개 1시간·최대 24시간. 제출 상태는 `data/llm_batch.json` |
+  | 파일 인수인계 | `extract --export` → `data/llm_in/<공고키>.txt` 를 Cowork·사람이 읽고 `data/llm_out/<공고키>.json` 작성 → `extract --import` | API 비용 0. 시범 검증·예외 처리용. 지시문은 `data/llm_in/README_지시문.md` |
 - `discover` 를 다시 실행해도 기존 검수 내용과 시설ID는 (시설키, 수요기관)이 같은 행에 그대로 이어진다.
 - 오늘이 속한 달은 완료 표시를 하지 않고 매번 다시 받는다. 특정 달을 다시 받으려면 `data/raw/notices_done.txt`(또는 `bsis_done.txt`)에서 해당 월을 지우고 `collect` 를 실행한다(파일이 있으므로 캐시를 우회해 새로 받음).
 

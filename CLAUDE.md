@@ -39,7 +39,7 @@ Excel 공사비 DB(`output/공사비DB.xlsx`)를 만드는 파이프라인이다
 | research | `data/notices_research.parquet`, 시설당 공종 분포(건축/전기/정보통신/소방) 보고 | 검수 Excel 미저장·열림 상태 확인 |
 | dedup | "전체 N건 → 대표 M건" 보고, 경고 건 요약 | — |
 | attach | `07` 추출노트 기준 파일 성공률 보고. HWP 실패율 20% 초과 시 pyhwp/한컴 COM 폴백 점검 | 배포용 HWP는 목록만 정리해 사용자에게 수동 처리 안내 |
-| extract | `extract`(플래그 없음)가 출력한 건수·토큰·예상 비용을 사용자에게 보고하고 확인을 받은 뒤 `extract --yes` 실행. `data/llm_docs.json` 건수, 검증로그의 정상/경고/오류 건수 보고 | 인증 실패면 키 안내 후 중단, 429면 잠시 후 `extract --yes` 재실행(완료 건은 건너뜀) |
+| extract | `extract`(플래그 없음)가 출력한 건수·토큰·예상 비용을 사용자에게 보고하고 확인을 받은 뒤 실행. 방식은 사용자가 고른다: `extract --yes`(즉시) / `extract --batch --yes` 제출 후 `extract --batch` 수거(50% 할인) / `extract --export` → Cowork·사람이 `data/llm_out` 에 JSON 작성 → `extract --import`. `data/llm_docs.json` 건수, 검증로그의 정상/경고/오류 건수 보고 | 인증 실패면 키 안내 후 중단, 429면 잠시 후 재실행(완료 건은 건너뜀). `--import` 의 "문제 파일" 목록은 사용자에게 보여 주고 대신 채우지 않는다 |
 | excel | `output/공사비DB.xlsx` 생성, 시트별 행수, 수식 오류 0건, 06_검증로그 경고·오류 건수 요약 | 오류 셀 위치와 원인 보고 |
 
 ## 코드 수정 원칙

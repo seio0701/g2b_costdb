@@ -56,7 +56,15 @@ data/text 폴더의 txt 3개를 열어 공사개요·추정가격 문구가 보�
 HANDOFF.md를 읽고 이어서 해줘.
 1) 환경변수 ANTHROPIC_API_KEY 존재 여부만 확인(값 출력 금지).
 2) python -m g2b_costdb.pipeline extract (플래그 없이) 를 실행해 출력된 대상 건수·예상 토큰·예상 비용을 보고하고 내 확인을 기다려줘.
-3) 내가 "진행"이라고 하면 extract --yes 실행. 끝나면 추출 성공 건수와 06_검증로그 기준 정상/경고/오류 건수, 경고 상위 10건을 보여줘. HANDOFF.md 갱신.
+3) 내가 "배치 진행"이라고 하면 extract --batch --yes 로 제출하고, 1시간 뒤(또는 다음 세션에서) extract --batch 로 결과를 수거해줘.
+   "바로 진행"이라고 하면 extract --yes 로 즉시 처리해줘. 끝나면 추출 성공 건수와 06_검증로그 기준 정상/경고/오류 건수, 경고 상위 10건을 보여줘. HANDOFF.md 갱신.
+```
+
+## 세션 6-대안 — Cowork(구독)로 직접 추출하기 (API 비용 0, 시범·예외 처리용)
+```
+HANDOFF.md를 읽고 이어서 해줘. python -m g2b_costdb.pipeline extract --export 를 실행해 data/llm_in 에 작업지시 파일을 만들어줘.
+그다음 data/llm_in/README_지시문.md 의 규칙대로 llm_in 의 txt 를 20개씩 읽어 llm_out 에 같은 이름의 .json 으로 저장해줘.
+전부 끝나면 python -m g2b_costdb.pipeline extract --import 를 실행해 반영하고, 문제 파일 목록과 미추출 건수를 알려줘. HANDOFF.md 갱신.
 ```
 
 ## 세션 7 — Excel DB 생성·점검

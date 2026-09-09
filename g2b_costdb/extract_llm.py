@@ -184,18 +184,37 @@ def estimate_cost(texts: Dict[str, str], keys: List[str], cfg_llm: Dict, usd_krw
             "usd": round(usd, 2), "krw": int(usd * usd_krw)}
 
 
+def build_user_prompt(text: str, api_hint: Dict, cfg_llm: Dict) -> str:
+    hint = {k: jsonable(v) for k, v in (api_hint or {}).items()}
+    schema = json.dumps(FIELDS, ensure_ascii=False, indent=1)
+    return (f"[공고 메타데이터(API)]\n{json.dumps(hint, ensure_ascii=False)}\n\n"
+            f"[출력 스키마]\n{schema}\n\n"
+            f"[공고문 텍스트]\n{focus_text(text, int(cfg_llm.get('max_input_chars', 60000)))}")
+
+
+def build_request_params(text: str, api_hint: Dict, cfg_llm: Dict, structured: Optional[bool] = None) -> Dict:
+    """messages.create / Batches 요청에 공통으로 쓰는 파라미터."""
+    if structured is None:
+        structured = bool(cfg_llm.get("structured_output", True))
+    params = dict(model=cfg_llm.get("model", "claude-sonnet-5"), max_tokens=int(cfg_llm.get("max_tokens", 8000)),
+                  system=SYSTEM, messages=[{"role": "user", "content": build_user_prompt(text, api_hint, cfg_llm)}])
+    if structured:
+        params["output_config"] = {"format": {"type": "json_schema", "schema": output_schema()}}
+    return params
+
+
+def parse_response_text(out: str, model: str = "") -> Dict:
+    data = normalize_doc(_parse_json(out))
+    data["_model"] = model
+    return data
+
+
 def extract_with_claude(text: str, api_hint: Dict, cfg_llm: Dict) -> Dict:
     """공고문 텍스트 → 구조화 dict. api_hint: {'공고번호','공고명','수요기관'} (문서 식별용 힌트. 금액은 넣지 않는다)."""
     import anthropic  # type: ignore
 
     client = anthropic.Anthropic(api_key=os.environ.get(cfg_llm.get("api_key_env", "ANTHROPIC_API_KEY")) or None)
-    hint = {k: jsonable(v) for k, v in (api_hint or {}).items()}
-    schema = json.dumps(FIELDS, ensure_ascii=False, indent=1)
-    user = (
-        f"[공고 메타데이터(API)]\n{json.dumps(hint, ensure_ascii=False)}\n\n"
-        f"[출력 스키마]\n{schema}\n\n"
-        f"[공고문 텍스트]\n{focus_text(text, int(cfg_llm.get('max_input_chars', 60000)))}"
-    )
+    user = build_user_prompt(text, api_hint, cfg_llm)
     kwargs = dict(model=cfg_llm.get("model", "claude-sonnet-5"), max_tokens=int(cfg_llm.get("max_tokens", 8000)),
                   system=SYSTEM, messages=[{"role": "user", "content": user}])
     structured = bool(cfg_llm.get("structured_output", True))
@@ -287,3 +306,145 @@ def cross_verify(bid_no: str, api_row: Dict, doc: Dict, warn_ratio: float = 0.00
         logs.append({"공고번호": bid_no, "항목": "총공사금액=기초금액+관급", "API값": comp, "문서값": tot, "차이": tot - comp,
                      "차이율": round(r, 5), "판정": "정상" if abs(r) <= 0.01 else "경고", "비고": "금액 구성 정합성"})
     return logs
+
+
+# ── 파일 인수인계 모드 (Cowork·사람이 채우는 방식) ─────────────────────
+EXPORT_README = """# LLM 추출 작업지시 (Cowork / 사람용)
+
+이 폴더(`llm_in/`)의 `*.txt` 파일 하나가 공고 1건입니다. 각 파일 맨 위의 [작업지시]·[출력 JSON 양식]을 따라
+같은 이름의 JSON 파일을 `../llm_out/<같은 이름>.json` 으로 저장하세요. 예) `llm_in/R26BK0001-000.txt` → `llm_out/R26BK0001-000.json`
+
+규칙 요약
+- 문서에 없는 값은 null. 추정하지 않습니다.
+- 금액은 원 단위 정수(예: '1,234백만원' → 1234000000, '12.3억원' → 1230000000, 천원 단위 표는 ×1000).
+- 면적은 ㎡ 숫자(평 → ×3.3058), 층수는 정수. 리모델링이면 연면적_m2 에 공사 대상 면적을 넣고 근거문구에 '대상면적' 표시.
+- 기초금액 = 통상 추정가격 + 부가가치세. 관급자재(도급자관급액·관급자관급액)는 별도 항목.
+- 근거문구: {"항목명": "원문 인용 30자 이내", ...} 형태의 객체.
+- JSON 외의 설명·코드블록 표시(```)는 넣지 않습니다(있어도 무시되지만 깨끗한 편이 안전).
+
+Cowork/Claude Code 에 붙여 넣을 지시문 예시
+  "llm_in 폴더의 txt 파일을 하나씩 읽고, 각 파일 상단의 작업지시대로 JSON 을 만들어 llm_out 폴더에 같은 이름의 .json 으로 저장해 줘.
+   한 번에 20개씩 처리하고, 끝나면 몇 개 처리했는지 알려 줘."
+
+모두 채운 뒤 프로젝트 폴더에서:  python -m g2b_costdb.pipeline extract --import
+"""
+
+
+def export_template() -> Dict:
+    t: Dict = {}
+    for k in _STR_FIELDS:
+        t[k] = None
+    for k in _NUM_FIELDS:
+        t[k] = None
+    t["사업유형"] = "신축|증축|리모델링|증축·리모델링|유지보수|기타 중 하나"
+    t["공종"] = "건축|전기|정보통신|소방|조경|기계설비|토목|기타 중 하나"
+    t["근거문구"] = {"연면적_m2": "원문 인용", "추정가격_원": "원문 인용"}
+    t["신뢰도"] = "high|medium|low 중 하나"
+    return t
+
+
+def export_prompt_file(key: str, text: str, api_hint: Dict, cfg_llm: Dict) -> str:
+    hint = {k: jsonable(v) for k, v in (api_hint or {}).items()}
+    return (f"# 공고 추출 작업지시 — {key}\n\n"
+            f"[메타데이터]\n{json.dumps(hint, ensure_ascii=False)}\n\n"
+            f"[작업지시]\n{SYSTEM}\n"
+            f"결과는 llm_out/{key}.json 파일로 저장합니다.\n\n"
+            f"[출력 JSON 양식]\n{json.dumps(export_template(), ensure_ascii=False, indent=1)}\n\n"
+            f"[공고문 텍스트]\n{focus_text(text, int(cfg_llm.get('max_input_chars', 60000)))}\n")
+
+
+def export_prompts(keys: List[str], texts: Dict[str, str], hints: Dict[str, Dict], cfg_llm: Dict, in_dir: str, out_dir: str) -> int:
+    os.makedirs(in_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(in_dir, "README_지시문.md"), "w", encoding="utf-8") as f:
+        f.write(EXPORT_README)
+    with open(os.path.join(in_dir, "_schema.json"), "w", encoding="utf-8") as f:
+        json.dump(output_schema(), f, ensure_ascii=False, indent=1)
+    n = 0
+    for k in keys:
+        with open(os.path.join(in_dir, f"{k}.txt"), "w", encoding="utf-8") as f:
+            f.write(export_prompt_file(k, texts[k], hints.get(k, {}), cfg_llm))
+        n += 1
+    return n
+
+
+def import_results(out_dir: str, valid_keys: Optional[set] = None) -> Tuple[Dict[str, Dict], List[Tuple[str, str]]]:
+    """llm_out/*.json → {공고키: doc}. 반환 (docs, [(파일명, 오류)])."""
+    docs: Dict[str, Dict] = {}
+    errors: List[Tuple[str, str]] = []
+    if not os.path.isdir(out_dir):
+        return docs, errors
+    for fn in sorted(os.listdir(out_dir)):
+        if not fn.lower().endswith(".json") or fn.startswith("_"):
+            continue
+        key = fn[:-5]
+        if valid_keys is not None and key not in valid_keys:
+            errors.append((fn, "대표 공고 목록에 없는 공고키(파일명 확인)"))
+            continue
+        try:
+            raw = open(os.path.join(out_dir, fn), encoding="utf-8-sig").read()
+            doc = normalize_doc(_parse_json(raw))
+        except Exception as e:  # noqa: BLE001
+            errors.append((fn, f"JSON 해석 실패: {str(e)[:120]}"))
+            continue
+        filled = [k for k in _NUM_FIELDS + ["공사명", "구조"] if doc.get(k) not in (None, "", 0)]
+        if not filled:
+            errors.append((fn, "값이 하나도 없음(전부 null)"))
+            continue
+        doc["_model"] = "manual/cowork"
+        doc["_source_files"] = fn
+        docs[key] = doc
+    return docs, errors
+
+
+# ── Message Batches (50% 할인, 최대 24시간) ────────────────────────
+BATCH_CHUNK = 500
+
+
+def submit_batches(client, items: List[Tuple[str, str, Dict]], cfg_llm: Dict, chunk: int = BATCH_CHUNK) -> List[Dict]:
+    """items: [(공고키, 텍스트, 힌트)]. 반환: [{'id', 'keys', 'status'}]. 구조화 출력이 거부되면 일반 요청으로 재시도."""
+    out = []
+    for i in range(0, len(items), chunk):
+        part = items[i:i + chunk]
+        for structured in (bool(cfg_llm.get("structured_output", True)), False):
+            reqs = [{"custom_id": k, "params": build_request_params(t, h, cfg_llm, structured)} for k, t, h in part]
+            try:
+                b = client.messages.batches.create(requests=reqs)
+                out.append({"id": b.id, "keys": [k for k, _, _ in part], "status": "submitted", "structured": structured})
+                break
+            except Exception as e:  # noqa: BLE001
+                if structured and "output_config" in str(e) or (structured and "400" in str(e)):
+                    log.warning("구조화 출력 배치가 거부됨(%s) → 일반 요청으로 재제출", str(e)[:120])
+                    continue
+                raise
+    return out
+
+
+def fetch_batch(client, batch_id: str, model: str = "") -> Tuple[str, Dict[str, Dict], Dict[str, int]]:
+    """반환 (processing_status, {공고키: doc 또는 {'_error':…}}, request_counts dict)."""
+    b = client.messages.batches.retrieve(batch_id)
+    counts = {}
+    rc = getattr(b, "request_counts", None)
+    for name in ("processing", "succeeded", "errored", "canceled", "expired"):
+        counts[name] = int(getattr(rc, name, 0) or 0) if rc is not None else 0
+    if b.processing_status != "ended":
+        return b.processing_status, {}, counts
+    docs: Dict[str, Dict] = {}
+    for r in client.messages.batches.results(batch_id):
+        key = r.custom_id
+        rtype = getattr(r.result, "type", "")
+        if rtype == "succeeded":
+            msg = r.result.message
+            text = "".join(getattr(blk, "text", "") for blk in msg.content if getattr(blk, "type", "") == "text")
+            try:
+                d = parse_response_text(text, model)
+                d["_usage_in"] = getattr(getattr(msg, "usage", None), "input_tokens", None)
+                d["_usage_out"] = getattr(getattr(msg, "usage", None), "output_tokens", None)
+                d["_batch_id"] = batch_id
+                docs[key] = d
+            except Exception as e:  # noqa: BLE001
+                docs[key] = {"_error": f"응답 해석 실패: {str(e)[:150]}"}
+        else:
+            err = getattr(r.result, "error", None)
+            docs[key] = {"_error": f"batch {rtype}: {getattr(err, 'type', '') or ''} {getattr(err, 'message', '') or ''}".strip()}
+    return "ended", docs, counts

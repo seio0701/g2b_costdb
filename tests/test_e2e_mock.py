@@ -135,6 +135,23 @@ def run():
             out = _run(["extract", "--yes", "--config", cfg_path])
         docs = json.load(open(data("llm_docs.json"), encoding="utf-8"))
         assert docs["R24010001-001"]["연면적_m2"] == 15200.0 and docs["R24010001-001"]["관급자관급액_원"] == 2100000000
+        # 파일 인수인계: 1건을 실패 상태로 만들고 export → (Cowork 역할) JSON 작성 → import
+        docs["R24010002-000"] = {"_error": "모의 실패"}
+        with open(data("llm_docs.json"), "w", encoding="utf-8") as f:
+            json.dump(docs, f, ensure_ascii=False)
+        out = _run(["extract", "--export", "--config", cfg_path])
+        assert os.path.exists(data("llm_in", "R24010002-000.txt")) and "내보내기 완료: 1건" in out, out
+        exported = open(data("llm_in", "R24010002-000.txt"), encoding="utf-8").read()
+        fake = _fake_extract(exported.split("[공고문 텍스트]")[1], {"공고명": "가상군 문화예술회관 건립 전기공사"}, cfg["llm"])
+        with open(data("llm_out", "R24010002-000.json"), "w", encoding="utf-8") as f:
+            json.dump({k: v for k, v in fake.items() if not k.startswith("_")}, f, ensure_ascii=False)
+        out = _run(["extract", "--import", "--config", cfg_path])
+        assert "JSON 1건 반영" in out and "미추출 0건" in out, out
+        docs = json.load(open(data("llm_docs.json"), encoding="utf-8"))
+        assert docs["R24010002-000"]["추정가격_원"] == 2600000000 and docs["R24010002-000"]["_model"] == "manual/cowork"
+        # 배치: 제출 전 견적(50%)만 출력하고 제출하지 않음
+        out = _run(["extract", "--batch", "--config", cfg_path])
+        assert "제출할 공고가 없습니다" in out and "Batches 50% 할인" in out, out
         ver = pd.read_parquet(data("logs_verify.parquet"))
         assert ((ver["공고번호"] == "R24010001") & (ver["항목"] == "추정가격") & (ver["판정"] == "정상")).any(), ver
         assert set(ver["판정"]) <= {"정상", "경고", "오류", "참고", "미확인"}
