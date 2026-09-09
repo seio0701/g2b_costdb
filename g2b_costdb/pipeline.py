@@ -44,6 +44,20 @@ def _read(cfg, name):
     return pd.read_parquet(path)
 
 
+def _read_raw_notices(cfg):
+    """notices_all.parquet 에서 standardize 가 쓰는 컬럼만 읽는다(전량 145개 컬럼 × 백만 행이면 메모리 수 GB 절약)."""
+    path = _p(cfg, "notices_all.parquet")
+    if not os.path.exists(path):
+        raise SystemExit(f"중간 산출물이 없습니다: {path} (이전 단계를 먼저 실행)")
+    try:
+        import pyarrow.parquet as pq
+        have = set(pq.read_schema(path).names)
+    except Exception:
+        return pd.read_parquet(path)
+    cols = [c for c in discover.raw_columns_needed(cfg) if c in have]
+    return pd.read_parquet(path, columns=cols) if cols else pd.read_parquet(path)
+
+
 LOG_COLS = ["공고번호", "항목", "API값", "문서값", "차이", "차이율", "판정", "비고"]
 
 
@@ -180,7 +194,7 @@ def stage_discover(cfg):
         if miss:
             print(f"[경고] {label} 수집 미완료 월 {len(miss)}개 ({', '.join(miss[:8])}{' …' if len(miss) > 8 else ''}) — "
                   f"부분 데이터로 후보를 만듭니다. 전체 결과가 필요하면 collect 를 먼저 완료하세요.")
-    raw = _read(cfg, "notices_all.parquet")
+    raw = _read_raw_notices(cfg)
     bsis_path = _p(cfg, "bsis_all.parquet")
     bsis = pd.read_parquet(bsis_path) if os.path.exists(bsis_path) else None
     award_path = _p(cfg, "award_all.parquet")

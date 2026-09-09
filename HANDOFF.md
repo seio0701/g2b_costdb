@@ -1,6 +1,6 @@
 # HANDOFF.md — g2b_costdb 진행 상황
 
-> 매 세션 시작 시 이 파일을 먼저 읽는다. 갱신일: 2026-09-09
+> 매 세션 시작 시 이 파일을 먼저 읽는다. 갱신일: 2026-09-10
 
 ## 0. 2026-09-08 진행 (사용자 PC, C:\DB_WORK\g2b_costdb)
 - 전용 저장소 github.com/seio0701/g2b_costdb 생성·클론, Python 3.14, 패키지 설치, `doctor`·두 테스트 통과, 인증키 설정 완료.
@@ -27,6 +27,16 @@
   `award_query.inqryDiv`(probe 가 1·2·3 을 시험), 필드명 `fields.award_*`(`sucsfbidAmt` 등 추정, 후보 자동 탐색).
 - 다음(사용자가 활용신청 완료를 알리면): `git pull` → `config.yaml api.use_awards: true` → `probe --ym 2026-08` 출력의 낙찰 덩어리 확인 →
   필요 시 `award_base_url`/`award_query`/`fields.award_*` 수정 → `collect`(3개월이면 월 1~2페이지 추가) → `discover` 이후 동일.
+
+## 0-3. 2026-09-10 본 수집 완료(세션 3) + discover 대용량 최적화
+- 사용자 PC 에서 `collect` 완료: 2019-01~2026-09(92개월 + 진행 중인 9월) **공사 공고 1,294,182건 → `data/notices_all.parquet`**,
+  **기초금액 1,025,708건 → `data/bsis_all.parquet`**. 3개월 시험 수집 때의 추정(월 8,800건)보다 월평균 약 14,000건으로 많음.
+- 129만 건 규모를 합성 데이터로 재현해 `discover` 단계를 측정·최적화(샌드박스 4코어 기준, 사용자 PC 는 비슷하거나 조금 느릴 수 있음):
+  전량 parquet 는 standardize 가 쓰는 컬럼만 읽음(145개 → 약 50개, 메모리 수 GB 절약), 후보 탐색은 공고명만 순회(iterrows 제거, 약 3배),
+  재검색의 수요기관 판정은 고유값에만 적용(약 3배). 129만 행 실측(샌드박스): standardize 136초, 후보 탐색 48초, 재검색(시설 400개) 63초, 최대 메모리 3.9 GB.
+- 다음(사용자 PC): `git pull` → `python -m g2b_costdb.pipeline discover`(수 분, `output/facility_candidates.xlsx` 생성. 기존 3개월 검수 내용은
+  (시설키, 수요기관)이 같은 행에 이어짐) → Excel 검수 → `research` → `dedup` → `attach`(첨부 다운로드·HWP 해석률 확인) → `extract --export` 시범 → `excel`.
+- 낙찰정보서비스(0-2절)는 사용자의 활용신청 결과 대기 중(`use_awards: false` 유지).
 
 ## 1. 현재 단계
 - **세션 0(코드 정비) 완료 / 세션 1(환경 점검 + probe)의 사용자 PC 실행 대기**

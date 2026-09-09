@@ -155,6 +155,13 @@ def test_discover_and_dedup(tmp):
     ])
     std = discover.standardize(raw, cfg, None)
     assert std["주공종명"].iloc[0] == "" and std["첨부URL1"].iloc[0] == "" and std["공고차수"].iloc[1] == "000", "None/NaN 은 공란으로, 차수는 3자리"
+    # 전량 parquet 는 필요한 컬럼만 읽는다(메모리) — 그 컬럼만으로 standardize 한 결과가 전체 컬럼으로 한 것과 같아야 함
+    need = discover.raw_columns_needed(cfg)
+    assert {"bidNtceNo", "bidNtceOrd", "bidNtceNm", "presmptPrce", "ntceSpecDocUrl10", "sptDscrptDocUrl5", "subsiCnsttyNm9", "befBidBbancNo"} <= set(need)
+    raw_extra = raw.assign(extraField="x")
+    a = discover.standardize(raw_extra[[c for c in need if c in raw_extra.columns]], cfg, None)
+    b = discover.standardize(raw_extra, cfg, None)
+    assert a.equals(b) and "extraField" not in b.columns, "필요 컬럼만 읽어도 동일 결과"
     assert "nan" not in set(std["주공종명"]) and "None" not in set(std["첨부파일명1"])
     agg = discover.discover_candidates(std)
     # 같은 이름이라도 수요기관이 다르면 별도 시설

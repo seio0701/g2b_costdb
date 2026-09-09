@@ -70,5 +70,6 @@ python -m tests.check_excel output/공사비DB.xlsx   # 생성된 Excel 의 수�
 - 낙찰정보서비스는 기본 꺼져 있음(`api.use_awards: false`). 활용신청 뒤 `true` 로 켜고 `probe` 로 End Point(`api.award_base_url`)·기간 조회 파라미터(`api.award_query`)·필드 매핑(`fields.award_*`)을 확인한다. 실제 응답 필드명은 아직 미확인(2026-09-09 기준 추정값, 후보 이름을 자동 탐색). 수집 실패(20/30) 시 공고·기초금액 수집은 유지되고 안내만 출력된다.
 - 첨부 URL 은 `https://www.g2b.go.kr/pn/pnp/pnpe/UntyAtchFile/downloadFile.do?...` 형식이며, 로그인 페이지가 돌아오면 `07_추출노트`에 'HTML 응답' 실패로 기록된다(수동 다운로드 후 `data/files/<공고번호>/` 에 넣고 `attach` 재실행).
 - HWP 파서: HWP 5.0 규격(olefile+zlib 레코드) 기반이며 실제 공고문으로 첫 실행 시 확인 필요. 실패 시 `hwp5txt`(pyhwp) → Windows 한컴 COM 순으로 폴백. 배포용(DRM)·암호 문서는 수동 처리.
+- 규모: 2019-01~2026-09 전량은 공고 약 129만 건·기초금액 약 103만 건(2026-09-10 수집). `discover` 는 필요한 컬럼만 읽어 처리하며 합성 데이터 기준 수 분 소요(메모리 약 3~4 GB). `notices_std.parquet` 는 전량 표준화본이므로 수백 MB 가 될 수 있다.
 - 스캔 PDF는 `pytesseract`+`pdf2image` 설치 시 OCR. 연면적이 공고문에 없으면 현장설명서·설계설명서를 함께 파싱해도 공란일 수 있음(경고 기록).
 - LH 자체 조달(ebid.lh.or.kr) 발주분은 나라장터 API 범위 밖.

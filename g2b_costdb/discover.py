@@ -30,13 +30,32 @@ _EMPTY_STRS = {"", "nan", "none", "null", "nat", "<na>"}
 
 
 def _s(series: pd.Series) -> pd.Series:
-    """None/NaN/'nan'/'None' → '' 로 통일한 문자열 Series (Excel·URL·검색에 'nan' 문자열이 흘러들지 않도록)."""
-    return series.map(lambda v: "" if v is None or (isinstance(v, float) and v != v) else str(v)) \
-        .map(lambda s: "" if s.strip().lower() in _EMPTY_STRS else s)
+    """원문 값 → 문자열('nan'/'None'/공백은 공란). 한 번의 map 으로 처리(129만 행 규모에서 두 번 map 은 비용이 큼)."""
+    def conv(v):
+        if v is None or (isinstance(v, float) and v != v):
+            return ""
+        t = str(v)
+        return "" if t.strip().lower() in _EMPTY_STRS else t
+    return series.map(conv)
 
 
 def _blank(v) -> bool:
     return v is None or (isinstance(v, float) and v != v) or str(v).strip().lower() in _EMPTY_STRS
+
+
+def raw_columns_needed(cfg: dict) -> List[str]:
+    """standardize 가 실제로 읽는 원문 컬럼(전량 parquet 는 145개 컬럼 × 백만 행이므로 필요한 것만 읽어 메모리를 줄인다)."""
+    f = cfg["fields"]
+    keys = ["bid_no", "bid_ord", "name", "kind", "re_notice", "reg_type", "notice_dt", "close_dt", "open_dt", "notice_inst",
+            "demand_inst", "presmpt_price", "main_cnstty", "site_region", "detail_url", "ref_no", "prespec_no",
+            "demand_inst_cd", "bdgt_amt", "vat", "govsply_amt", "contractor_govsply", "gov_govsply", "prev_bid_no", "chg_reason",
+            "sucsfbid_rate", "std_notice_url"]
+    cols = [f[k] for k in keys if isinstance(f.get(k), str) and f[k]]
+    cols += [f"{f.get('sub_cnstty_prefix', '')}{i}" for i in range(1, int(f.get("sub_cnstty_max", 0) or 0) + 1)]
+    cols += [f"{f.get('spt_url_prefix', '')}{i}" for i in range(1, int(f.get("spt_max", 0) or 0) + 1)]
+    n = int(f["attach_max"])
+    cols += [f"{f['attach_url_prefix']}{i}" for i in range(1, n + 1)] + [f"{f['attach_name_prefix']}{i}" for i in range(1, n + 1)]
+    return list(dict.fromkeys(cols))
 
 
 def standardize(df_raw: pd.DataFrame, cfg: dict, bsis: Optional[pd.DataFrame] = None,
@@ -157,12 +176,17 @@ def discover_candidates(std: pd.DataFrame, previous_review: Optional[pd.DataFram
     previous_review: 이전 facility_candidates.xlsx 내용(있으면 시설ID·검수 컬럼을 (시설키, 수요기관) 기준으로 이어받음)."""
     kw = load_keywords()
     rows = []
-    for _, r in std.iterrows():
-        for major, minor, w in match_categories(r["공고명"], kw):
-            fac = extract_facility_name(r["공고명"], w)
-            rows.append({**r.to_dict(), "표2_대분류": major, "표2_중분류": minor, "검색어": w,
+    # 공고명만 순회하고(iterrows 는 행마다 Series 를 만들어 백만 행 규모에서 느림) 매칭된 행만 전체 컬럼을 읽는다
+    for i, name in enumerate(std["공고명"].tolist()):
+        matches = match_categories(name, kw)
+        if not matches:
+            continue
+        base = std.iloc[i].to_dict()
+        for major, minor, w in matches:
+            fac = extract_facility_name(name, w)
+            rows.append({**base, "표2_대분류": major, "표2_중분류": minor, "검색어": w,
                          "시설명_후보": fac, "시설키": normalize_facility_key(fac),
-                         "사업유형": work_type_for(r["공고명"], w, fac)})   # 시설 자체가 주차장 등이면 부속어에서 제외
+                         "사업유형": work_type_for(name, w, fac)})   # 시설 자체가 주차장 등이면 부속어에서 제외
     cand = pd.DataFrame(rows)
     if cand.empty:
         return cand
@@ -295,6 +319,7 @@ def research_by_facility(std: pd.DataFrame, reviewed: pd.DataFrame, max_hits_war
     out = []
     std_nospace = std["공고명"].astype(str).str.replace(" ", "", regex=False)
     inst_nospace = std["수요기관"].astype(str).str.replace(" ", "", regex=False)
+    inst_values = [v for v in inst_nospace.unique().tolist() if v]      # 수요기관 판정은 고유값(수천 개)에만 하고 isin 으로 확장
     for _, fac in reviewed.iterrows():
         names = [fac["검수_시설명"]] + [a.strip() for a in str(fac.get("검수_별칭(;구분)") or "").split(";") if a.strip()]
         pats = [n.replace(" ", "") for n in names if n and not _blank(n)]
@@ -308,7 +333,7 @@ def research_by_facility(std: pd.DataFrame, reviewed: pd.DataFrame, max_hits_war
             mask |= std_nospace.str.contains(re.escape(p), na=False)
         inst = str(fac.get("검수_수요기관") or "").replace(" ", "")
         if inst:
-            mask &= inst_nospace.map(lambda s: bool(s) and (inst in s or s in inst))
+            mask &= inst_nospace.isin({v for v in inst_values if inst in v or v in inst})
         hit = std[mask].copy()
         if hit.empty:
             log.info("시설 %s '%s': 재검색 결과 없음", fac.get("시설ID"), fac["검수_시설명"])
