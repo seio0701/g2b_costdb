@@ -188,7 +188,7 @@ def stage_collect(cfg):
         print("[안내] 낙찰정보(낙찰금액·낙찰률)는 config.yaml api.use_awards: true 로 켜면 함께 수집됩니다(낙찰정보서비스 활용신청 필요)")
 
 
-def stage_discover(cfg):
+def stage_discover(cfg, fresh: bool = False):
     for prefix, label in (("notices_", "공고"), ("bsis_", "기초금액")) + ((("award_", "낙찰"),) if cfg["api"].get("use_awards") else ()):
         miss = collect.incomplete_months(cfg, prefix)
         if miss:
@@ -208,7 +208,9 @@ def stage_discover(cfg):
         prev = discover.read_review_file(out)
     except PermissionError:
         raise SystemExit(_excel_busy(out))
-    agg = discover.discover_candidates(std, previous_review=prev)
+    if fresh and prev is not None and not prev.empty:
+        print("[--fresh] 이전 검수 파일에서 시설ID만 이어받고 검수 칸은 모두 새 기본값으로 채웁니다")
+    agg = discover.discover_candidates(std, previous_review=prev, ids_only=fresh)
     if agg.empty:
         raise SystemExit("후보 시설 0건 — keywords.yaml 의 검색어(include)를 넓히거나 수집 기간을 확인하세요.")
     try:
@@ -541,6 +543,7 @@ def main(argv=None):
     ap.add_argument("stage", choices=["doctor", "probe", "collect", "discover", "research", "dedup", "attach", "extract", "excel"])
     ap.add_argument("--config", default=None)
     ap.add_argument("--ym", default="2026-08", help="probe 대상 월(YYYY-MM)")
+    ap.add_argument("--fresh", action="store_true", help="discover: 이전 검수 파일의 시설ID 만 이어받고 검수 칸은 새 기본값으로(검수 시작 전 규칙이 바뀌었을 때)")
     ap.add_argument("--yes", action="store_true", help="extract: 비용 견적 확인 후 실제 LLM 호출(또는 배치 제출) 실행")
     ap.add_argument("--batch", action="store_true", help="extract: Message Batches 로 제출/수거 (50%% 할인, 최대 24시간)")
     ap.add_argument("--export", action="store_true", help="extract: 공고별 작업지시 txt 를 data/llm_in 에 내보내기 (Cowork·사람이 채움)")
@@ -556,6 +559,8 @@ def main(argv=None):
         collect.probe(cfg, a.ym)
     elif a.stage == "extract":
         stage_extract(cfg, yes=a.yes, batch=a.batch, export=a.export, import_=a.import_)
+    elif a.stage == "discover":
+        stage_discover(cfg, fresh=a.fresh)
     else:
         {"collect": stage_collect, "discover": stage_discover, "research": stage_research, "dedup": stage_dedup,
          "attach": stage_attach, "excel": stage_excel}[a.stage](cfg)

@@ -40,7 +40,7 @@ python -m g2b_costdb.pipeline doctor       # 파이썬·패키지·키 존재 �
   | 즉시 호출 | `extract --yes` | 한 건씩 바로 처리. 정가 |
   | 배치(권장) | `extract --batch --yes` 로 제출 → 나중에 `extract --batch` 로 수거 | Message Batches, **50% 할인**, 대개 1시간·최대 24시간. 제출 상태는 `data/llm_batch.json` |
   | 파일 인수인계 | `extract --export` → `data/llm_in/<공고키>.txt` 를 Cowork·사람이 읽고 `data/llm_out/<공고키>.json` 작성 → `extract --import` | API 비용 0. 시범 검증·예외 처리용. 지시문은 `data/llm_in/README_지시문.md` |
-- `discover` 를 다시 실행해도 기존 검수 내용과 시설ID는 (시설키, 수요기관)이 같은 행에 그대로 이어진다.
+- `discover` 를 다시 실행해도 시설ID와 **사용자가 고친** 검수 값은 (시설키, 수요기관)이 같은 행에 그대로 이어진다(기본값 그대로였던 칸은 새 규칙으로 다시 계산). 검수를 시작하기 전에 규칙을 바꿨다면 `discover --fresh` 로 검수 칸을 전부 초기화(시설ID는 유지)할 수 있다.
 - 오늘이 속한 달은 완료 표시를 하지 않고 매번 다시 받는다. 특정 달을 다시 받으려면 `data/raw/notices_done.txt`(또는 `bsis_done.txt`)에서 해당 월을 지우고 `collect` 를 실행한다(파일이 있으므로 캐시를 우회해 새로 받음).
 
 ## 3. 검증(합성 데이터, 네트워크·키 불필요)

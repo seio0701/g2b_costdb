@@ -106,6 +106,9 @@ def run():
         _run(["discover", "--config", cfg_path])                       # 재실행: 시설ID 유지
         rev2 = read_review_file(os.path.join(tmp, "output", "facility_candidates.xlsx"))
         assert dict(zip(rev2["수요기관"], rev2["시설ID"])) == ids_before
+        out = _run(["discover", "--fresh", "--config", cfg_path])       # 검수 칸 초기화, 시설ID 는 유지
+        rev3 = pd.read_excel(os.path.join(tmp, "output", "facility_candidates.xlsx"), sheet_name="시설후보_검수")
+        assert "[--fresh]" in out and dict(zip(rev3["수요기관"], rev3["시설ID"])) == ids_before and (rev3["검수_포함여부"] == "포함").all()
         # 4) research — 면허제한 필드 자동 탐색(lcnsLmtNm), 방수공사(유지보수) 제외, 다른군은 자기 공고만
         out = _run(["research", "--config", cfg_path])
         assert "'lcnsLmtNm'" in out, out
