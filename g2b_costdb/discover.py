@@ -184,9 +184,10 @@ def _facility_work_type(s: pd.Series) -> str:
     return _mode(s, "미분류")
 
 
-def discover_candidates(std: pd.DataFrame, previous_review: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+def discover_candidates(std: pd.DataFrame, previous_review: Optional[pd.DataFrame] = None, ids_only: bool = False) -> pd.DataFrame:
     """공고명에 표2 검색어가 포함된 공고 → 시설명 후보 + 분류 (검수용).
-    previous_review: 이전 facility_candidates.xlsx 내용(있으면 시설ID·검수 컬럼을 (시설키, 수요기관) 기준으로 이어받음)."""
+    previous_review: 이전 facility_candidates.xlsx 내용(있으면 시설ID·검수 컬럼을 (시설키, 수요기관) 기준으로 이어받음).
+    ids_only: 시설ID만 이어받고 검수 컬럼은 모두 새 기본값으로(`discover --fresh`)."""
     kw = load_keywords()
     rows = []
     # 공고명만 순회하고(iterrows 는 행마다 Series 를 만들어 백만 행 규모에서 느림) 매칭된 행만 전체 컬럼을 읽는다
@@ -217,40 +218,62 @@ def discover_candidates(std: pd.DataFrame, previous_review: Optional[pd.DataFram
     agg = agg[["표2_대분류", "표2_중분류", "검색어", "시설키", "시설명_후보", "수요기관", "공고건수", "최초공고일", "최종공고일",
                "사업유형", "사업유형_분포", "공종목록", "추정가격_합계", "공고명_예시"]]
 
-    def _default_include(t: str) -> str:
-        if t in ("신축", "증축", "리모델링", "증축·리모델링"):
-            return "포함"
-        return "제외" if t == "유지보수" else "검토필요"
-
-    agg["검수_포함여부"] = agg["사업유형"].map(_default_include)
+    agg["검수_포함여부"] = agg["사업유형"].map(default_include)
     agg["검수_시설명"] = agg["시설명_후보"]
     agg["검수_별칭(;구분)"] = ""
     agg["검수_수요기관"] = agg["수요기관"]
     agg["검수_메모"] = ""
-    agg = _carry_over_review(agg, previous_review)
+    agg = _carry_over_review(agg, previous_review, ids_only=ids_only)
     cols = ["시설ID"] + [c for c in agg.columns if c != "시설ID"]
     return agg[cols].reset_index(drop=True)
 
 
-def _carry_over_review(agg: pd.DataFrame, prev: Optional[pd.DataFrame]) -> pd.DataFrame:
-    """이전 검수 파일의 시설ID·검수_* 값을 (시설키, 수요기관) 기준으로 이어받고, 새 시설에는 이어지는 번호를 부여."""
+def default_include(work_type: str) -> str:
+    """사업유형 → 검수_포함여부 기본값."""
+    if work_type in ("신축", "증축", "리모델링", "증축·리모델링"):
+        return "포함"
+    return "제외" if work_type == "유지보수" else "검토필요"
+
+
+def _user_edited(prev_row, col: str) -> bool:
+    """이전 파일의 검수 값이 사용자가 고친 것인지(기본값 그대로면 False).
+    기본값이었다면 새 규칙으로 다시 계산한 값을 쓰고, 고친 값만 이어받는다."""
+    v = prev_row.get(col)
+    if _blank(v):
+        return False
+    v = str(v).strip()
+    if col == "검수_포함여부" and not _blank(prev_row.get("사업유형")):
+        return v != default_include(str(prev_row.get("사업유형")).strip())
+    if col == "검수_시설명" and not _blank(prev_row.get("시설명_후보")):
+        return v != str(prev_row.get("시설명_후보")).strip()
+    if col == "검수_수요기관" and not _blank(prev_row.get("수요기관")):
+        return v != str(prev_row.get("수요기관")).strip()
+    return True          # 별칭·메모(기본값 공란)와, 비교 기준 컬럼이 없는 옛 형식 파일
+
+
+def _carry_over_review(agg: pd.DataFrame, prev: Optional[pd.DataFrame], ids_only: bool = False) -> pd.DataFrame:
+    """이전 검수 파일의 시설ID와 **사용자가 고친** 검수_* 값을 (시설키, 수요기관) 기준으로 이어받고, 새 시설에는 이어지는 번호를 부여.
+    기본값 그대로였던 칸(예: 사업유형 최빈값에 따른 '제외')은 이어받지 않고 새 규칙의 기본값으로 다시 채운다."""
     agg = agg.copy()
     agg["시설ID"] = ""
     if prev is not None and not prev.empty and "시설키" in prev.columns and "시설ID" in prev.columns:
         p = prev.copy()
         p["수요기관"] = _s(p["수요기관"]) if "수요기관" in p.columns else ""
         p = p.drop_duplicates(["시설키", "수요기관"], keep="first").set_index(["시설키", "수요기관"])
-        kept = 0
+        kept, edited = 0, 0
         for i, r in agg.iterrows():
             k = (r["시설키"], r["수요기관"])
             if k in p.index:
                 old = p.loc[k]
                 agg.at[i, "시설ID"] = str(old["시설ID"])
-                for c in REVIEW_COLS:
-                    if c in p.columns and not _blank(old.get(c)):
+                any_edit = False
+                for c in ([] if ids_only else REVIEW_COLS):
+                    if c in p.columns and _user_edited(old, c):
                         agg.at[i, c] = str(old[c]).strip()
+                        any_edit = True
                 kept += 1
-        log.info("이전 검수 내용 이어받음: %d개 시설", kept)
+                edited += int(any_edit)
+        log.info("이전 검수 내용 이어받음: %d개 시설(그중 사용자가 고친 값이 있는 시설 %d개, 나머지는 새 기본값)", kept, edited)
     used = set(agg.loc[agg["시설ID"] != "", "시설ID"])
     nums = [int(re.sub(r"\D", "", x) or 0) for x in used]
     nxt = (max(nums) if nums else 0) + 1

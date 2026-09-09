@@ -148,7 +148,11 @@ def extract_facility_name(notice_name: str, keyword: str) -> str:
     head = tokens[idx]
     kw_pos = head.find(kw_head)
     if kw_pos >= 0:
-        head = head[: kw_pos + len(kw_head)]
+        # 검색어 뒤에 공종·사업유형 어휘가 붙어 있으면 거기서 자르고('미술관건립공사' → '미술관', '종합운동장공원조성사업' → '종합운동장공원'),
+        # 이름이 이어지면 보존('호텔인터시티' → '호텔인터시티')
+        m = _TRADE_WORDS.search(head, kw_pos + len(kw_head))
+        if m:
+            head = head[: m.start()]
     tail = []
     if len(kw_parts) > 1 and head.endswith(kw_head):
         # '스마트팜 온실 설비…' 처럼 띄어쓴 검색어의 나머지 어절이 이어지면 시설명에 포함('스마트팜' → '스마트팜 온실')
@@ -178,7 +182,9 @@ def classify_work_type(notice_name: str, rules: Optional[Dict[str, List[str]]] =
     ancillary = ancillary if ancillary is not None else (kw.get("ancillary_words") or [])
     s = (notice_name or "").replace(" ", "")
     hits = [label for label, words in rules.items() if any(w.replace(" ", "") in s for w in words)]
-    anc = any(w.replace(" ", "") in s for w in ancillary)
+    # '기계설비공사'·'건축설비공사'는 공종명이지 부속 설비 공사가 아니다 → 부속어 판정에서 제외
+    s_anc = re.sub(r"기계설비|건축설비|전기설비|소방설비|통신설비", "", s)
+    anc = any(w.replace(" ", "") in s_anc for w in ancillary)
     if "리모델링" in hits and "증축" in hits:
         return "증축·리모델링"
     for label in rules:                      # 첫 매칭 우선

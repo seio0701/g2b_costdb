@@ -170,9 +170,20 @@ def test_discover_and_dedup(tmp):
     prev = agg.copy()
     prev.loc[prev["수요기관"] == "가상군", "검수_별칭(;구분)"] = "가상군문예회관"
     prev.loc[prev["수요기관"] == "가상군", "시설ID"] = "F0007"
+    # 가상군 행의 검수_포함여부는 옛 규칙 기본값 그대로('제외')였다고 가정 → 새 규칙 기본값으로 다시 계산되어야 함
+    prev.loc[prev["수요기관"] == "가상군", "사업유형"] = "유지보수"
+    prev.loc[prev["수요기관"] == "가상군", "검수_포함여부"] = "제외"
     prev = prev[prev["수요기관"] != "셋째군"]            # 셋째군은 이전 파일에 없던 새 시설 → 이어지는 번호(F0008)
     agg2 = discover.discover_candidates(std, previous_review=prev)
     r = agg2[agg2["수요기관"] == "가상군"].iloc[0]
+    assert r["검수_포함여부"] == "포함", "기본값 그대로였던 '제외'는 이어받지 않고 새 규칙(신축 → 포함)으로"
+    prev3 = agg.copy()
+    prev3.loc[prev3["수요기관"] == "다른군", "검수_포함여부"] = "제외"        # 사용자가 기본값(포함)을 고침 → 이어받아야 함
+    prev3.loc[prev3["수요기관"] == "다른군", "검수_시설명"] = "다른군 문예회관(별칭)"
+    r_b = discover.discover_candidates(std, previous_review=prev3).query("수요기관 == '다른군'").iloc[0]
+    assert r_b["검수_포함여부"] == "제외" and r_b["검수_시설명"] == "다른군 문예회관(별칭)", "사용자가 고친 값은 이어받음"
+    r_f = discover.discover_candidates(std, previous_review=prev3, ids_only=True).query("수요기관 == '다른군'").iloc[0]
+    assert r_f["검수_포함여부"] == "포함" and r_f["검수_시설명"] == r_f["시설명_후보"] and r_f["시설ID"] == r_b["시설ID"], "--fresh: 시설ID만 유지, 검수 값은 기본값"
     assert r["시설ID"] == "F0007" and r["검수_별칭(;구분)"] == "가상군문예회관"
     assert agg2["시설ID"].is_unique and agg2[agg2["수요기관"] == "셋째군"]["시설ID"].iloc[0] == "F0008"
     # 검수 파일 왕복: 빈 검수_시설명 → 시설명_후보 대체, 수요기관 필터
