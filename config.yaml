@@ -15,6 +15,13 @@ api:
     license_limit: "getBidPblancListInfoLicenseLimit"
     chg_history: "getBidPblancListInfoChgHstryCnstwk"
   use_license_limit: false                 # true 면 research 단계에서 공고별 면허제한 조회(호출량 큼). 목록 응답의 주공종명·부공종명이 업종명이므로 기본 false
+  # ── 낙찰정보(참고 컬럼: 낙찰금액·낙찰률·낙찰자). 공공데이터포털 「조달청_나라장터 낙찰정보서비스」 활용신청 후 use_awards: true ──
+  use_awards: false
+  award_base_url: "https://apis.data.go.kr/1230000/as/ScsbidInfoService"   # 포털 서비스 페이지의 End Point 로 확인(다르면 수정)
+  award_ops:
+    cnstwk_list: "getScsbidListSttusCnstwk"   # 공사 낙찰 목록(개찰일 기준 기간 조회)
+  award_query:                               # 기간 조회 파라미터(probe 가 변형을 시험해 알려줌)
+    inqryDiv: "1"
   license_query:                           # 면허제한 조회 파라미터(공고번호는 자동 추가). probe 가 여러 조회구분을 시험해 결과를 보여줌
     inqryDiv: "2"
 
@@ -67,6 +74,13 @@ fields:
   spt_max: 5
   std_notice_url: "stdNtceDocUrl"         # 표준공고문 URL
   sucsfbid_rate: "sucsfbidLwltRate"       # 낙찰하한율(참고)
+  # ── 낙찰정보서비스 응답 필드 (probe 로 확인. 없으면 후보 필드를 자동 탐색) ──
+  award_amt: "sucsfbidAmt"                # 낙찰금액
+  award_rate: "sucsfbidRate"              # 낙찰률(%)
+  award_bidder: "bidwinnrNm"              # 낙찰자
+  award_bidder_bizno: "bidwinnrBizno"     # 낙찰자 사업자번호
+  award_prtcpt_cnt: "prtcptCnum"          # 참가업체수
+  award_open_dt: "opengDt"                # 개찰일시
   license_name: "indstrytyNm"             # 면허제한 업종명 (probe 로 확인: lcnsLmtNm 등일 수 있음 — 코드가 후보를 자동 탐색)
   attach_url_prefix: "ntceSpecDocUrl"     # ntceSpecDocUrl1..10
   attach_name_prefix: "ntceSpecFileNm"    # ntceSpecFileNm1..10

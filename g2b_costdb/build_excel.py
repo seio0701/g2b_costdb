@@ -77,6 +77,7 @@ def _write_df(ws, df: pd.DataFrame, money_cols: Optional[List[str]] = None, blue
 
 NOTICE_COLS = ["공고번호", "공고차수", "공고키", "공고명", "공고종류", "재공고여부", "공고일시", "입찰마감일시", "개찰일시", "공고기관",
                "수요기관", "공사현장지역", "추정가격", "기초금액", "주공종명", "면허제한업종", "공종", "공종근거", "사업유형", "사업유형_원분류",
+               "낙찰금액_API", "낙찰률_API", "낙찰자", "참가업체수", "낙찰하한율", "이전공고번호",
                "시설ID", "시설명", "프로젝트ID", "프로젝트키", "최신여부", "대체공고번호", "대표선정사유", "사전규격번호", "첨부파일수", "상세URL"]
 
 
@@ -92,7 +93,7 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
         ["생성일", dt.date.today().isoformat()],
         ["수집기간", meta.get("period", "")],
         ["출처", "조달청 나라장터 입찰공고정보서비스(공공데이터포털) + 공고 첨부문서(공고문·현장설명서 등) LLM 추출"],
-        ["금액 기준", "낙찰가 아님. 추정가격(VAT 제외)·기초금액(추정가격+VAT) = 예정가격 산정 기준. 관급자재는 별도 컬럼."],
+        ["금액 기준", "낙찰가 아님. 추정가격(VAT 제외)·기초금액(추정가격+VAT) = 예정가격 산정 기준. 관급자재는 별도 컬럼. 낙찰금액·낙찰률은 참고 컬럼(총공사비 수식에 사용하지 않음)."],
         ["대표 공고", "동일 (프로젝트, 공종)에 복수 공고 시 취소공고 제외 후 최신 공고 1건을 대표로 채택(변경·재공고 반영). 이력은 02시트 보존."],
         ["프로젝트ID", "시설ID-사업유형코드(N 신축 / E 증축 / R 리모델링 / ER 증축·리모델링). 같은 시설의 신축과 리모델링은 별도 프로젝트로 집계되며, ㎡당 공사비 비교는 반드시 사업유형이 같은 프로젝트끼리 할 것."],
         ["색상", "파란 글자=원천값(API/문서), 검은 글자=수식, 노란 배경=사용자 입력·검수 셀 (01 시트의 연면적·층수 등은 문서 추출값이며 직접 고치면 05 ㎡당 공사비에 반영됨)"],
@@ -132,7 +133,7 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
     for title, df in (("02_공고목록_전체", hist), ("03_공고목록_최신", latest)):
         ws = wb.create_sheet(title)
         cols = [c for c in NOTICE_COLS if c in df.columns]
-        _write_df(ws, df[cols], money_cols=["추정가격", "기초금액"], blue_cols=cols,
+        _write_df(ws, df[cols], money_cols=["추정가격", "기초금액", "낙찰금액_API"], blue_cols=cols,
                   widths={"공고명": 60, "수요기관": 24, "공고기관": 24, "상세URL": 40, "프로젝트키": 26})
 
     # ── 04 공종별 ──
@@ -140,14 +141,15 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
     tcols = ["프로젝트ID", "시설ID", "시설명", "사업유형", "공종", "공고번호", "공고차수", "공고명", "공고일시", "수요기관",
              "추정가격_API", "기초금액_API", "부가세(수식)", "관급자재_API", "도급자관급액_API", "관급자관급액_API",
              "도급자관급액_문서", "관급자관급액_문서", "총공사비(수식)",
-             "예산금액_API", "공사기간_일_문서", "추정가격_문서", "기초금액_문서", "추정가격_차이율(수식)", "신뢰도", "근거문구", "출처파일", "상세URL"]
+             "예산금액_API", "낙찰금액_API", "낙찰률_API", "낙찰률(수식)", "낙찰자", "낙찰하한율",
+             "공사기간_일_문서", "추정가격_문서", "기초금액_문서", "추정가격_차이율(수식)", "신뢰도", "근거문구", "출처파일", "상세URL"]
     t = trade.copy()
     for c in tcols:
         if c not in t.columns:
             t[c] = None
     t = t[tcols]
     _write_df(ws, t, money_cols=["추정가격_API", "기초금액_API", "부가세(수식)", "관급자재_API", "도급자관급액_API", "관급자관급액_API",
-                                 "도급자관급액_문서", "관급자관급액_문서", "총공사비(수식)", "예산금액_API", "추정가격_문서", "기초금액_문서"],
+                                 "도급자관급액_문서", "관급자관급액_문서", "총공사비(수식)", "예산금액_API", "낙찰금액_API", "추정가격_문서", "기초금액_문서"],
               blue_cols=[c for c in tcols if "(수식)" not in c],
               widths={"시설명": 30, "공고명": 55, "근거문구": 50, "출처파일": 30, "상세URL": 40})
     col = {c: get_column_letter(i + 1) for i, c in enumerate(tcols)}
@@ -164,7 +166,11 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
         ws[f"{col['총공사비(수식)']}{r}"] = f"={base}+{gov}"
         ws[f"{col['추정가격_차이율(수식)']}{r}"] = f'=IF(AND(ISNUMBER({P}),ISNUMBER({Pd}),{P}<>0),({Pd}-{P})/{P},"")'
         ws[f"{col['추정가격_차이율(수식)']}{r}"].number_format = "0.00%"
-        for c in ("부가세(수식)", "총공사비(수식)", "추정가격_차이율(수식)"):
+        # 낙찰률(수식) = 낙찰금액 / 기초금액 (참고. API 낙찰률과 대조용)
+        W = f"{col['낙찰금액_API']}{r}"
+        ws[f"{col['낙찰률(수식)']}{r}"] = f'=IF(AND(ISNUMBER({W}),ISNUMBER({B}),{B}<>0),{W}/{B},"")'
+        ws[f"{col['낙찰률(수식)']}{r}"].number_format = "0.00%"
+        for c in ("부가세(수식)", "총공사비(수식)", "추정가격_차이율(수식)", "낙찰률(수식)"):
             ws[f"{col[c]}{r}"].font = FONT
 
     # ── 05 시설합산 ──

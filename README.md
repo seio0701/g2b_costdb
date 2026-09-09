@@ -12,6 +12,7 @@ pip install -r requirements.txt
 pip install pyhwp                          # 선택: HWP 폴백(hwp5txt)
 pip install formulas                       # 선택: Excel 수식 오류 점검(tests/check_excel.py). 없으면 Excel 에서 직접 열어 확인
 # 공공데이터포털 → 「조달청_나라장터 입찰공고정보서비스」 활용신청(자동승인) → 마이페이지에서 '일반 인증키(Decoding)' 복사
+#   선택: 「조달청_나라장터 낙찰정보서비스」도 활용신청하면(같은 키) 낙찰금액·낙찰률 참고 컬럼을 함께 수집 → config.yaml api.use_awards: true
 setx G2B_SERVICE_KEY "발급받은키"           # 영구 설정(새 터미널·새 Claude Code 세션부터 적용). 키를 채팅·파일에 붙여 넣지 말 것
 $env:G2B_SERVICE_KEY="발급받은키"           # 지금 열려 있는 터미널에서 바로 쓰려면 이것도 실행
 setx ANTHROPIC_API_KEY "..."               # S6 LLM 추출 단계에서만 필요
@@ -23,8 +24,8 @@ python -m g2b_costdb.pipeline doctor       # 파이썬·패키지·키 존재 �
 | 단계 | 명령 | 산출물 | API 호출 |
 |---|---|---|---|
 | 환경 점검 | `python -m g2b_costdb.pipeline doctor` | 콘솔 보고 | 1회(키 없이 연결 확인) |
-| 필드 확인 | `python -m g2b_costdb.pipeline probe --ym 2026-08` | 응답 필드명·표본 + `config.yaml fields` 매핑 대조 결과(없는 항목 표시), 면허제한 표본 | 3회 |
-| S1 전량수집 | `python -m g2b_costdb.pipeline collect` | `data/raw/*.jsonl`, `data/notices_all.parquet`, `data/bsis_all.parquet` | 월×페이지(2026-08 기준 공고 약 8,800건=9페이지, 기초금액 약 6,200건=7페이지 → 93개월 약 1,500회). 일일예산 초과 시 `[미완료]` 표시와 남은 월을 보여주며 정상 종료 → 다음날 같은 명령 |
+| 필드 확인 | `python -m g2b_costdb.pipeline probe --ym 2026-08` | 응답 필드명·표본 + `config.yaml fields` 매핑 대조 결과(없는 항목 표시), 면허제한 표본, (`use_awards` 켜면) 낙찰 표본과 `[award_*]` 매핑 상태 | 3~6회 |
+| S1 전량수집 | `python -m g2b_costdb.pipeline collect` | `data/raw/*.jsonl`, `data/notices_all.parquet`, `data/bsis_all.parquet`, (`use_awards`) `data/award_all.parquet` | 월×페이지(2026-08 기준 공고 약 8,800건=9페이지, 기초금액 약 6,200건=7페이지 → 93개월 약 1,500회). 일일예산 초과 시 `[미완료]` 표시와 남은 월을 보여주며 정상 종료 → 다음날 같은 명령 |
 | S2 후보탐색 | `python -m g2b_costdb.pipeline discover` | `output/facility_candidates.xlsx` (노란 셀 검수) | 0 |
 | **검수** | Excel에서 `검수_포함여부 / 검수_시설명 / 검수_별칭 / 검수_수요기관` 수정 후 저장·닫기 | — | — |
 | S3 재검색 | `python -m g2b_costdb.pipeline research` | `data/notices_research.parquet` (전 공종 공고), 시설별 공종 분포 표 | 0 (기본). `config.yaml api.use_license_limit: true` 로 바꾸면 공고별 면허제한 조회(공고 수만큼) |
@@ -50,7 +51,7 @@ python -m tests.test_e2e_mock            # 가짜 나라장터 서버로 probe�
 python -m tests.check_excel output/공사비DB.xlsx   # 생성된 Excel 의 수식 오류 점검(LibreOffice 또는 formulas 패키지)
 ```
 `sample_output/공사비DB_샘플.xlsx`는 **가상 공고**로 만든 스키마 예시다(실데이터 아님). 통합 테스트의 가짜 서버(`tests/mock_g2b.py`)는
-포털 오류 응답(키 오류 XML, 데이터 없음 03), 면허제한 필드명 차이, HTML 응답 첨부, cp949 텍스트 등을 재현한다.
+포털 오류 응답(키 오류 XML, 데이터 없음 03), 면허제한 필드명 차이, 별도 End Point 의 낙찰정보서비스(재개찰 2행), HTML 응답 첨부, cp949 텍스트 등을 재현한다.
 
 ## 4. 주요 설계 포인트
 - **전량 수집 후 로컬 검색**: 키워드마다 API를 반복 호출하지 않고 월 단위로 공사 공고를 전량 내려받아 pandas에서 검색·재검색(호출량 최소화, 재분류 무제한).
@@ -59,12 +60,14 @@ python -m tests.check_excel output/공사비DB.xlsx   # 생성된 Excel 의 수�
 - **재발주 처리**: 프로젝트키(프로젝트ID×공종×단계토큰)별로 취소공고 제외 후 최신 공고 1건을 대표로 채택. 구공고는 `대체됨` 표시로 이력 보존, 금액 ±30% 변동은 경고. 같은 프로젝트·공종에서 추정가격이 최대치의 30% 미만인 공고(무대기계·승강기 설치 등 부대공사)는 대표가 되지 않고 경고로 남긴다.
 - **공종 분류 우선순위**: 면허제한 업종명(선택) → 주공종명·부공종명(목록 응답의 업종명, 예: '기계설비ㆍ가스공사업') → 공고명 규칙('토목건축공사업'은 건축). 유지보수(방수·도색·교체 등) 공고는 기본 제외.
 - **금액 기준**: 추정가격·기초금액·관급자재는 모두 API 값이 1순위(2026-09 실제 응답에서 `presmptPrce`, `bssamt`, `govsplyAmt`, 도급자/관급자 설치 관급액 `contrctrcnstrtnGovsplyMtrlAmt`/`govcnstrtnGovsplyMtrlAmt`, `VAT`, `bdgtAmt` 확인). 문서 추출값은 API 값이 없을 때의 대체·교차검증용. 총공사비 = 기초금액 + 도급자관급액 + 관급자관급액(Excel 수식). LLM에는 금액을 힌트로 주지 않아 교차검증이 독립적이다.
+- **낙찰 정보(선택, 참고 컬럼)**: 「낙찰정보서비스」 공사 낙찰 목록을 개찰일 기준 월 단위로 받아 공고번호+차수(없으면 공고번호)로 붙인다 → `02/03/04` 시트의 `낙찰금액_API`, `낙찰률_API`, `낙찰자`, `참가업체수`, `04` 의 `낙찰률(수식)`(=낙찰금액/기초금액, API 낙찰률과 대조). 같은 공고에 낙찰 행이 여럿(재개찰)이면 개찰일시가 최신인 행. **총공사비·㎡당 공사비에는 쓰지 않는다**(DB 기준은 추정가격·기초금액).
 - **재공고 연결**: API 의 이전공고번호(`befBidBbancNo`)로 재공고↔원공고 관계를 확정하고, 이름 규칙으로 못 묶은 경우도 대체 처리한다.
 - **교차검증**: 문서 추출 추정가격·기초금액 vs API 값(0.5%), 기초금액≈추정가격×1.1, 연면적·층수 범위, 총공사금액 구성 정합성 → `06_검증로그`.
 
 ## 5. 알려진 제약
 - 응답 필드명은 2026-09-08 `probe` 로 확인됨(공고목록·기초금액 `[매핑 OK]`, 공고차수는 `000` 처럼 3자리). 코드는 미존재 필드를 공란 처리한다.
 - 면허제한 조회는 기본 꺼져 있음(`api.use_license_limit: false`). 필요하면 `probe` 가 시험한 조회구분 결과를 보고 `license_query` 를 맞춘 뒤 켠다.
+- 낙찰정보서비스는 기본 꺼져 있음(`api.use_awards: false`). 활용신청 뒤 `true` 로 켜고 `probe` 로 End Point(`api.award_base_url`)·기간 조회 파라미터(`api.award_query`)·필드 매핑(`fields.award_*`)을 확인한다. 실제 응답 필드명은 아직 미확인(2026-09-09 기준 추정값, 후보 이름을 자동 탐색). 수집 실패(20/30) 시 공고·기초금액 수집은 유지되고 안내만 출력된다.
 - 첨부 URL 은 `https://www.g2b.go.kr/pn/pnp/pnpe/UntyAtchFile/downloadFile.do?...` 형식이며, 로그인 페이지가 돌아오면 `07_추출노트`에 'HTML 응답' 실패로 기록된다(수동 다운로드 후 `data/files/<공고번호>/` 에 넣고 `attach` 재실행).
 - HWP 파서: HWP 5.0 규격(olefile+zlib 레코드) 기반이며 실제 공고문으로 첫 실행 시 확인 필요. 실패 시 `hwp5txt`(pyhwp) → Windows 한컴 COM 순으로 폴백. 배포용(DRM)·암호 문서는 수동 처리.
 - 스캔 PDF는 `pytesseract`+`pdf2image` 설치 시 OCR. 연면적이 공고문에 없으면 현장설명서·설계설명서를 함께 파싱해도 공란일 수 있음(경고 기록).

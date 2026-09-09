@@ -207,6 +207,46 @@ def test_discover_and_dedup(tmp):
     assert set(l4["공고번호"]) == {"A9"} and h4[h4["공고번호"] == "A1"]["대체공고번호"].iloc[0] == "A9"
 
 
+def test_awards():
+    """낙찰정보 병합: config 매핑이 없으면 후보 필드명 사용, 공고번호+차수 → 공고번호 폴백, 같은 공고의 여러 행은 최신 개찰일시 행."""
+    from g2b_costdb.collect import award_column
+    cfg = load_config()
+    aw = pd.DataFrame([
+        dict(bidNtceNo="A1", bidNtceOrd="001", scsbidAmt="900", scsbidRate="90.0", bidwinnrNm="갑", prtcptCnum="3", opengDt="2024-02-01 11:00:00"),
+        dict(bidNtceNo="A2", bidNtceOrd=0, scsbidAmt="500", scsbidRate="80%", bidwinnrNm="을", prtcptCnum="2", opengDt="2024-03-01 11:00:00"),
+        dict(bidNtceNo="A2", bidNtceOrd="000", scsbidAmt="520", scsbidRate="83", bidwinnrNm="병", prtcptCnum="4", opengDt="2024-02-10 11:00:00"),
+        dict(bidNtceNo="Z9", bidNtceOrd="000", scsbidAmt="1", scsbidRate="1", bidwinnrNm="무", prtcptCnum="1", opengDt="2024-03-01 11:00:00"),
+        dict(bidNtceNo="A3", bidNtceOrd="000", scsbidAmt=None, scsbidRate=None, bidwinnrNm="", prtcptCnum="", opengDt=""),
+    ])
+    assert award_column(cfg, aw, "award_amt") == "scsbidAmt" and award_column(cfg, aw, "award_rate") == "scsbidRate", "config 매핑(sucsfbid*) 없음 → 후보"
+    assert award_column(cfg, aw, "award_bidder_bizno") is None and award_column(cfg, aw.iloc[0:0], "award_amt") is None
+    raw = pd.DataFrame([
+        dict(bidNtceNo="A1", bidNtceOrd="000", bidNtceNm="가상군 문화예술회관 건립공사", ntceKindNm="일반공고", bidNtceDt="2024-01-05 10:00:00",
+             dminsttNm="가상군", presmptPrce="1000", mainCnsttyNm="건축공사"),
+        dict(bidNtceNo="A1", bidNtceOrd="001", bidNtceNm="가상군 문화예술회관 건립공사 [변경]", ntceKindNm="변경공고", bidNtceDt="2024-01-08 10:00:00",
+             dminsttNm="가상군", presmptPrce="1000", mainCnsttyNm="건축공사"),
+        dict(bidNtceNo="A2", bidNtceOrd="000", bidNtceNm="가상군 문화예술회관 건립 전기공사", ntceKindNm="일반공고", bidNtceDt="2024-01-06 10:00:00",
+             dminsttNm="가상군", presmptPrce="600", mainCnsttyNm="전기공사"),
+        dict(bidNtceNo="A3", bidNtceOrd="000", bidNtceNm="가상군 문화예술회관 건립 소방공사", ntceKindNm="일반공고", bidNtceDt="2024-01-06 10:00:00",
+             dminsttNm="가상군", presmptPrce="100", mainCnsttyNm="소방공사"),
+        dict(bidNtceNo="B1", bidNtceOrd="000", bidNtceNm="다른군 문화예술회관 건립공사", ntceKindNm="일반공고", bidNtceDt="2024-02-05 10:00:00",
+             dminsttNm="다른군", presmptPrce="2000", mainCnsttyNm="건축공사"),
+    ])
+    std = discover.standardize(raw, cfg, None, awards=aw).set_index("공고키")
+    assert std.loc["A1-001", "낙찰금액_API"] == 900 and std.loc["A1-001", "낙찰자"] == "갑" and std.loc["A1-001", "참가업체수"] == 3
+    assert std.loc["A1-000", "낙찰금액_API"] == 900, "차수가 다른 행은 공고번호로 폴백"
+    assert std.loc["A2-000", "낙찰자"] == "을" and std.loc["A2-000", "낙찰금액_API"] == 500 and std.loc["A2-000", "낙찰률_API"] == 80.0, \
+        "같은 공고 2행 → 개찰일시가 최신인 행(정수 차수 0 도 000 으로), '80%' → 80.0"
+    assert pd.isna(std.loc["B1-000", "낙찰금액_API"]) and pd.isna(std.loc["A3-000", "낙찰금액_API"]), "낙찰 없음·금액 없는 낙찰 행은 공란"
+    assert std["낙찰개찰일시"].loc["A2-000"] == "2024-03-01 11:00:00"
+    std0 = discover.standardize(raw, cfg, None)
+    assert "낙찰금액_API" in std0.columns and std0["낙찰금액_API"].isna().all(), "낙찰 미사용이어도 컬럼은 존재(빈 값)"
+    # collect_awards 가 만든 parquet(_award_amt 선계산) 형태로 들어와도 같은 결과
+    aw2 = aw.assign(_award_amt=aw["scsbidAmt"].map(parse_amount), _award_rate=pd.to_numeric(aw["scsbidRate"].astype(str).str.replace("%", ""), errors="coerce"))
+    std2 = discover.standardize(raw, cfg, None, awards=aw2).set_index("공고키")
+    assert std2.loc["A2-000", "낙찰금액_API"] == 500 and std2.loc["A1-000", "낙찰률_API"] == 90.0
+
+
 def test_extract_and_verify():
     doc = extract_llm.normalize_doc({"추정가격_원": "19,100,000,000", "기초금액_원": 21010000000, "연면적_m2": "9,850.5",
                                      "근거문구": [{"항목": "연면적_m2", "원문": "연면적 9,850㎡"}], "지상층수": "4"})
@@ -359,6 +399,7 @@ def run():
         test_api_client(tmp)
         test_classify()
         test_discover_and_dedup(tmp)
+        test_awards()
         test_extract_and_verify()
         test_handoff_and_batch(tmp)
         test_attachments(tmp)

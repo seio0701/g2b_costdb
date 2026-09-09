@@ -119,6 +119,21 @@ def build_dataset(base: str) -> Dict:
         "R24020006": [{"lcnsLmtNm": "건축공사업"}],
         "R24020007": [{"lcnsLmtNm": "건축공사업"}],
     }
+    # 낙찰정보서비스(가짜) — 공사 낙찰 목록. R24010001 은 차수 001 로 낙찰, R24010002 는 1월 말 개찰 후 2월 재개찰로 2행(최신 개찰일시 행이 남아야 함)
+    awards = [
+        dict(bidNtceNo="R24010001", bidNtceOrd="001", bidNtceNm="가상군 문화예술회관 건립공사 [변경]", opengDt="2024-02-05 11:00:00",
+             sucsfbidAmt="28500000000", sucsfbidRate="86.36", bidwinnrNm="가상건설(주)", bidwinnrBizno="1234567890", prtcptCnum="12",
+             presmptPrce="30000000000", bssamt="33000000000", dminsttNm="가상군"),
+        dict(bidNtceNo="R24010002", bidNtceOrd="000", bidNtceNm="가상군 문화예술회관 건립 전기공사", opengDt="2024-01-30 11:00:00",
+             sucsfbidAmt="2500000000", sucsfbidRate="87.41", bidwinnrNm="옛날전기(주)", bidwinnrBizno="2234567890", prtcptCnum="5",
+             presmptPrce="2600000000", bssamt="2860000000", dminsttNm="가상군"),
+        dict(bidNtceNo="R24010002", bidNtceOrd="000", bidNtceNm="가상군 문화예술회관 건립 전기공사", opengDt="2024-02-20 11:00:00",
+             sucsfbidAmt="2574000000", sucsfbidRate="90.00", bidwinnrNm="가상전기(주)", bidwinnrBizno="3234567890", prtcptCnum="7",
+             presmptPrce="2600000000", bssamt="2860000000", dminsttNm="가상군"),
+        dict(bidNtceNo="R24020006", bidNtceOrd="000", bidNtceNm="가상시 야외공연장 조성공사", opengDt="2024-03-11 11:00:00",
+             sucsfbidAmt="4800000000", sucsfbidRate="87.27", bidwinnrNm="야외건설(주)", bidwinnrBizno="4234567890", prtcptCnum="9",
+             presmptPrce="5000000000", bssamt="5500000000", dminsttNm="가상시"),
+    ]
     files = {
         "입찰공고문.hwpx": (_hwpx(["입 찰 공 고 (가상군 문화예술회관 건립공사)", "1. 공사개요",
                                 "위치: 전라남도 가상군 가상읍", "규모: 연면적 15,200㎡, 지하1층/지상3층, 철골철근콘크리트조",
@@ -133,7 +148,7 @@ def build_dataset(base: str) -> Dict:
         "야외공연장_공고문.hwpx": (_hwpx(["가상시 야외공연장 조성공사 입찰공고", "규모: 객석 1,200석, 연면적 2,400㎡, 지상2층",
                                        "추정가격 5,000,000,000원 / 기초금액 5,500,000,000원", "공사기간 540일"]), "application/octet-stream"),
     }
-    return {"notices": N, "bsis": bsis, "license": lic, "files": files}
+    return {"notices": N, "bsis": bsis, "license": lic, "files": files, "awards": awards}
 
 
 def _xml_error(code: str, msg: str) -> bytes:
@@ -187,6 +202,12 @@ class MockG2B:
                     items = [n for n in mock.data["notices"] if n["bidNtceDt"][:7].replace("-", "") == q.get("inqryBgnDt", "")[:6]]
                 elif op == "getBidPblancListInfoCnstwkBsisAmount":
                     items = [b for b in mock.data["bsis"] if b["bidNtceDt"][:7].replace("-", "") == q.get("inqryBgnDt", "")[:6]]
+                elif op == "getScsbidListSttusCnstwk":
+                    if parts[0] != "ScsbidInfoService":        # 낙찰정보서비스는 별도 End Point — 입찰공고 경로로 부르면 없는 오퍼레이션
+                        return self._send(200, _xml_error("12", "NO_OPENAPI_SERVICE_ERROR"), "application/xml")
+                    if q.get("inqryDiv") != "1":
+                        return self._send(200, _xml_error("10", "INVALID_REQUEST_PARAMETER_ERROR"), "application/xml")
+                    items = [w for w in mock.data["awards"] if w["opengDt"][:7].replace("-", "") == q.get("inqryBgnDt", "")[:6]]
                 elif op == "getBidPblancListInfoLicenseLimit":
                     if q.get("inqryDiv") != "2" or not q.get("bidNtceNo"):
                         return self._send(200, _xml_error("10", "INVALID_REQUEST_PARAMETER_ERROR"), "application/xml")

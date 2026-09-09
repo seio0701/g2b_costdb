@@ -1,6 +1,6 @@
 # HANDOFF.md — g2b_costdb 진행 상황
 
-> 매 세션 시작 시 이 파일을 먼저 읽는다. 갱신일: 2026-09-08
+> 매 세션 시작 시 이 파일을 먼저 읽는다. 갱신일: 2026-09-09
 
 ## 0. 2026-09-08 진행 (사용자 PC, C:\DB_WORK\g2b_costdb)
 - 전용 저장소 github.com/seio0701/g2b_costdb 생성·클론, Python 3.14, 패키지 설치, `doctor`·두 테스트 통과, 인증키 설정 완료.
@@ -16,6 +16,17 @@
 - S6 추출에 **배치 모드(`extract --batch`, 50% 할인)** 와 **파일 인수인계 모드(`extract --export/--import`, Cowork·사람이 채움)** 추가. 뒤 단계 동일.
 - 다음: 사용자 PC 에서 `git pull` → `discover` 재실행 → (검수) → `research` → `dedup` → `attach` 까지 3개월치로 먼저 돌려 첨부 다운로드·HWP 해석을 확인,
   그 뒤 `extract --export` 로 30~50건을 Cowork 로 시범 추출해 품질 확인 → 본 처리는 `extract --batch --yes`.
+
+## 0-2. 2026-09-09 낙찰정보(낙찰금액·낙찰률) 연동 — 코드 완료, 실제 API 미확인
+- 사용자 질문 "최종 낙찰률 정보도 있나?" → 입찰공고정보서비스에는 낙찰하한율(`sucsfbidLwltRate`)만 있고 낙찰 결과는 별도 서비스인
+  「조달청_나라장터 낙찰정보서비스」(공사 낙찰 목록 `getScsbidListSttusCnstwk`)에 있음. 사용자가 활용신청 후 알려주기로 함.
+- 구현(기본 꺼짐 `api.use_awards: false`): `probe` 가 낙찰 표본·`[award_*]` 매핑 상태를 출력, `collect` 가 개찰일 기준 월 단위로
+  `data/raw/award_YYYYMM.jsonl` → `data/award_all.parquet`, `discover` 가 공고번호+차수(→공고번호)로 붙여 `낙찰금액_API/낙찰률_API/낙찰자/참가업체수/낙찰개찰일시`
+  컬럼 생성, Excel `02/03/04` 에 표시하고 `04` 에 `낙찰률(수식)`(낙찰금액/기초금액). 총공사비에는 사용하지 않음(참고 컬럼).
+- 미확인 사항(실제 응답으로 확정 필요): End Point `api.award_base_url`(현재 `…/1230000/as/ScsbidInfoService` 추정), 기간 조회 파라미터
+  `award_query.inqryDiv`(probe 가 1·2·3 을 시험), 필드명 `fields.award_*`(`sucsfbidAmt` 등 추정, 후보 자동 탐색).
+- 다음(사용자가 활용신청 완료를 알리면): `git pull` → `config.yaml api.use_awards: true` → `probe --ym 2026-08` 출력의 낙찰 덩어리 확인 →
+  필요 시 `award_base_url`/`award_query`/`fields.award_*` 수정 → `collect`(3개월이면 월 1~2페이지 추가) → `discover` 이후 동일.
 
 ## 1. 현재 단계
 - **세션 0(코드 정비) 완료 / 세션 1(환경 점검 + probe)의 사용자 PC 실행 대기**

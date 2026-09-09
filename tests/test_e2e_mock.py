@@ -62,6 +62,8 @@ def run():
     cfg["api"]["sleep_between_calls_sec"] = 0
     cfg["api"]["max_retries"] = 2
     cfg["api"]["use_license_limit"] = True                          # 가짜 서버로 면허제한 경로도 검증
+    cfg["api"]["use_awards"] = True                                 # 낙찰정보서비스(별도 End Point) 경로도 검증
+    cfg["api"]["award_base_url"] = base + "/ScsbidInfoService"
     cfg["period"] = {"start": "2024-01", "end": "2024-04"}          # 2024-04 는 데이터 없음(03) 경로
     cfg["paths"] = {"data_dir": "data", "raw_dir": "data/raw", "cache_db": "data/cache.sqlite", "text_dir": "data/text",
                     "files_dir": "data/files", "out_dir": "output", "excel_name": "공사비DB.xlsx"}
@@ -79,17 +81,22 @@ def run():
         os.environ["G2B_SERVICE_KEY"] = KEY
         out = _run(["probe", "--ym", "2024-01", "--config", cfg_path])
         assert out.count("[매핑 OK]") == 2 and "후보 lcnsLmtNm 발견" in out, out
+        assert "[award_amt] OK" in out and "[award_rate] OK" in out and "[낙찰정보] 기간 조회 파라미터 {'inqryDiv': '1'}" in out, out
         # 2) collect — 4개월(1개월은 NODATA), done.txt, parquet
         out = _run(["collect", "--config", cfg_path])
         notices = pd.read_parquet(data("notices_all.parquet"))
         assert len(notices) == len(server.data["notices"]), len(notices)
         assert set(open(data("raw", "notices_done.txt")).read().split()) == {"202401", "202402", "202403", "202404"}
         assert os.path.exists(data("bsis_all.parquet"))
-        calls_after_collect = server.calls["getBidPblancListInfoCnstwk"]
-        _run(["collect", "--config", cfg_path])                        # 재실행: 완료된 달은 호출 없음
-        assert server.calls["getBidPblancListInfoCnstwk"] == calls_after_collect
+        awards = pd.read_parquet(data("award_all.parquet"))
+        assert len(awards) == len(server.data["awards"]) and awards["_award_amt"].notna().all(), awards
+        assert set(open(data("raw", "award_done.txt")).read().split()) == {"202401", "202402", "202403", "202404"}
+        calls_after_collect = (server.calls["getBidPblancListInfoCnstwk"], server.calls["getScsbidListSttusCnstwk"])
+        _run(["collect", "--config", cfg_path])                        # 재실행: 완료된 달은 호출 없음(낙찰 목록 포함)
+        assert (server.calls["getBidPblancListInfoCnstwk"], server.calls["getScsbidListSttusCnstwk"]) == calls_after_collect
         # 3) discover — 시설 3개(가상군/다른군 문화예술회관, 가상시 야외공연장), 유지보수는 '제외' 기본값, 잡음 없음
         out = _run(["discover", "--config", cfg_path])
+        assert "낙찰정보 연결: 공고 4건" in out, out            # R24010001(000·001), R24010002, R24020006
         from g2b_costdb.discover import read_review_file
         rev = read_review_file(os.path.join(tmp, "output", "facility_candidates.xlsx"))
         assert len(rev) == 3, rev[["시설ID", "시설명_후보", "수요기관", "사업유형", "검수_포함여부"]]
@@ -166,7 +173,13 @@ def run():
         r4 = next(r for r in range(2, ws4.max_row + 1) if ws4.cell(r, h4.index("공고번호") + 1).value == "R24010001")
         assert ws4.cell(r4, h4.index("관급자관급액_API") + 1).value == 2100000000, "API 관급자재 금액이 04 시트에"
         assert ws4.cell(r4, h4.index("예산금액_API") + 1).value == 35100000000
+        assert ws4.cell(r4, h4.index("낙찰금액_API") + 1).value == 28500000000 and ws4.cell(r4, h4.index("낙찰률_API") + 1).value == 86.36, "낙찰 참고 컬럼(차수 001 로 연결)"
+        assert ws4.cell(r4, h4.index("낙찰자") + 1).value == "가상건설(주)"
+        assert str(ws4.cell(r4, h4.index("낙찰률(수식)") + 1).value).startswith("=IF(")
         hist_df = pd.read_parquet(data("notices_hist.parquet"))
+        e_row = hist_df[hist_df["공고번호"] == "R24010002"].iloc[0]
+        assert e_row["낙찰자"] == "가상전기(주)" and e_row["낙찰금액_API"] == 2574000000 and e_row["참가업체수"] == 7, "재개찰 2행 중 최신 개찰일시 행"
+        assert hist_df[hist_df["공고번호"] == "R24030005"]["낙찰금액_API"].isna().all(), "낙찰 없는 공고는 공란"
         assert hist_df[hist_df["공고번호"] == "R24020004"]["이전공고번호"].iloc[0] == "R24010003" and \
             set(hist_df[hist_df["공고번호"] == "R24010001"]["부공종명"]) <= {"토목공사업 / 조경공사업", "토목공사업"}
         assert wb["06_검증로그"].max_row > 1 and wb["07_추출노트"].max_row > 1
@@ -198,6 +211,9 @@ def run():
             assert abs(float(per) - float(total) / 15200) < 1, per
             r3 = rows[ids_before["다른군"] + "-N"]
             assert abs(float(val("05_공사비DB_시설합산", f"{col('건축(수식)')}{r3}")) - 25000000000 * 1.1) < 1, "기초금액 없으면 추정가격×1.1"
+            rate = val("04_공사비DB_공종별", f"{openpyxl.utils.get_column_letter(h4.index('낙찰률(수식)') + 1)}{r4}")
+            assert abs(float(rate) - 28500000000 / 33000000000) < 1e-6, ("낙찰률(수식) = 낙찰금액/기초금액", rate)
+            assert abs(float(total) - (33000000000 + 2100000000 + 2860000000 + 583000000)) < 1, "낙찰금액은 총공사비에 쓰이지 않음"
             print("05 시설합산 값 검증 OK")
         except ImportError:
             print("(formulas 패키지 없음 → 05 값 검증 생략)")

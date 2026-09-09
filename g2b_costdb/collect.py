@@ -28,7 +28,17 @@ log = logging.getLogger(__name__)
 LICENSE_NAME_CANDIDATES = ["lcnsLmtNm", "indstrytyNm", "permsnIndstrytyList", "lmtNm", "indstrytyLmtNm"]
 
 
-def make_client(cfg: dict) -> G2BClient:
+AWARD_FIELD_CANDIDATES = {
+    "award_amt": ["sucsfbidAmt", "scsbidAmt", "sucsfbidPrce", "bidprcAmt"],
+    "award_rate": ["sucsfbidRate", "scsbidRate", "sucsfbidRt", "bidprcRate"],
+    "award_bidder": ["bidwinnrNm", "scsbidCorpNm", "bidwinnrCorpNm", "prcbdrNm"],
+    "award_bidder_bizno": ["bidwinnrBizno", "scsbidBizno"],
+    "award_prtcpt_cnt": ["prtcptCnum", "bidPrtcptCnum", "prtcptCnt"],
+    "award_open_dt": ["opengDt", "rlOpengDt", "sucsfbidDt"],
+}
+
+
+def make_client(cfg: dict, base_url: str = None) -> G2BClient:
     key = (os.environ.get(cfg["api"]["service_key_env"], "") or "").strip().strip('"').strip("'")
     if not key:
         raise SystemExit(
@@ -37,7 +47,7 @@ def make_client(cfg: dict) -> G2BClient:
             f"  (키를 채팅이나 파일에 붙여 넣지 마세요)")
     a = cfg["api"]
     return G2BClient(
-        ApiConfig(base_url=a["base_url"], service_key=key, num_of_rows=int(a["num_of_rows"]),
+        ApiConfig(base_url=base_url or a["base_url"], service_key=key, num_of_rows=int(a["num_of_rows"]),
                   timeout_sec=int(a["timeout_sec"]), max_retries=int(a["max_retries"]),
                   sleep_between_calls_sec=float(a["sleep_between_calls_sec"]),
                   daily_call_budget=int(a["daily_call_budget"])),
@@ -86,10 +96,11 @@ def _write_done(path: str, done: set) -> None:
         f.write("\n".join(sorted(done)))
 
 
-def _collect_monthly(cfg: dict, op_key: str, prefix: str, start: Optional[str], end: Optional[str]) -> pd.DataFrame:
+def _collect_monthly(cfg: dict, op_key: str, prefix: str, start: Optional[str], end: Optional[str],
+                     base_url: Optional[str] = None, op_name: Optional[str] = None, extra: Optional[dict] = None) -> pd.DataFrame:
     """월 단위 전량 수집 공통 루틴. 반환: 누적 원문 DataFrame(문자열화)."""
-    client = make_client(cfg)
-    op = cfg["api"]["ops"][op_key]
+    client = make_client(cfg, base_url)
+    op = op_name or cfg["api"]["ops"][op_key]
     raw_dir = cfg["paths"]["raw_dir"]
     start = start or cfg["period"]["start"]
     end = end or cfg["period"]["end"]
@@ -110,7 +121,7 @@ def _collect_monthly(cfg: dict, op_key: str, prefix: str, start: Optional[str], 
             # 진행 중인 달, 또는 done.txt 에서 지워 재수집을 요청한 달(파일은 있음)은 캐시를 우회해 새로 받는다
             refresh = is_current or os.path.exists(path)
             try:
-                rows = list(client.iter_all(op, {"inqryDiv": "1", "inqryBgnDt": bgn, "inqryEndDt": endd},
+                rows = list(client.iter_all(op, {**(extra or {"inqryDiv": "1"}), "inqryBgnDt": bgn, "inqryEndDt": endd},
                                             cache_salt=(date.today().isoformat() if refresh else None)))
             except ApiError as e:
                 if e.code in ("10", "11", "12", "20", "30", "31", "32", "33"):
@@ -177,6 +188,32 @@ def collect_bsis_amounts(cfg: dict, start: str = None, end: str = None) -> pd.Da
         df.to_parquet(os.path.join(cfg["paths"]["data_dir"], "bsis_all.parquet"), index=False)
     log.info("누적 기초금액 %d건 → bsis_all.parquet", len(df))
     return df
+
+
+def collect_awards(cfg: dict, start: str = None, end: str = None) -> pd.DataFrame:
+    """공사 낙찰 목록(낙찰정보서비스)을 월 단위로 전량 수집 → data/raw/award_YYYYMM.jsonl + data/award_all.parquet"""
+    a = cfg["api"]
+    df = _collect_monthly(cfg, "", "award_", start, end, base_url=a.get("award_base_url"),
+                          op_name=(a.get("award_ops") or {}).get("cnstwk_list", "getScsbidListSttusCnstwk"),
+                          extra=dict(a.get("award_query") or {"inqryDiv": "1"}))
+    if not df.empty:
+        amt_col = award_column(cfg, df, "award_amt")
+        rate_col = award_column(cfg, df, "award_rate")
+        df["_award_amt"] = df[amt_col].map(parse_amount) if amt_col else None
+        df["_award_rate"] = pd.to_numeric(df[rate_col].astype(str).str.replace("%", "").str.replace(",", ""), errors="coerce") if rate_col else None
+        df.to_parquet(os.path.join(cfg["paths"]["data_dir"], "award_all.parquet"), index=False)
+    log.info("누적 낙찰 %d건 → award_all.parquet", len(df))
+    return df
+
+
+def award_column(cfg: dict, df: pd.DataFrame, key: str) -> Optional[str]:
+    """낙찰 응답에서 key(award_amt 등)에 해당하는 컬럼명(config 매핑 → 후보 순)."""
+    if df is None or df.empty:
+        return None
+    for c in [cfg["fields"].get(key, "")] + AWARD_FIELD_CANDIDATES.get(key, []):
+        if c and c in df.columns:
+            return c
+    return None
 
 
 def license_query_params(cfg: dict, bid_no: str) -> Dict[str, str]:
@@ -306,4 +343,54 @@ def probe(cfg: dict, ym: str) -> None:
             print(f"[면허제한] 결과가 나온 파라미터: {seen_ok} → 사용하려면 config.yaml api.license_query 를 이 값으로, api.use_license_limit 를 true 로")
         else:
             print("[면허제한] 어떤 조회구분으로도 항목이 없음 — 이 공고에 면허제한이 없을 수 있음. 공종 분류는 주공종명·부공종명으로 충분하므로 use_license_limit 는 false 유지")
+    if cfg["api"].get("use_awards"):
+        probe_awards(cfg, ym, first_bid_no)
     print(f"\n오늘 API 호출 {client.calls_today()}회 (예산 {cfg['api']['daily_call_budget']})")
+
+
+def probe_awards(cfg: dict, ym: str, sample_bid_no: Optional[str] = None) -> None:
+    """낙찰정보서비스 표본 조회: 기간 조회 변형을 시험하고 낙찰 필드 매핑을 대조."""
+    a = cfg["api"]
+    base = a.get("award_base_url")
+    op = (a.get("award_ops") or {}).get("cnstwk_list", "getScsbidListSttusCnstwk")
+    f = cfg["fields"]
+    if not base:
+        print("\n[낙찰정보] config.yaml api.award_base_url 이 없습니다.")
+        return
+    client = make_client(cfg, base)
+    bgn, end = G2BClient.month_ranges(ym, ym)[0]
+    variants = [dict(a.get("award_query") or {"inqryDiv": "1"}), {"inqryDiv": "2"}, {"inqryDiv": "3"}]
+    seen = []
+    ok = None
+    for v in variants:
+        if v in seen:
+            continue
+        seen.append(v)
+        params = dict(v); params.update({"inqryBgnDt": bgn, "inqryEndDt": end, "pageNo": 1, "numOfRows": 5})
+        try:
+            body = client.call(op, params, use_cache=False)
+        except ApiError as e:
+            print(f"\n=== {op} params={v} 실패: API 오류 {e.code} ({explain_code(e.code)})")
+            if e.code in ("20", "30", "31", "32"):
+                print("→ 「조달청_나라장터 낙찰정보서비스」 활용신청이 승인되었는지, api.award_base_url 이 포털 페이지의 End Point 와 같은지 확인")
+                return
+            continue
+        items = client._items(body)
+        print(f"\n=== {op} params={v} ({ym}) totalCount={body.get('totalCount')} 표본 {len(items)}건 ===")
+        if not items:
+            continue
+        keys = sorted(set().union(*[it.keys() for it in items]))
+        print("필드:", keys)
+        print("표본:", json.dumps(items[0], ensure_ascii=False, indent=1)[:2000])
+        for k in ("award_amt", "award_rate", "award_bidder", "award_prtcpt_cnt", "award_open_dt"):
+            col = next((c for c in [f.get(k, "")] + AWARD_FIELD_CANDIDATES.get(k, []) if c and c in keys), None)
+            state = "OK" if f.get(k) in keys else (f"후보 {col} 발견 → config.yaml fields.{k} 를 이 값으로" if col else "없음 → 표본에서 찾아 config.yaml fields 수정")
+            print(f"  [{k}] {state}")
+        if f["bid_no"] not in keys:
+            print(f"  [경고] 공고번호 필드 {f['bid_no']} 가 없어 공고와 연결할 수 없음 → 표본에서 공고번호 필드를 확인")
+        ok = v
+        break
+    if ok:
+        print(f"[낙찰정보] 기간 조회 파라미터 {ok} 로 결과 확인 → config.yaml api.award_query 를 이 값으로 두고 collect 를 실행하면 낙찰 목록도 수집됩니다")
+    else:
+        print("[낙찰정보] 어떤 조회구분으로도 항목이 없음 — 활용가이드의 기간 조회 파라미터를 확인")

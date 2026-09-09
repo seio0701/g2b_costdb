@@ -40,7 +40,7 @@ def _blank(v) -> bool:
 
 
 def standardize(df_raw: pd.DataFrame, cfg: dict, bsis: Optional[pd.DataFrame] = None,
-                license_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+                license_df: Optional[pd.DataFrame] = None, awards: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """API 원문 → 내부 표준 컬럼. 미존재 필드는 공란."""
     f = cfg["fields"]
     empty = pd.Series([""] * len(df_raw), index=df_raw.index, dtype=object)
@@ -107,6 +107,30 @@ def standardize(df_raw: pd.DataFrame, cfg: dict, bsis: Optional[pd.DataFrame] = 
         df["기초금액"] = df["공고키"].map(m)
         m2 = b.assign(_no=_s(b[f["bid_no"]])).drop_duplicates("_no", keep="last").set_index("_no")["_bsis_amount"]
         df["기초금액"] = df["기초금액"].fillna(df["공고번호"].map(m2))
+
+    # 낙찰정보 병합(참고 컬럼: 공고번호+차수 → 없으면 공고번호). 같은 공고에 여러 행이면 개찰일시가 최신인 행
+    for c in ("낙찰금액_API", "낙찰률_API", "낙찰자", "참가업체수", "낙찰개찰일시"):
+        df[c] = None
+    if awards is not None and not awards.empty and f["bid_no"] in awards.columns:
+        from .collect import award_column
+        w = awards.copy()
+        amt_c, rate_c = award_column(cfg, w, "award_amt"), award_column(cfg, w, "award_rate")
+        bid_c, cnt_c, dt_c = award_column(cfg, w, "award_bidder"), award_column(cfg, w, "award_prtcpt_cnt"), award_column(cfg, w, "award_open_dt")
+        w["_amt"] = w["_award_amt"] if "_award_amt" in w.columns else (w[amt_c].map(parse_amount) if amt_c else None)
+        w["_rate"] = w["_award_rate"] if "_award_rate" in w.columns else \
+            (pd.to_numeric(_s(w[rate_c]).str.replace("%", "").str.replace(",", ""), errors="coerce") if rate_c else None)
+        w["_bidder"] = _s(w[bid_c]) if bid_c else ""
+        w["_cnt"] = pd.to_numeric(_s(w[cnt_c]), errors="coerce") if cnt_c else None
+        w["_dt"] = _s(w[dt_c]) if dt_c else ""
+        ords = _s(w[f["bid_ord"]]) if f["bid_ord"] in w.columns else pd.Series(["000"] * len(w), index=w.index)
+        w["_no"] = _s(w[f["bid_no"]])
+        w["_k"] = w["_no"] + "-" + ords.map(lambda s: s.zfill(3) if s.isdigit() else (s or "000"))
+        w = w[w["_amt"].notna() | w["_rate"].notna()].sort_values("_dt")
+        for key_col, src in (("_k", df["공고키"]), ("_no", df["공고번호"])):
+            m = w.drop_duplicates(key_col, keep="last").set_index(key_col)
+            for c, wc in (("낙찰금액_API", "_amt"), ("낙찰률_API", "_rate"), ("낙찰자", "_bidder"), ("참가업체수", "_cnt"), ("낙찰개찰일시", "_dt")):
+                filled = src.map(m[wc])
+                df[c] = df[c].where(df[c].notna(), filled)
 
     # 면허제한 업종(복수 → ' / ' 결합)
     df["면허제한업종"] = ""

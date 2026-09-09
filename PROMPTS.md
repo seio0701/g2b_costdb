@@ -25,6 +25,15 @@ output/facility_candidates.xlsx가 만들어지면 시설 수와 상위 20개 �
 표2 검색어(keywords.yaml)로 잡힌 결과가 상식적으로 맞는지 네 의견도 짧게 덧붙여줘. HANDOFF.md 갱신.
 ```
 
+## 세션 2-보강 — 낙찰정보서비스 연결 (활용신청 승인 뒤, 약 10분)
+```
+HANDOFF.md를 읽고 이어서 해줘. 공공데이터포털에서 「조달청_나라장터 낙찰정보서비스」 활용신청이 승인됐어.
+config.yaml의 api.use_awards 를 true 로 바꾸고 python -m g2b_costdb.pipeline probe --ym 2026-08 을 실행해서
+낙찰 덩어리의 End Point·조회 파라미터·[award_*] 매핑 결과를 보고, 필요한 부분만 config.yaml 을 고쳐줘(무엇을 왜 바꿨는지 표로).
+그 다음 collect 를 실행해 낙찰 목록이 몇 건 받아졌는지, discover 를 다시 실행해 낙찰금액이 붙은 공고가 몇 건인지 알려줘.
+낙찰금액·낙찰률은 참고 컬럼이고 총공사비 기준은 그대로 추정가격·기초금액이야. HANDOFF.md 갱신.
+```
+
 ## 세션 3 — 본 수집 (하루 1회, 완료까지 2~3일)
 ```
 HANDOFF.md를 읽고 이어서 해줘.

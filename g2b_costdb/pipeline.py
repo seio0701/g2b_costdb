@@ -26,6 +26,7 @@ import sys
 import pandas as pd
 
 from . import attachments, collect, dedup, discover, extract_llm
+from .api_client import ApiError
 from .build_excel import build_workbook
 from .classify import ROOT, load_config
 
@@ -148,7 +149,7 @@ def stage_doctor(cfg):
         row = con.execute("SELECT n FROM calls WHERE day=?", (date.today().isoformat(),)).fetchone()
         n_cache = con.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
         print(f"API 캐시: 응답 {n_cache}건 저장됨, 오늘 호출 {row[0] if row else 0}회 / 예산 {cfg['api']['daily_call_budget']}")
-    for name in ("notices_all.parquet", "bsis_all.parquet", "notices_std.parquet", "notices_research.parquet",
+    for name in ("notices_all.parquet", "bsis_all.parquet", "award_all.parquet", "notices_std.parquet", "notices_research.parquet",
                  "notices_latest.parquet", "texts.json", "llm_docs.json"):
         p = _p(cfg, name)
         if os.path.exists(p):
@@ -159,10 +160,22 @@ def stage_doctor(cfg):
 def stage_collect(cfg):
     collect.collect_notices(cfg)
     collect.collect_bsis_amounts(cfg)
+    if cfg["api"].get("use_awards"):
+        try:
+            collect.collect_awards(cfg)
+        except ApiError as e:
+            # 공고·기초금액은 이미 저장됨. 낙찰정보서비스만 미승인/End Point 오류인 경우 여기서 멈추지 않고 안내만 한다
+            if e.code in ("20", "30", "31", "32", "12"):
+                print(f"[낙찰정보] 수집 실패: API 오류 {e.code} ({e}) — 「조달청_나라장터 낙찰정보서비스」 활용신청 승인 여부와 "
+                      f"config.yaml api.award_base_url(End Point)을 확인. 확인 전까지는 use_awards: false 로 두면 이 안내 없이 진행됩니다")
+            else:
+                raise
+    else:
+        print("[안내] 낙찰정보(낙찰금액·낙찰률)는 config.yaml api.use_awards: true 로 켜면 함께 수집됩니다(낙찰정보서비스 활용신청 필요)")
 
 
 def stage_discover(cfg):
-    for prefix, label in (("notices_", "공고"), ("bsis_", "기초금액")):
+    for prefix, label in (("notices_", "공고"), ("bsis_", "기초금액")) + ((("award_", "낙찰"),) if cfg["api"].get("use_awards") else ()):
         miss = collect.incomplete_months(cfg, prefix)
         if miss:
             print(f"[경고] {label} 수집 미완료 월 {len(miss)}개 ({', '.join(miss[:8])}{' …' if len(miss) > 8 else ''}) — "
@@ -170,7 +183,11 @@ def stage_discover(cfg):
     raw = _read(cfg, "notices_all.parquet")
     bsis_path = _p(cfg, "bsis_all.parquet")
     bsis = pd.read_parquet(bsis_path) if os.path.exists(bsis_path) else None
-    std = discover.standardize(raw, cfg, bsis)
+    award_path = _p(cfg, "award_all.parquet")
+    awards = pd.read_parquet(award_path) if os.path.exists(award_path) else None
+    std = discover.standardize(raw, cfg, bsis, awards=awards)
+    if awards is not None:
+        print(f"낙찰정보 연결: 공고 {int(std['낙찰금액_API'].notna().sum())}건에 낙찰금액 부여 (낙찰 목록 {len(awards)}건)")
     std.to_parquet(_p(cfg, "notices_std.parquet"), index=False)
     out = os.path.join(cfg["paths"]["out_dir"], "facility_candidates.xlsx")
     try:
@@ -450,6 +467,7 @@ def assemble_trade_table(latest: pd.DataFrame, docs: dict) -> pd.DataFrame:
             "추정가격_API": r.get("추정가격"), "기초금액_API": r.get("기초금액"),
             "관급자재_API": r.get("관급자재_API"), "도급자관급액_API": r.get("도급자관급액_API"), "관급자관급액_API": r.get("관급자관급액_API"),
             "예산금액_API": r.get("예산금액"),
+            "낙찰금액_API": r.get("낙찰금액_API"), "낙찰률_API": r.get("낙찰률_API"), "낙찰자": r.get("낙찰자"), "낙찰하한율": r.get("낙찰하한율"),
             "도급자관급액_문서": d.get("도급자관급액_원"), "관급자관급액_문서": d.get("관급자관급액_원"),
             "공사기간_일_문서": d.get("공사기간_일"), "추정가격_문서": d.get("추정가격_원"), "기초금액_문서": d.get("기초금액_원"),
             "신뢰도": d.get("신뢰도"), "근거문구": json.dumps(ev, ensure_ascii=False) if ev else "",
