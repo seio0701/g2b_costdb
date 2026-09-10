@@ -369,7 +369,7 @@ def _attach_report(cfg, latest, texts, notes_df):
         ok = g[g["추출성공"] == "Y"]
         if not ok.empty:
             chars = int(pd.to_numeric(ok.get("추출글자수"), errors="coerce").fillna(0).sum())
-            return "추출 성공 기록은 있으나 텍스트 없음" + ("(글자수 0 — 표지·이미지뿐)" if chars == 0 else f"(글자수 {chars} — 재처리 필요)")
+            return "추출은 됐으나 텍스트 없음(글자수 0 — 표지·이미지뿐)" if chars == 0 else "추출은 됐으나 텍스트가 저장되지 않음 → attach 재실행으로 복구"
         if forms == {".pdf"}:
             return "PDF 추출 실패(스캔)"
         return "추출 실패(" + "/".join(sorted(forms)[:3]) + ")"
@@ -378,10 +378,10 @@ def _attach_report(cfg, latest, texts, notes_df):
     cnt = missing["텍스트없음_원인"].value_counts()
     print(f"텍스트 없는 공고 {len(missing)}건의 원인:\n" + cnt.to_string())
     if not notes_df.empty and "오류" in notes_df.columns:
-        fail = notes_df[notes_df["공고번호"].astype(str).isin(set(missing["공고번호"].astype(str))) & (notes_df["추출성공"] != "Y")]
-        errs = fail["오류"].fillna("").astype(str).str.slice(0, 60).replace("", "(오류 메시지 없음)").value_counts().head(8)
+        rows = notes_df[notes_df["공고번호"].astype(str).isin(set(missing["공고번호"].astype(str)))]
+        errs = rows["오류"].fillna("").astype(str).str.slice(0, 70).replace("", "(오류 메시지 없음)").value_counts().head(8)
         if len(errs):
-            print("실패 파일의 오류 메시지 상위:\n" + errs.to_string())
+            print("해당 공고 파일들의 오류 메시지 상위(추출 성공 기록 포함):\n" + errs.to_string())
     top = missing.sort_values("_amt", ascending=False).head(10)
     print("그중 추정가격 상위 10건:\n" + top[["공고번호", "공고명", "공종", "추정가격", "텍스트없음_원인"]].to_string(index=False))
     out = missing.drop(columns=["_amt"])[[c for c in ("공고키", "공고번호", "공고명", "시설명", "공종", "추정가격", "첨부파일수", "상세URL", "텍스트없음_원인") if c in missing.columns]]

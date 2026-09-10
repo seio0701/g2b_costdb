@@ -469,6 +469,28 @@ def test_attachments(tmp):
             mock.patch.object(attachments, "extract_any", side_effect=fake_extract):
         text, notes2 = attachments.process_notice_attachments(row2, os.path.join(tmp, "files2"), os.path.join(tmp, "text2"))
     assert [n["파일명"] for n in notes2] == ["공고문.pdf", "공고문.hwp"] and notes2[0]["추출성공"] == "N" and notes2[1]["추출성공"] == "Y" and text
+    # HWP 문단 텍스트의 UTF-16 서로게이트: 쌍은 결합(이모지), 고아는 버림(그대로 두면 UTF-8 저장이 실패해 텍스트가 통째로 사라졌던 결함)
+    pay = "가".encode("utf-16le") + b"\x3d\xd8\x00\xde" + b"\x3d\xd8" + "나".encode("utf-16le") + b"\x00\xdc"
+    assert attachments._hwp_para_text(pay) == "가😀나", repr(attachments._hwp_para_text(pay))
+    assert attachments.sanitize_text("a\ud83db\x00c\td\n") == "abc\td\n"
+    row_s = {"공고번호": "N6", "첨부URL1": "http://x/f?fileSeq=6", "첨부파일명1": "공고문.hwp"}
+    with mock.patch("requests.get", side_effect=lambda *a, **k: R([b"\xd0\xcf\x11\xe0" + b"x" * 100])), \
+            mock.patch.object(attachments, "extract_any", return_value=("연면적 1,000㎡ \ud83d 본문", "olefile")):
+        text_s, notes_s = attachments.process_notice_attachments(row_s, os.path.join(tmp, "files6"), os.path.join(tmp, "text6"))
+    assert "연면적 1,000㎡" in text_s and "\ud83d" not in text_s and notes_s[0]["추출성공"] == "Y" and not notes_s[0]["오류"], notes_s
+    assert os.listdir(os.path.join(tmp, "text6")), "텍스트 파일 저장됨"
+    # 텍스트 파일 저장이 실패해도(예: 경로 길이 초과) 텍스트는 유지되고 오류만 기록
+    real_open = open
+    def failing_open(path, *a, **k):
+        if str(path).endswith(".txt") and "text5" in str(path):
+            raise OSError(22, "Invalid argument (경로 너무 김)")
+        return real_open(path, *a, **k)
+    with mock.patch("requests.get", side_effect=lambda *a, **k: R([b"\xd0\xcf\x11\xe0" + b"x" * 100])), \
+            mock.patch.object(attachments, "extract_any", return_value=("본문 " * 40, "olefile")), \
+            mock.patch("builtins.open", side_effect=failing_open):
+        text_b, notes_b = attachments.process_notice_attachments(dict(row_s, 공고번호="N5"), os.path.join(tmp, "files5"), os.path.join(tmp, "text5"))
+    assert text_b and notes_b[0]["추출성공"] == "Y" and "저장 실패" in notes_b[0]["오류"], notes_b
+    assert attachments._short_name("a" * 200 + ".hwp").endswith(".hwp") and len(attachments._short_name("a" * 200 + ".hwp")) < 80
     row3 = dict(row2, 공고번호="N7")
     with mock.patch("requests.get", side_effect=lambda *a, **k: R([b"%PDF-1.4 " + b"x" * 100])), \
             mock.patch.object(attachments, "extract_any", return_value=("본문 " * 40, "pdfplumber")):

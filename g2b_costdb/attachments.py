@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import logging
+import hashlib
 import os
 import re
 import shutil
@@ -181,9 +182,37 @@ def _hwp_para_text(payload: bytes) -> str:
                 out.append(" ")
             i += 2
             continue
+        if 0xD800 <= c <= 0xDBFF:               # UTF-16 상위 서로게이트: 뒤의 하위 서로게이트와 결합(이모지·확장 한자). 짝이 없으면 버림
+            if i + 3 < n:
+                c2 = payload[i + 2] | (payload[i + 3] << 8)
+                if 0xDC00 <= c2 <= 0xDFFF:
+                    out.append(chr(0x10000 + ((c - 0xD800) << 10) + (c2 - 0xDC00)))
+                    i += 4
+                    continue
+            i += 2
+            continue
+        if 0xDC00 <= c <= 0xDFFF:               # 고아 하위 서로게이트(컨트롤 데이터 잔재) → 버림. 남기면 UTF-8 저장이 실패한다
+            i += 2
+            continue
         out.append(chr(c))
         i += 2
     return "".join(out)
+
+
+_BAD_CHARS = re.compile("[\ud800-\udfff\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def sanitize_text(text: str) -> str:
+    """어떤 파서가 만든 텍스트든 UTF-8 로 저장 가능하게: 고아 서로게이트·제어문자 제거(\t \n 은 보존)."""
+    return _BAD_CHARS.sub("", text or "")
+
+
+def _short_name(name: str, limit: int = 60) -> str:
+    """zip 임시 파일명 단축(Windows 경로 260자 제한 대비): 줄기 60자 + 해시 8자, 확장자 보존."""
+    stem, ext = os.path.splitext(name)
+    if len(stem) <= limit:
+        return name
+    return f"{stem[:limit]}_{hashlib.md5(stem.encode('utf-8')).hexdigest()[:8]}{ext}"
 
 
 def extract_hwp(path: str) -> Tuple[str, str]:
@@ -390,7 +419,7 @@ def extract_zip(path: str) -> Tuple[str, str]:
             if pr is not None:
                 members.append((pr, info, name))
         for pr, info, name in sorted(members, key=lambda x: x[0])[:6]:
-            dest = os.path.join(tmp, safe_name(os.path.basename(name)))
+            dest = os.path.join(tmp, _short_name(safe_name(os.path.basename(name))))
             with z.open(info) as src, open(dest, "wb") as dst:
                 shutil.copyfileobj(src, dst)
             try:
@@ -461,13 +490,20 @@ def process_notice_attachments(row: Dict, files_dir: str, text_dir: str, attach_
         note["형식"] = os.path.splitext(path)[1].lower()
         try:
             text, parser = extract_any(path)
-            note.update({"추출성공": "Y", "추출글자수": len(text), "파서": parser})
-            tpath = os.path.join(text_dir, f"{bid_no}__{safe_name(os.path.basename(path))}.txt")
-            with open(tpath, "w", encoding="utf-8") as f:
-                f.write(text)
-            texts.append(f"===== [{os.path.basename(path)}] =====\n{text}")
-            done_stems.add(key)
+            text = sanitize_text(text)
         except Exception as e:  # noqa: BLE001
             note["오류"] = str(e)[:200]
+            notes.append(note)
+            continue
+        note.update({"추출성공": "Y", "추출글자수": len(text), "파서": parser})
+        texts.append(f"===== [{os.path.basename(path)}] =====\n{text}")     # 텍스트 보존이 먼저, 파일 저장은 부가 기능
+        done_stems.add(key)
+        try:
+            tpath = os.path.join(text_dir, f"{bid_no}__{_short_name(safe_name(os.path.basename(path)))}.txt")
+            with open(tpath, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError as e:
+            note["오류"] = f"텍스트 파일 저장 실패(텍스트는 유지): {str(e)[:150]}"
+            log.warning("텍스트 파일 저장 실패 %s: %s", bid_no, e)
         notes.append(note)
     return "\n\n".join(texts), notes
