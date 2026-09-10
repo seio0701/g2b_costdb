@@ -225,6 +225,39 @@ def test_discover_and_dedup(tmp):
     assert set(l4["공고번호"]) == {"A9"} and h4[h4["공고번호"] == "A1"]["대체공고번호"].iloc[0] == "A9"
 
 
+def test_institution_prefix():
+    """단지명 없는 시설명은 수요기관 지자체명을 접두하고, 재검색은 접두어를 뗀 패턴으로도 공고를 찾는다."""
+    from g2b_costdb.classify import is_generic_facility_name, prefix_institution, short_institution, strip_institution_prefix
+    assert short_institution("전남광주통합특별시 구례군") == "구례군" and short_institution("부산광역시 상수도사업본부 동래통합사업소") == "부산광역시"
+    assert short_institution("서울주택도시개발공사") == "서울주택도시개발공사" and short_institution("경상북도교육청 한국생명과학고등학교") == "경상북도교육청"
+    assert is_generic_facility_name("영구임대아파트", "영구임대") and is_generic_facility_name("공공주택지구", "공공주택") and is_generic_facility_name("종합운동장", "종합운동장")
+    assert not is_generic_facility_name("공덕동 행복주택", "행복주택") and not is_generic_facility_name("마음에온 일도1차 통합공공임대주택", "공공임대주택")
+    assert prefix_institution("영구임대아파트", "영구임대", "대구도시개발공사") == "대구도시개발공사 영구임대아파트"
+    assert prefix_institution("잠실야구장", "야구장", "서울특별시 체육시설관리사업소") == "잠실야구장"
+    assert strip_institution_prefix("구례군 국민임대아파트", "전남광주통합특별시 구례군") == "국민임대아파트"
+    cfg = load_config()
+    raw = pd.DataFrame([
+        dict(bidNtceNo="G1", bidNtceOrd="000", bidNtceNm="국민임대아파트 건립사업", ntceKindNm="일반공고", bidNtceDt="2024-01-05 10:00:00",
+             dminsttNm="전남광주통합특별시 구례군", presmptPrce="20000000000", mainCnsttyNm="건축공사"),
+        dict(bidNtceNo="G2", bidNtceOrd="000", bidNtceNm="국민임대아파트 건립 전기공사", ntceKindNm="일반공고", bidNtceDt="2024-01-06 10:00:00",
+             dminsttNm="전남광주통합특별시 구례군", presmptPrce="1500000000", mainCnsttyNm="전기공사"),
+        dict(bidNtceNo="G3", bidNtceOrd="000", bidNtceNm="국민임대아파트 도배장판 교체공사", ntceKindNm="일반공고", bidNtceDt="2024-02-06 10:00:00",
+             dminsttNm="광주광역시 도시공사", presmptPrce="300000000", mainCnsttyNm="건축공사"),
+        dict(bidNtceNo="G4", bidNtceOrd="000", bidNtceNm="공덕동 행복주택 건설공사", ntceKindNm="일반공고", bidNtceDt="2024-02-07 10:00:00",
+             dminsttNm="서울주택도시개발공사", presmptPrce="50000000000", mainCnsttyNm="건축공사"),
+    ])
+    std = discover.standardize(raw, cfg, None)
+    agg = discover.discover_candidates(std)
+    names = dict(zip(agg["수요기관"], agg["시설명_후보"]))
+    assert names["전남광주통합특별시 구례군"] == "구례군 국민임대아파트" and names["광주광역시 도시공사"] == "광주광역시 국민임대아파트", names
+    assert names["서울주택도시개발공사"] == "공덕동 행복주택", "단지명이 있으면 그대로"
+    rev = agg[agg["수요기관"] == "전남광주통합특별시 구례군"].copy()
+    rev["검수_시설명"], rev["검수_수요기관"] = rev["시설명_후보"], rev["수요기관"]
+    hits = discover.research_by_facility(std, rev)
+    assert set(hits["공고번호"]) == {"G1", "G2"}, ("접두어를 뗀 '국민임대아파트'로 구례군 공고만 재검색", set(hits["공고번호"]))
+    assert (hits["시설명"] == "구례군 국민임대아파트").all()
+
+
 def test_awards():
     """낙찰정보 병합: config 매핑이 없으면 후보 필드명 사용, 공고번호+차수 → 공고번호 폴백, 같은 공고의 여러 행은 최신 개찰일시 행."""
     from g2b_costdb.collect import award_column
@@ -417,6 +450,7 @@ def run():
         test_api_client(tmp)
         test_classify()
         test_discover_and_dedup(tmp)
+        test_institution_prefix()
         test_awards()
         test_extract_and_verify()
         test_handoff_and_batch(tmp)

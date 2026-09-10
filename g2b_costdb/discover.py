@@ -16,8 +16,9 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from .classify import (classify_notice_kind, classify_trade, classify_work_type, extract_facility_name,
-                       load_keywords, match_categories, normalize_facility_key, parse_amount, work_type_for)
+from .classify import (classify_notice_kind, classify_trade, classify_work_type, extract_facility_name, load_keywords,
+                       match_categories, normalize_facility_key, parse_amount, prefix_institution, strip_institution_prefix,
+                       work_type_for)
 
 log = logging.getLogger(__name__)
 
@@ -197,7 +198,7 @@ def discover_candidates(std: pd.DataFrame, previous_review: Optional[pd.DataFram
             continue
         base = std.iloc[i].to_dict()
         for major, minor, w in matches:
-            fac = extract_facility_name(name, w)
+            fac = prefix_institution(extract_facility_name(name, w), w, str(base.get("수요기관") or ""))   # 단지명 없으면 지자체명 접두
             rows.append({**base, "표2_대분류": major, "표2_중분류": minor, "검색어": w,
                          "시설명_후보": fac, "시설키": normalize_facility_key(fac),
                          "사업유형": work_type_for(name, w, fac)})   # 시설 자체가 주차장 등이면 부속어에서 제외
@@ -358,7 +359,10 @@ def research_by_facility(std: pd.DataFrame, reviewed: pd.DataFrame, max_hits_war
     inst_values = [v for v in inst_nospace.unique().tolist() if v]      # 수요기관 판정은 고유값(수천 개)에만 하고 isin 으로 확장
     for _, fac in reviewed.iterrows():
         names = [fac["검수_시설명"]] + [a.strip() for a in str(fac.get("검수_별칭(;구분)") or "").split(";") if a.strip()]
-        pats = [n.replace(" ", "") for n in names if n and not _blank(n)]
+        inst_src = str(fac.get("검수_수요기관") or fac.get("수요기관") or "")
+        # '구례군 국민임대아파트' 처럼 지자체명을 접두한 시설명은 공고명에 지자체명이 없으므로 접두어를 뗀 패턴도 함께 검색(수요기관 필터가 범위를 좁힌다)
+        names += [strip_institution_prefix(n, inst_src) for n in list(names) if n and not _blank(n)]
+        pats = list(dict.fromkeys(n.replace(" ", "") for n in names if n and not _blank(n)))
         if not pats:
             log.warning("시설 %s: 검수_시설명이 비어 있어 건너뜀", fac.get("시설ID"))
             continue

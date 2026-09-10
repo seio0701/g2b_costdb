@@ -168,6 +168,53 @@ def extract_facility_name(notice_name: str, keyword: str) -> str:
     return " ".join(parts).strip()
 
 
+# ── 단지명 없는 시설명 보완 ───────────────────────────────────────
+# 검색어와 일반어(아파트·주택·지구·단지…)만 남은 시설명('영구임대아파트', '공공주택지구')은 어느 시설인지 알 수 없으므로 수요기관의 지자체명을 앞에 붙인다
+_GENERIC_NAME_WORDS = ("아파트", "주택", "지구", "단지", "사업", "시설", "공사", "노후", "공공", "임대", "통합", "신축", "건립", "건설", "조성",
+                       "공영", "공설", "시립", "군립", "구립", "도립", "국립", "종합", "생활", "체육", "다목적", "제", "구", "신", "본", "동", "관내")
+_INST_ORG = re.compile(r"사업소|공사|공단|본부|청$|센터|재단|학교|대학|병원|조합|협회|위원회|연구|사업단")
+
+
+def is_generic_facility_name(facility: str, keyword: str) -> bool:
+    """시설명이 검색어 + 일반어뿐인지('영구임대아파트' + '영구임대' → True, '마음에온 일도1차 통합공공임대주택' → False)."""
+    s = (facility or "").replace(" ", "")
+    for w in sorted({keyword.replace(" ", "")} | set(keyword.split()), key=len, reverse=True):
+        if w:
+            s = s.replace(w, "")
+    for w in sorted(_GENERIC_NAME_WORDS, key=len, reverse=True):
+        s = s.replace(w, "")
+    return len(re.sub(r"[^가-힣A-Za-z]", "", s)) == 0
+
+
+def short_institution(inst: str) -> str:
+    """수요기관에서 시설명 앞에 붙일 짧은 이름: 가장 구체적인 시·군·구('전남광주통합특별시 구례군' → '구례군', '부산광역시 강서구' → '강서구').
+    시·군·구 어절이 없으면 첫 어절('서울주택도시개발공사', '경상북도교육청')."""
+    tokens = [t for t in re.split(r"\s+", (inst or "").strip()) if t]
+    if not tokens:
+        return ""
+    cands = [t for t in tokens if re.fullmatch(r".{1,12}(시|군|구)", t) and not _INST_ORG.search(t)]
+    return cands[-1] if cands else tokens[0]
+
+
+def prefix_institution(facility: str, keyword: str, inst: str) -> str:
+    """단지명 없는 시설명이면 지자체명을 앞에 붙인다. ('영구임대아파트', '영구임대', '대구도시개발공사') → '대구도시개발공사 영구임대아파트'"""
+    short = short_institution(inst)
+    if not short or not is_generic_facility_name(facility, keyword):
+        return facility
+    if (facility or "").replace(" ", "").startswith(short.replace(" ", "")):
+        return facility
+    return f"{short} {facility}".strip()
+
+
+def strip_institution_prefix(name: str, inst: str) -> str:
+    """검수_시설명 앞에 붙은 지자체명을 떼어 공고명 검색용 패턴을 만든다(공고명에는 지자체명이 없는 경우가 많음). 없으면 그대로."""
+    short = short_institution(inst).replace(" ", "")
+    n = (name or "").strip()
+    if short and n.replace(" ", "").startswith(short) and len(n.replace(" ", "")) > len(short) + 1:
+        return n.replace(" ", "")[len(short):]
+    return n
+
+
 # ── 분류 ────────────────────────────────────────────────────────
 WORK_TYPE_CODE = {"신축": "N", "증축": "E", "리모델링": "R", "증축·리모델링": "ER", "유지보수": "M", "미분류": "U"}
 
