@@ -163,6 +163,8 @@ def extract_facility_name(notice_name: str, keyword: str) -> str:
             else:
                 break
     parts = tokens[start:idx] + [head] + tail
+    while parts and parts[0] in ("및", "외", "내", "등", "-", "·"):      # '본교 및 서면 유리온실' → '서면 유리온실'
+        parts.pop(0)
     return " ".join(parts).strip()
 
 
