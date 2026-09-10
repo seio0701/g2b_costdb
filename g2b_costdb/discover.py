@@ -350,37 +350,68 @@ def read_reviewed(path: str) -> pd.DataFrame:
     return df
 
 
+def _gap_pattern(name: str) -> Optional[str]:
+    """어절 사이 간격을 허용하는 예비 검색 정규식. '송파 창의 공공주택' → '송파.{0,15}창의.{0,15}공공주택'
+    (시설명은 괄호·상태어를 지운 이름이라 '송파 창의혁신 공공주택 건설사업' 같은 원 공고명의 부분 문자열이 아닐 수 있다)."""
+    toks = [t.replace(" ", "") for t in re.split(r"\s+", str(name or "")) if len(re.sub(r"[^가-힣A-Za-z0-9]", "", t)) >= 2]
+    return ".{0,15}".join(re.escape(t) for t in toks) if len(toks) >= 2 else None
+
+
 def research_by_facility(std: pd.DataFrame, reviewed: pd.DataFrame, max_hits_warn: int = 300) -> pd.DataFrame:
     """검수된 시설명(+별칭)으로 전량 데이터를 재검색 → 모든 공종 공고 수집, 시설ID 부여.
-    검수_수요기관이 있으면 수요기관이 일치(공백 무시, 부분 포함)하는 공고만 채택."""
+    - 검수_수요기관이 있으면 수요기관이 일치(공백 무시, 부분 포함)하는 공고만 채택.
+    - 검수 행 여러 개가 같은 시설ID를 가지면 한 시설로 병합(시설명·별칭·수요기관을 합집합으로 검색) — 지자체와 도시공사로 나뉜 같은 시설을 합칠 때.
+    - 정확한 이름으로 결과가 없으면 어절 사이 간격을 허용한 예비 검색."""
     out = []
     std_nospace = std["공고명"].astype(str).str.replace(" ", "", regex=False)
     inst_nospace = std["수요기관"].astype(str).str.replace(" ", "", regex=False)
     inst_values = [v for v in inst_nospace.unique().tolist() if v]      # 수요기관 판정은 고유값(수천 개)에만 하고 isin 으로 확장
-    for _, fac in reviewed.iterrows():
-        names = [fac["검수_시설명"]] + [a.strip() for a in str(fac.get("검수_별칭(;구분)") or "").split(";") if a.strip()]
-        inst_src = str(fac.get("검수_수요기관") or fac.get("수요기관") or "")
-        # '구례군 국민임대아파트' 처럼 지자체명을 접두한 시설명은 공고명에 지자체명이 없으므로 접두어를 뗀 패턴도 함께 검색(수요기관 필터가 범위를 좁힌다)
-        names += [strip_institution_prefix(n, inst_src) for n in list(names) if n and not _blank(n)]
+    n_fac, n_loose = 0, 0
+    for fid, grp in reviewed.groupby(reviewed["시설ID"].astype(str).str.strip(), sort=False):
+        fac = grp.iloc[0]
+        names, insts = [], []
+        for _, r in grp.iterrows():
+            nm = [r["검수_시설명"]] + [a.strip() for a in str(r.get("검수_별칭(;구분)") or "").split(";") if a.strip()]
+            inst_src = str(r.get("검수_수요기관") or r.get("수요기관") or "")
+            # '구례군 국민임대아파트' 처럼 지자체명을 접두한 시설명은 공고명에 지자체명이 없으므로 접두어를 뗀 패턴도 함께 검색(수요기관 필터가 범위를 좁힌다)
+            names += [n for n in nm if n and not _blank(n)]
+            names += [strip_institution_prefix(n, inst_src) for n in nm if n and not _blank(n)]
+            inst = str(r.get("검수_수요기관") or "").replace(" ", "")
+            if inst:
+                insts.append(inst)
+        if len(grp) > 1:
+            log.info("시설 %s: 검수 행 %d개가 같은 시설ID → 한 시설로 병합(%s)", fid, len(grp), " / ".join(dict.fromkeys(str(x) for x in grp["검수_시설명"])))
         pats = list(dict.fromkeys(n.replace(" ", "") for n in names if n and not _blank(n)))
         if not pats:
-            log.warning("시설 %s: 검수_시설명이 비어 있어 건너뜀", fac.get("시설ID"))
+            log.warning("시설 %s: 검수_시설명이 비어 있어 건너뜀", fid)
             continue
-        if min(len(p) for p in pats) <= 2:
-            log.warning("시설 %s '%s': 검색어가 너무 짧아(2자 이하) 엉뚱한 공고가 대량 포함될 수 있음", fac.get("시설ID"), "/".join(pats))
+        if min(len(p) for p in pats) <= 2 and not insts:
+            log.warning("시설 %s '%s': 검색어가 너무 짧아(2자 이하) 엉뚱한 공고가 대량 포함될 수 있음", fid, "/".join(pats))
+        inst_mask = None
+        if insts:
+            inst_mask = inst_nospace.isin({v for v in inst_values if any(i in v or v in i for i in insts)})
         mask = pd.Series(False, index=std.index)
         for p in pats:
             mask |= std_nospace.str.contains(re.escape(p), na=False)
-        inst = str(fac.get("검수_수요기관") or "").replace(" ", "")
-        if inst:
-            mask &= inst_nospace.isin({v for v in inst_values if inst in v or v in inst})
+        if inst_mask is not None:
+            mask &= inst_mask
+        if not mask.any():
+            loose = [g for g in (_gap_pattern(n) for n in names) if g]
+            if loose:
+                for g in dict.fromkeys(loose):
+                    mask |= std_nospace.str.contains(g, na=False, regex=True)
+                if inst_mask is not None:
+                    mask &= inst_mask
+                if mask.any():
+                    n_loose += 1
+                    log.info("시설 %s '%s': 정확한 이름으로는 없음 → 어절 간격을 허용한 예비 검색으로 %d건", fid, fac["검수_시설명"], int(mask.sum()))
         hit = std[mask].copy()
         if hit.empty:
-            log.info("시설 %s '%s': 재검색 결과 없음", fac.get("시설ID"), fac["검수_시설명"])
+            log.info("시설 %s '%s': 재검색 결과 없음", fid, fac["검수_시설명"])
             continue
         if len(hit) > max_hits_warn:
-            log.warning("시설 %s '%s': %d건 매칭 — 검수_시설명이 너무 일반적인지 확인", fac.get("시설ID"), fac["검수_시설명"], len(hit))
-        hit["시설ID"] = fac["시설ID"]
+            log.warning("시설 %s '%s': %d건 매칭 — 검수_시설명이 너무 일반적인지 확인", fid, fac["검수_시설명"], len(hit))
+        hit["시설ID"] = fid
         hit["시설명"] = fac["검수_시설명"]
         hit["사업유형"] = [work_type_for(n, str(fac.get("검색어") or ""), fac["검수_시설명"]) for n in hit["공고명"]]
         hit["표2_대분류"] = fac["표2_대분류"]
@@ -388,10 +419,12 @@ def research_by_facility(std: pd.DataFrame, reviewed: pd.DataFrame, max_hits_war
         hit["검색어"] = fac["검색어"]
         hit["수요기관_대표"] = fac.get("검수_수요기관") or fac.get("수요기관", "")
         out.append(hit)
+        n_fac += 1
     df = pd.concat(out, ignore_index=True) if out else pd.DataFrame()
     if not df.empty:
         # 유지보수 성격 공고는 시설 재검색에서도 제외 (신축·증축·리모델링 프로젝트 공사비만)
         df = df[~df["사업유형"].isin(["유지보수"])].copy()
         df = df.drop_duplicates(["시설ID", "공고키"])
-    log.info("시설 재검색: %d개 시설 → %d건 공고", reviewed["시설ID"].nunique() if not reviewed.empty else 0, len(df))
+    log.info("시설 재검색: %d개 시설 → %d건 공고 (예비 검색으로 찾은 시설 %d개)",
+             reviewed["시설ID"].nunique() if not reviewed.empty else 0, len(df), n_loose)
     return df

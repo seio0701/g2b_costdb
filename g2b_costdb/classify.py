@@ -44,7 +44,7 @@ _TRADE_WORDS = re.compile(
     r"토목\s*공사|건립\s*공사|신축\s*공사|증축\s*공사|건설\s*공사|조성\s*공사|공사|건립|신축|증축|건설|조성|사업|용역)"
 )
 # '2019년도', '23년~24년', '25~26년', '26,27년' 같은 연도 접두어(뒤에 글자가 붙는 '2024목동주경기장' 은 건드리지 않음)
-_YEAR = re.compile(r"(?<![\d가-힣])(?:20)?\d{2}(?:\s*년도?)?(?:\s*[~∼\-,]\s*(?:20)?\d{2})*\s*년도?(?![\d가-힣])")
+_YEAR = re.compile(r"(?<![\d가-힣])[′'‘]?(?:20)?\d{2}(?:\s*년도?)?(?:\s*[~∼\-,]\s*[′'‘]?(?:20)?\d{2})*\s*년도?(?![\d가-힣])")
 _SPACES = re.compile(r"\s+")
 
 
@@ -133,6 +133,7 @@ def extract_facility_name(notice_name: str, keyword: str) -> str:
         inner = [c for c in bracket_contents(notice_name or "")
                  if kw_head in c or keyword.replace(" ", "") in c.replace(" ", "")]
         outer = _SPACES.sub(" ", _TRADE_WORDS.sub(" ", s)).strip(" -–—·,.")
+        outer = " ".join(_tidy_parts(outer.split(" ")))
         outer_core = re.sub(r"[^가-힣A-Za-z0-9]", "", outer)
         if inner and (len(re.sub(r"[^가-힣A-Za-z]", "", outer)) < 2 or _GENERIC_OUTER.fullmatch(outer_core)):
             return extract_facility_name(inner[0], keyword)
@@ -162,10 +163,17 @@ def extract_facility_name(notice_name: str, keyword: str) -> str:
                 tail.append(part)
             else:
                 break
-    parts = tokens[start:idx] + [head] + tail
-    while parts and parts[0] in ("및", "외", "내", "등", "-", "·"):      # '본교 및 서면 유리온실' → '서면 유리온실'
+    return " ".join(_tidy_parts(tokens[start:idx] + [head] + tail)).strip()
+
+
+def _tidy_parts(parts: List[str]) -> List[str]:
+    """시설명 어절 정리: 기호·숫자뿐인 어절('′23∼′') 제거, 앞의 '및/외/내/등' 제거, 끝에 남은 접두어 조각('월배공원 재') 제거."""
+    parts = [t for t in parts if t and re.search(r"[가-힣A-Za-z]", t)]
+    while parts and parts[0] in ("및", "외", "내", "등", "-", "·"):
         parts.pop(0)
-    return " ".join(parts).strip()
+    while len(parts) > 1 and parts[-1] in ("재", "구", "신", "본", "제", "舊"):   # '집'·'관' 같은 진짜 이름 어절은 남긴다
+        parts.pop()
+    return parts
 
 
 # ── 단지명 없는 시설명 보완 ───────────────────────────────────────

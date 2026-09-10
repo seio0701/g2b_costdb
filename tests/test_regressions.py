@@ -260,6 +260,41 @@ def test_institution_prefix():
     assert (hits["시설명"] == "구례군 국민임대아파트").all()
 
 
+def test_research_fallback_and_merge():
+    """정확한 이름으로 못 찾으면 어절 간격을 허용해 찾고, 같은 시설ID의 검수 행은 한 시설로 병합한다."""
+    from g2b_costdb.classify import extract_facility_name, clean_notice_name
+    cfg = load_config()
+    raw = pd.DataFrame([
+        dict(bidNtceNo="S1", bidNtceOrd="000", bidNtceNm="송파 창의혁신 공공주택 건설사업 [1,2단지]", ntceKindNm="일반공고", bidNtceDt="2024-01-05 10:00:00",
+             dminsttNm="서울주택도시개발공사", presmptPrce="900000000000", mainCnsttyNm="건축공사"),
+        dict(bidNtceNo="S2", bidNtceOrd="000", bidNtceNm="송파 창의혁신 공공주택 건설 전기공사", ntceKindNm="일반공고", bidNtceDt="2024-01-06 10:00:00",
+             dminsttNm="서울주택도시개발공사", presmptPrce="20000000000", mainCnsttyNm="전기공사"),
+        dict(bidNtceNo="S3", bidNtceOrd="000", bidNtceNm="마곡 창의 공공주택 건설공사", ntceKindNm="일반공고", bidNtceDt="2024-01-06 10:00:00",
+             dminsttNm="서울주택도시개발공사", presmptPrce="1000000000", mainCnsttyNm="건축공사"),
+        dict(bidNtceNo="H1", bidNtceOrd="000", bidNtceNm="화성 함백산추모공원 건립공사", ntceKindNm="일반공고", bidNtceDt="2024-02-05 10:00:00",
+             dminsttNm="화성도시공사", presmptPrce="80000000000", mainCnsttyNm="건축공사"),
+        dict(bidNtceNo="H2", bidNtceOrd="000", bidNtceNm="화성 함백산추모공원 장례식장 증축공사", ntceKindNm="일반공고", bidNtceDt="2025-02-05 10:00:00",
+             dminsttNm="경기도 화성시", presmptPrce="5000000000", mainCnsttyNm="건축공사"),
+        dict(bidNtceNo="H3", bidNtceOrd="000", bidNtceNm="함백산추모공원 봉안당 건립공사", ntceKindNm="일반공고", bidNtceDt="2025-03-05 10:00:00",
+             dminsttNm="강원도 정선군", presmptPrce="3000000000", mainCnsttyNm="건축공사"),
+    ])
+    std = discover.standardize(raw, cfg, None)
+    fac = extract_facility_name("송파 창의혁신 공공주택 건설사업 [1,2단지]", "공공주택")
+    assert fac == "송파 창의 공공주택", fac                       # '혁신'은 상태어로 지워져 원 공고명의 부분 문자열이 아님
+    assert clean_notice_name("′23∼′24년 영덕군 스마트팜 온실 신축") == "영덕군 스마트팜 온실 신축"
+    assert extract_facility_name("월배공원 재조성사업(야구장 등) 공사", "야구장") == "월배공원"
+    rev = pd.DataFrame([
+        dict(시설ID="F0001", 검수_시설명=fac, **{"검수_별칭(;구분)": ""}, 검수_수요기관="서울주택도시개발공사", 표2_대분류="공동주택", 표2_중분류="공동주택", 검색어="공공주택"),
+        dict(시설ID="F0002", 검수_시설명="화성 함백산추모공원", **{"검수_별칭(;구분)": ""}, 검수_수요기관="화성도시공사", 표2_대분류="묘지관련시설", 표2_중분류="-", 검색어="추모공원"),
+        dict(시설ID="F0002", 검수_시설명="화성 함백산추모공원", **{"검수_별칭(;구분)": "함백산추모공원"}, 검수_수요기관="경기도 화성시", 표2_대분류="묘지관련시설", 표2_중분류="-", 검색어="추모공원"),
+    ])
+    hits = discover.research_by_facility(std, rev)
+    by = hits.groupby("시설ID")["공고번호"].apply(set).to_dict()
+    assert by["F0001"] == {"S1", "S2"}, ("예비 검색(어절 간격 허용)으로 찾고 '마곡 창의'는 제외", by)
+    assert by["F0002"] == {"H1", "H2"}, ("같은 시설ID 두 행 → 수요기관 합집합으로 병합, 정선군 공고는 제외", by)
+    assert (hits[hits["시설ID"] == "F0002"]["시설명"] == "화성 함백산추모공원").all()
+
+
 def test_awards():
     """낙찰정보 병합: config 매핑이 없으면 후보 필드명 사용, 공고번호+차수 → 공고번호 폴백, 같은 공고의 여러 행은 최신 개찰일시 행."""
     from g2b_costdb.collect import award_column
@@ -453,6 +488,7 @@ def run():
         test_classify()
         test_discover_and_dedup(tmp)
         test_institution_prefix()
+        test_research_fallback_and_merge()
         test_awards()
         test_extract_and_verify()
         test_handoff_and_batch(tmp)
