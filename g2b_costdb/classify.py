@@ -189,7 +189,7 @@ def is_generic_facility_name(facility: str, keyword: str) -> bool:
 def short_institution(inst: str) -> str:
     """수요기관에서 시설명 앞에 붙일 짧은 이름: 가장 구체적인 시·군·구('전남광주통합특별시 구례군' → '구례군', '부산광역시 강서구' → '강서구').
     시·군·구 어절이 없으면 첫 어절('서울주택도시개발공사', '경상북도교육청')."""
-    tokens = [t for t in re.split(r"\s+", (inst or "").strip()) if t]
+    tokens = [t for t in re.split(r"\s+", re.sub(r"[\(（](주|재|사|학|의|특)[\)）]", "", inst or "").strip()) if t]   # '(주)강원랜드' → '강원랜드'
     if not tokens:
         return ""
     cands = [t for t in tokens if re.fullmatch(r".{1,12}(시|군|구)", t) and not _INST_ORG.search(t)]

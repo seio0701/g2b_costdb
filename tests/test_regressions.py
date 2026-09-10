@@ -231,6 +231,7 @@ def test_institution_prefix():
     from g2b_costdb.classify import is_generic_facility_name, prefix_institution, short_institution, strip_institution_prefix
     assert short_institution("전남광주통합특별시 구례군") == "구례군" and short_institution("부산광역시 상수도사업본부 동래통합사업소") == "부산광역시"
     assert short_institution("서울주택도시개발공사") == "서울주택도시개발공사" and short_institution("경상북도교육청 한국생명과학고등학교") == "경상북도교육청"
+    assert short_institution("(주)강원랜드") == "강원랜드" and short_institution("(재)경기문화재단") == "경기문화재단"
     assert is_generic_facility_name("영구임대아파트", "영구임대") and is_generic_facility_name("공공주택지구", "공공주택") and is_generic_facility_name("종합운동장", "종합운동장")
     assert not is_generic_facility_name("공덕동 행복주택", "행복주택") and not is_generic_facility_name("마음에온 일도1차 통합공공임대주택", "공공임대주택")
     assert prefix_institution("영구임대아파트", "영구임대", "대구도시개발공사") == "대구도시개발공사 영구임대아파트"
