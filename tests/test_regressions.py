@@ -191,10 +191,11 @@ def test_discover_and_dedup(tmp):
     agg2.loc[agg2["수요기관"] == "가상군", "검수_시설명"] = None
     discover.write_review_workbook(agg2, path)
     reviewed = discover.read_reviewed(path)
-    assert set(reviewed["검수_시설명"]) == {"가상군 문화예술회관", "다른군 문화예술회관", "문화예술회관"}
+    assert set(reviewed["검수_시설명"]) == {"가상군 문화예술회관", "다른군 문화예술회관", "셋째군 문화예술회관"}, \
+        ("지자체명 없는 '문화예술회관' 은 수요기관을 접두", set(reviewed["검수_시설명"]))
     hits = discover.research_by_facility(std, reviewed)
     # '문화예술회관'(셋째군)은 이름만으로는 전국 매칭이지만 수요기관 필터로 셋째군 공고만
-    third = hits[hits["시설명"] == "문화예술회관"]
+    third = hits[hits["시설명"] == "셋째군 문화예술회관"]
     assert set(third["공고번호"]) == {"C1", "C2", "C3"}
     assert set(hits[hits["시설명"] == "가상군 문화예술회관"]["공고번호"]) == {"A1", "A2", "A3"}
     hist, latest, logs = dedup.dedup_latest(hits, 0.30, 0.30)
@@ -204,7 +205,7 @@ def test_discover_and_dedup(tmp):
     assert rep[f"{fid['가상군 문화예술회관']}-N|건축|"] == "A1", rep
     assert any(l["항목"] == "소액 공고 분리" for l in logs)
     # 단계 토큰: 괄호 안 (1단계)/(2단계)는 별도 프로젝트키, '2차 재공고'는 회차이므로 토큰 없음 → C2 를 C3 가 대체(날짜 없는 C3 는 가장 오래된 것으로 취급되어 C2 유지)
-    f3 = fid["문화예술회관"]
+    f3 = fid["셋째군 문화예술회관"]
     assert rep[f"{f3}-N|건축|1단계"] == "C1" and rep[f"{f3}-N|건축|2단계"] == "C2"
     assert rep[f"{f3}-N|건축|"] == "C3" and hist[hist["공고번호"] == "C3"]["최신여부"].iloc[0]
     # 동일 공고번호가 두 시설에 걸려도 한쪽이 '구차수'로 탈락하지 않음
