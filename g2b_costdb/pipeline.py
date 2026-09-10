@@ -272,10 +272,21 @@ def stage_dedup(cfg):
                                             float(cfg["dedup"].get("minor_notice_ratio", 0.30)))
     hist.to_parquet(_p(cfg, "notices_hist.parquet"), index=False)
     latest.to_parquet(_p(cfg, "notices_latest.parquet"), index=False)
-    _logs_frame(logs).to_parquet(_p(cfg, "logs_dedup.parquet"), index=False)
-    print(f"전체 {len(hist)}건 → 대표 {len(latest)}건 (프로젝트 {latest['프로젝트ID'].nunique() if len(latest) else 0}개, 경고 {len(logs)}건)")
+    # 같은 공고가 여러 시설의 대표로 잡힌 경우(복합 발주: '충남미술관 및 공영주차장 건립공사' 등) → 05 시트에서 시설마다 집계되므로 검수자가 판단
+    multi = []
+    if len(latest) and "시설ID" in latest.columns:
+        g = latest.groupby("공고키")["시설ID"].agg(lambda x: sorted(set(map(str, x))))
+        for key, ids in g[g.map(len) > 1].items():
+            r = latest[latest["공고키"] == key].iloc[0]
+            multi.append({"공고번호": str(r["공고번호"]), "프로젝트키": "/".join(ids), "항목": "복수 시설 배정",
+                          "비고": f"'{r['공고명']}' 이 시설 {len(ids)}개({', '.join(ids)})의 대표 공고 — 05 시트에 시설마다 집계됨. 한 시설만 남기려면 검수에서 다른 시설을 제외"})
+    _logs_frame(logs + multi).to_parquet(_p(cfg, "logs_dedup.parquet"), index=False)
+    print(f"전체 {len(hist)}건 → 대표 {len(latest)}건 (고유 공고 {latest['공고키'].nunique() if len(latest) else 0}건, "
+          f"프로젝트 {latest['프로젝트ID'].nunique() if len(latest) else 0}개, 경고 {len(logs)}건, 복수 시설 배정 {len(multi)}건)")
     for l in logs[:20]:
         print(f"  - {l.get('항목')}: {l.get('비고')}")
+    if multi:
+        print(f"  - 복수 시설 배정 {len(multi)}건 (06_검증로그 '복수 시설 배정' 항목, 예: {multi[0]['비고'][:80]}…)")
 
 
 def stage_attach(cfg, retry_failed: bool = False, report_only: bool = False):
@@ -329,11 +340,13 @@ def stage_attach(cfg, retry_failed: bool = False, report_only: bool = False):
 def _attach_report(cfg, latest, texts, notes_df):
     """첨부 처리 요약 + 텍스트를 못 얻은 공고의 원인 분해(첨부 없음 / 다운로드 실패 / 미지원 형식만 / 추출 실패) → data/notes_notext.parquet"""
     have = set(latest["공고키"])
-    print(f"첨부 처리: 공고 {len(latest)}건, 파일 {len(notes_df)}개, 텍스트 확보 {len([k for k in texts if k in have])}/{len(latest)}건")
+    n_rows, n_uniq = len(latest), len(have)
+    dup_note = f" (대표 공고 행 {n_rows}개 중 같은 공고가 여러 시설에 배정된 것 {n_rows - n_uniq}개)" if n_rows != n_uniq else ""
+    print(f"첨부 처리: 고유 공고 {n_uniq}건{dup_note}, 파일 {len(notes_df)}개, 텍스트 확보 {len([k for k in texts if k in have])}/{n_uniq}건")
     if not notes_df.empty and "형식" in notes_df.columns:
         s = notes_df.groupby(notes_df["형식"].fillna("(다운로드 실패)")).agg(파일수=("파일명", "size"), 추출성공=("추출성공", lambda x: int((x == "Y").sum())))
         print("형식별 추출 결과:\n" + s.to_string())
-    missing = latest[~latest["공고키"].isin(set(texts))].copy()
+    missing = latest[~latest["공고키"].isin(set(texts))].drop_duplicates("공고키").copy()
     if missing.empty:
         return
     by_no = {}
@@ -353,6 +366,10 @@ def _attach_report(cfg, latest, texts, notes_df):
         forms = set(g.loc[g["다운로드"] == "Y", "형식"].fillna("").astype(str).str.lower())
         if forms and forms <= unsupported:
             return "미지원 형식만(" + "/".join(sorted(forms)) + ")"
+        ok = g[g["추출성공"] == "Y"]
+        if not ok.empty:
+            chars = int(pd.to_numeric(ok.get("추출글자수"), errors="coerce").fillna(0).sum())
+            return "추출 성공 기록은 있으나 텍스트 없음" + ("(글자수 0 — 표지·이미지뿐)" if chars == 0 else f"(글자수 {chars} — 재처리 필요)")
         if forms == {".pdf"}:
             return "PDF 추출 실패(스캔)"
         return "추출 실패(" + "/".join(sorted(forms)[:3]) + ")"
@@ -360,6 +377,11 @@ def _attach_report(cfg, latest, texts, notes_df):
     missing["_amt"] = pd.to_numeric(missing["추정가격"], errors="coerce").fillna(0)
     cnt = missing["텍스트없음_원인"].value_counts()
     print(f"텍스트 없는 공고 {len(missing)}건의 원인:\n" + cnt.to_string())
+    if not notes_df.empty and "오류" in notes_df.columns:
+        fail = notes_df[notes_df["공고번호"].astype(str).isin(set(missing["공고번호"].astype(str))) & (notes_df["추출성공"] != "Y")]
+        errs = fail["오류"].fillna("").astype(str).str.slice(0, 60).replace("", "(오류 메시지 없음)").value_counts().head(8)
+        if len(errs):
+            print("실패 파일의 오류 메시지 상위:\n" + errs.to_string())
     top = missing.sort_values("_amt", ascending=False).head(10)
     print("그중 추정가격 상위 10건:\n" + top[["공고번호", "공고명", "공종", "추정가격", "텍스트없음_원인"]].to_string(index=False))
     out = missing.drop(columns=["_amt"])[[c for c in ("공고키", "공고번호", "공고명", "시설명", "공종", "추정가격", "첨부파일수", "상세URL", "텍스트없음_원인") if c in missing.columns]]
@@ -379,7 +401,8 @@ def _extract_context(cfg, limit: Optional[int] = None):
     if os.path.exists(cache_path):
         with open(cache_path, encoding="utf-8") as f:
             docs = json.load(f)
-    todo = [k for k in latest["공고키"] if k in texts and not (k in docs and "_error" not in docs[k])]
+    # 같은 공고가 여러 시설의 대표로 잡혀 latest 에 두 번 나올 수 있다 → 공고키 기준으로 한 번만 추출(비용 중복 방지)
+    todo = list(dict.fromkeys(k for k in latest["공고키"] if k in texts and not (k in docs and "_error" not in docs[k])))
     if limit:
         # 시범 추출용: 건축 공종을 먼저, 그 안에서 추정가격이 큰 순(연면적·규모가 있는 본공사 공고문이 앞에 오도록)
         order = latest.assign(_amt=pd.to_numeric(latest["추정가격"], errors="coerce").fillna(0),

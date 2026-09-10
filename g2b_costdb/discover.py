@@ -354,7 +354,11 @@ def _gap_pattern(name: str) -> Optional[str]:
     """어절 사이 간격을 허용하는 예비 검색 정규식. '송파 창의 공공주택' → '송파.{0,15}창의.{0,15}공공주택'
     (시설명은 괄호·상태어를 지운 이름이라 '송파 창의혁신 공공주택 건설사업' 같은 원 공고명의 부분 문자열이 아닐 수 있다)."""
     toks = [t.replace(" ", "") for t in re.split(r"\s+", str(name or "")) if len(re.sub(r"[^가-힣A-Za-z0-9]", "", t)) >= 2]
-    return ".{0,15}".join(re.escape(t) for t in toks) if len(toks) >= 2 else None
+    if len(toks) >= 2:
+        return ".{0,15}".join(re.escape(t) for t in toks)
+    if len(toks) == 1 and len(toks[0]) >= 4:          # '구 종합운동장공원' → 한 글자 어절을 뺀 '종합운동장공원' 만으로
+        return re.escape(toks[0])
+    return None
 
 
 def research_by_facility(std: pd.DataFrame, reviewed: pd.DataFrame, max_hits_warn: int = 300) -> pd.DataFrame:

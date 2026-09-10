@@ -218,8 +218,9 @@ def strip_institution_prefix(name: str, inst: str) -> str:
     """검수_시설명 앞에 붙은 지자체명을 떼어 공고명 검색용 패턴을 만든다(공고명에는 지자체명이 없는 경우가 많음). 없으면 그대로."""
     short = short_institution(inst).replace(" ", "")
     n = (name or "").strip()
-    if short and n.replace(" ", "").startswith(short) and len(n.replace(" ", "")) > len(short) + 1:
-        return n.replace(" ", "")[len(short):]
+    core = re.sub(r"[\(（](주|재|사|학|의|특)[\)）]", "", n).replace(" ", "")      # '(주)강원랜드 유리온실' 도 '강원랜드' 접두로 인식
+    if short and core.startswith(short) and len(core) > len(short) + 1:
+        return core[len(short):]
     return n
 
 
