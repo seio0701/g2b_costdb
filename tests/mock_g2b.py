@@ -67,8 +67,8 @@ def build_dataset(base: str) -> Dict:
         # 같은 공고의 변경 차수(001)
         dict(common, bidNtceNo="R24010001", bidNtceOrd="001", bidNtceNm="가상군 문화예술회관 건립공사 [변경]", ntceKindNm="변경공고", reNtceYn="N",
              bidNtceDt="2024-01-17 10:00:00", ntceInsttNm="가상군", dminsttNm="가상군", presmptPrce="30000000000", mainCnsttyNm="건축공사",
-             cnstrtsiteRgnNm="전라남도 가상군", ntceSpecDocUrl1=f("입찰공고문.hwpx"), ntceSpecFileNm1="입찰공고문.hwpx",
-             sptDscrptDocUrl1=f("현장설명서.docx"), dminsttCd="4790000", bdgtAmt="35100000000", VAT="3000000000",
+             cnstrtsiteRgnNm="전라남도 가상군", ntceSpecDocUrl1=f("변경공고문.hwpx"), ntceSpecFileNm1="변경공고문.hwpx",   # 변경 차수에는 짧은 변경공고문만(원 공고문·현장설명서는 000 차수)
+             dminsttCd="4790000", bdgtAmt="35100000000", VAT="3000000000",
              govsplyAmt="2100000000", govcnstrtnGovsplyMtrlAmt="2100000000", subsiCnsttyNm1="토목공사업", chgNtceRsn="공고 기간 정정"),
         # 전기 — 차수가 정수 0, 추정가격이 숫자형(타입 혼재), 첨부는 cp949 txt
         dict(common, bidNtceNo="R24010002", bidNtceOrd=0, bidNtceNm="가상군 문화예술회관 건립 전기공사", ntceKindNm="일반공고", reNtceYn="N",
@@ -140,6 +140,7 @@ def build_dataset(base: str) -> Dict:
                                 "공사기간: 착공일로부터 1,080일", "2. 공사금액"],
                                [["구분", "금액"], ["추정가격", "30,000,000,000원"], ["기초금액(부가세 포함)", "33,000,000,000원"],
                                 ["관급자관급액", "2,100,000,000원"], ["총공사금액", "35,100,000,000원"]]), "application/octet-stream"),
+        "변경공고문.hwpx": (_hwpx(["변경 공고 (가상군 문화예술회관 건립공사)", "공고 기간을 2024-01-31 까지로 정정합니다."]), "application/octet-stream"),
         "현장설명서.docx": (_docx(["현장설명서 — 가상군 문화예술회관 건립공사", "연면적 15,200㎡, 건축면적 6,300㎡", "용도: 공연장(문화 및 집회시설)"]),
                         "application/octet-stream"),
         "공고문_전기.txt": ("입찰공고문(전기)\n가상군 문화예술회관 건립 전기공사\n추정가격 2,600,000,000원\n기초금액 2,860,000,000원\n공사기간 900일\n".encode("cp949"),

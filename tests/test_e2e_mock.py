@@ -129,7 +129,9 @@ def run():
         out = _run(["attach", "--config", cfg_path])
         texts = json.load(open(data("texts.json"), encoding="utf-8"))
         notes = pd.read_parquet(data("notes_attach.parquet"))
-        assert "연면적 15,200㎡" in texts["R24010001-001"] and "관급자관급액" in texts["R24010001-001"] and "건축면적 6,300㎡" in texts["R24010001-001"], "현장설명서(sptDscrptDocUrl) 포함"
+        assert "연면적 15,200㎡" in texts["R24010001-001"] and "관급자관급액" in texts["R24010001-001"] and "건축면적 6,300㎡" in texts["R24010001-001"], \
+            "대표(변경 차수 001)에는 변경공고문만 있어도 000 차수의 입찰공고문·현장설명서를 합쳐 처리"
+        assert "정정합니다" in texts["R24010001-001"] and "다른 차수의 첨부를 합쳐 처리한 공고 1건" in out, out
         assert "추정가격 2,600,000,000원" in texts["R24010002-000"], "cp949 텍스트 복원"
         html_note = notes[notes["URL"].str.endswith("login.html")].iloc[0]
         assert html_note["다운로드"] == "N", html_note.to_dict()
@@ -165,6 +167,8 @@ def run():
             json.dump({k: v for k, v in fake.items() if not k.startswith("_")}, f, ensure_ascii=False)
         out = _run(["extract", "--import", "--config", cfg_path])
         assert "JSON 1건 반영" in out and "미추출 0건" in out, out
+        assert os.path.exists(data("llm_done", "R24010002-000.json")) and os.path.exists(data("llm_done", "R24010002-000.txt")) \
+            and not os.path.exists(data("llm_out", "R24010002-000.json")), "반영한 파일은 llm_done 으로 이동"
         docs = json.load(open(data("llm_docs.json"), encoding="utf-8"))
         assert docs["R24010002-000"]["추정가격_원"] == 2600000000 and docs["R24010002-000"]["_model"] == "manual/cowork"
         # 배치: 제출 전 견적(50%)만 출력하고 제출하지 않음

@@ -295,6 +295,19 @@ def test_research_fallback_and_merge():
     assert (hits[hits["시설ID"] == "F0002"]["시설명"] == "화성 함백산추모공원").all()
 
 
+def test_attach_merge_and_redo():
+    from g2b_costdb.pipeline import _merge_attachment_slots, _redo_keys
+    rep = {"공고번호": "X1", "공고키": "X1-002", "첨부URL1": "http://x/정정.hwp", "첨부파일명1": "정정공고서.hwp", "첨부URL2": "", "첨부파일명2": "", "현장설명서URL1": ""}
+    o1 = {"공고번호": "X1", "공고키": "X1-001", "첨부URL1": "http://x/정정.hwp", "첨부파일명1": "정정공고서.hwp", "첨부URL2": "http://x/공고문.hwp", "첨부파일명2": "입찰공고문.hwp", "현장설명서URL1": "http://x/spt1"}
+    o0 = {"공고번호": "X1", "공고키": "X1-000", "첨부URL1": "http://x/공고문.hwp", "첨부파일명1": "입찰공고문.hwp", "첨부URL2": "http://x/도면.zip", "첨부파일명2": "도면.zip", "현장설명서URL1": "http://x/spt1"}
+    m, n = _merge_attachment_slots(rep, [o1, o0], attach_max=2)
+    urls = [m[f"첨부URL{i}"] for i in range(1, n + 1) if m[f"첨부URL{i}"]]
+    assert urls == ["http://x/정정.hwp", "http://x/공고문.hwp", "http://x/도면.zip"] and m["현장설명서URL1"] == "http://x/spt1" and n >= 3, (urls, n)
+    latest = pd.DataFrame({"공고키": ["A-000", "B-000", "C-000", "D-000"], "공종": ["건축", "건축", "전기", "건축"]})
+    docs = {"A-000": {"신뢰도": "high", "연면적_m2": 1000}, "B-000": {"신뢰도": "high"}, "C-000": {"신뢰도": "high"}, "D-000": {"신뢰도": "low", "연면적_m2": 500}, "E-000": {"_error": "x"}}
+    assert _redo_keys(latest, docs) == ["B-000", "D-000"], "건축인데 연면적 없음(B), 신뢰도 low(D). 전기(C)는 연면적 없어도 제외"
+
+
 def test_awards():
     """낙찰정보 병합: config 매핑이 없으면 후보 필드명 사용, 공고번호+차수 → 공고번호 폴백, 같은 공고의 여러 행은 최신 개찰일시 행."""
     from g2b_costdb.collect import award_column
@@ -511,6 +524,7 @@ def run():
         test_discover_and_dedup(tmp)
         test_institution_prefix()
         test_research_fallback_and_merge()
+        test_attach_merge_and_redo()
         test_awards()
         test_extract_and_verify()
         test_handoff_and_batch(tmp)

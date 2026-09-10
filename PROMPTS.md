@@ -74,6 +74,7 @@ HANDOFF.md를 읽고 이어서 해줘.
 HANDOFF.md를 읽고 이어서 해줘. python -m g2b_costdb.pipeline extract --export --limit 40 을 실행해 data/llm_in 에 작업지시 파일을 만들어줘(시범 40건. 전체는 --limit 없이).
 그다음 data/llm_in/README_지시문.md 의 규칙대로 llm_in 의 txt 를 20개씩 읽어 llm_out 에 같은 이름의 .json 으로 저장해줘.
 전부 끝나면 python -m g2b_costdb.pipeline extract --import 를 실행해 반영하고, 문제 파일 목록과 미추출 건수를 알려줘. HANDOFF.md 갱신.
+(반영된 txt·json 은 data/llm_done 으로 옮겨지므로 llm_in·llm_out 에는 남은 일만 보인다. 연면적이 빠진 건을 다시 하려면 extract --export --redo-low)
 ```
 
 ## 세션 7 — Excel DB 생성·점검

@@ -289,6 +289,28 @@ def stage_dedup(cfg):
         print(f"  - 복수 시설 배정 {len(multi)}건 (06_검증로그 '복수 시설 배정' 항목, 예: {multi[0]['비고'][:80]}…)")
 
 
+def _merge_attachment_slots(rep: dict, others: list, attach_max: int, spt_max: int = 5):
+    """대표 공고(최신 차수)의 첨부에 같은 공고번호의 다른 차수 첨부를 URL 기준으로 이어 붙인다.
+    정정·변경공고 차수에는 '정정공고서' 한 장만 붙어 있고 원 공고문·현장설명서는 첫 차수에 있는 경우가 많다."""
+    row = dict(rep)
+    seen, slots, spts = set(), [], []
+    for r in [rep] + list(others):
+        for i in range(1, attach_max + 1):
+            u, nm = str(r.get(f"첨부URL{i}") or "").strip(), str(r.get(f"첨부파일명{i}") or "").strip()
+            if len(u) >= 5 and u.lower() not in ("nan", "none") and u not in seen:
+                seen.add(u); slots.append((u, nm))
+        for i in range(1, spt_max + 1):
+            u = str(r.get(f"현장설명서URL{i}") or "").strip()
+            if len(u) >= 5 and u.lower() not in ("nan", "none") and u not in seen:
+                seen.add(u); spts.append(u)
+    n = max(attach_max, len(slots))
+    for i in range(1, n + 1):
+        row[f"첨부URL{i}"], row[f"첨부파일명{i}"] = (slots[i - 1] if i <= len(slots) else ("", ""))
+    for i in range(1, spt_max + 1):
+        row[f"현장설명서URL{i}"] = spts[i - 1] if i <= len(spts) else ""
+    return row, n
+
+
 def stage_attach(cfg, retry_failed: bool = False, report_only: bool = False):
     """대표 공고의 첨부를 내려받아 텍스트 추출. 텍스트가 없는 공고는 매 실행마다 다시 시도(내려받은 파일은 재사용).
     retry_failed=True 면 텍스트가 있어도 추출 실패 파일이 하나라도 있는 공고를 다시 처리(HWP 백엔드 설치·파서 개선 뒤 일괄 재시도)."""
@@ -303,18 +325,48 @@ def stage_attach(cfg, retry_failed: bool = False, report_only: bool = False):
     if report_only:
         _attach_report(cfg, latest, texts, prev_df)
         return
+    # 같은 공고번호의 다른 차수(원 공고·변경공고) 첨부를 합쳐서 처리 — 대표가 정정공고 차수면 원 공고문이 이전 차수에만 있다
+    hist_path = _p(cfg, "notices_hist.parquet")
+    others_by_no = {}
+    if os.path.exists(hist_path):
+        h = pd.read_parquet(hist_path)
+        h = h[[c for c in h.columns if c.startswith("첨부URL") or c.startswith("첨부파일명") or c.startswith("현장설명서URL") or c in ("공고번호", "공고키", "공고차수")]]
+        h = h.drop_duplicates("공고키").sort_values("공고차수", ascending=False)
+        for no, g in h.groupby(h["공고번호"].astype(str)):
+            if len(g) > 1:
+                others_by_no[no] = [r for r in g.to_dict("records")]
+    attach_max = int(cfg["fields"]["attach_max"])
     retry_nos = set()
     if retry_failed and not prev_df.empty and "추출성공" in prev_df.columns:
-        retry_nos = set(prev_df.loc[prev_df["추출성공"] != "Y", "공고번호"].astype(str))
-        print(f"[--retry-failed] 추출 실패 파일이 있는 공고 {len(retry_nos)}건을 다시 처리합니다(내려받은 파일은 재사용)")
-    processed_nos = set()
+        err = prev_df["오류"].fillna("").astype(str).str.strip() != "" if "오류" in prev_df.columns else False
+        retry_nos = set(prev_df.loc[(prev_df["추출성공"] != "Y") | err, "공고번호"].astype(str))
+        # 다른 차수의 첨부 URL 이 추출노트에 없는 공고(차수 병합 이전에 처리됨)도 다시
+        seen_urls = prev_df.groupby(prev_df["공고번호"].astype(str))["URL"].apply(set).to_dict() if "URL" in prev_df.columns else {}
+        n_merge = 0
+        for no, rows in others_by_no.items():
+            urls = {str(r.get(f"첨부URL{i}") or "").strip() for r in rows for i in range(1, attach_max + 1)}
+            urls |= {str(r.get(f"현장설명서URL{i}") or "").strip() for r in rows for i in range(1, 6)}
+            urls = {u for u in urls if len(u) >= 5 and u.lower() not in ("nan", "none")}
+            if urls - seen_urls.get(no, set()) and no in set(latest["공고번호"].astype(str)):
+                if no not in retry_nos:
+                    n_merge += 1
+                retry_nos.add(no)
+        print(f"[--retry-failed] 추출 실패·오류 기록이 있는 공고와 다른 차수 첨부가 아직 반영되지 않은 공고 {len(retry_nos)}건"
+              f"(그중 차수 병합 {n_merge}건)을 다시 처리합니다(내려받은 파일은 재사용)")
+    processed_nos, n_merged = set(), 0
     for i, (_, row) in enumerate(latest.iterrows(), 1):
         if row["공고키"] in texts and str(row["공고번호"]) not in retry_nos:
             continue
         processed_nos.add(str(row["공고번호"]))
+        rd = row.to_dict()
+        others = [r for r in others_by_no.get(str(row["공고번호"]), []) if r.get("공고키") != row["공고키"]]
+        if others:
+            rd, amax = _merge_attachment_slots(rd, others, attach_max)
+            n_merged += 1
+        else:
+            amax = attach_max
         try:
-            text, n = attachments.process_notice_attachments(row.to_dict(), cfg["paths"]["files_dir"], cfg["paths"]["text_dir"],
-                                                             attach_max=int(cfg["fields"]["attach_max"]))
+            text, n = attachments.process_notice_attachments(rd, cfg["paths"]["files_dir"], cfg["paths"]["text_dir"], attach_max=amax)
         except Exception as e:  # noqa: BLE001 — 한 공고의 오류가 전체를 멈추지 않도록
             log.warning("첨부 처리 실패 %s: %s", row["공고번호"], e)
             text, n = "", [{"공고번호": str(row["공고번호"]), "파일명": "", "우선순위": None, "URL": "", "다운로드": "N",
@@ -327,6 +379,8 @@ def stage_attach(cfg, retry_failed: bool = False, report_only: bool = False):
                 json.dump(texts, f, ensure_ascii=False)
             log.info("첨부 처리 %d/%d", i, len(latest))
     notes_df = pd.DataFrame(notes)
+    if n_merged:
+        print(f"다른 차수의 첨부를 합쳐 처리한 공고 {n_merged}건")
     # 이번에 다시 처리한 공고의 옛 기록은 버리고 새 기록으로 대체(재시도할 때마다 07 추출노트가 중복되지 않도록)
     if not prev_df.empty and processed_nos and "공고번호" in prev_df.columns:
         prev_df = prev_df[~prev_df["공고번호"].astype(str).isin(processed_nos)]
@@ -389,7 +443,21 @@ def _attach_report(cfg, latest, texts, notes_df):
     print(f"→ 목록 저장: {_p(cfg, 'notes_notext.parquet')} (상세URL 로 나라장터에서 직접 확인 가능)")
 
 
-def _extract_context(cfg, limit: Optional[int] = None):
+def _redo_keys(latest: pd.DataFrame, docs: dict) -> list:
+    """다시 추출할 공고: 신뢰도 low, 또는 건축 공종인데 연면적이 비어 있는 추출 결과(원 공고문이 빠졌던 경우 등)."""
+    out = []
+    trade = dict(zip(latest["공고키"], latest["공종"].astype(str))) if "공종" in latest.columns else {}
+    for k, d in docs.items():
+        if not isinstance(d, dict) or "_error" in d:
+            continue
+        low = str(d.get("신뢰도") or "").lower() == "low"
+        no_area = d.get("연면적_m2") in (None, "", 0) and trade.get(k) == "건축"
+        if low or no_area:
+            out.append(k)
+    return out
+
+
+def _extract_context(cfg, limit: Optional[int] = None, redo_low: bool = False):
     latest = _read(cfg, "notices_latest.parquet")
     texts_path = _p(cfg, "texts.json")
     if not os.path.exists(texts_path):
@@ -403,6 +471,10 @@ def _extract_context(cfg, limit: Optional[int] = None):
             docs = json.load(f)
     # 같은 공고가 여러 시설의 대표로 잡혀 latest 에 두 번 나올 수 있다 → 공고키 기준으로 한 번만 추출(비용 중복 방지)
     todo = list(dict.fromkeys(k for k in latest["공고키"] if k in texts and not (k in docs and "_error" not in docs[k])))
+    if redo_low:
+        redo = [k for k in _redo_keys(latest, docs) if k in texts]
+        todo = list(dict.fromkeys(todo + redo))
+        print(f"(--redo-low) 신뢰도 low 또는 건축인데 연면적이 없는 기존 추출 {len(redo)}건을 다시 대상에 포함")
     if limit:
         # 시범 추출용: 건축 공종을 먼저, 그 안에서 추정가격이 큰 순(연면적·규모가 있는 본공사 공고문이 앞에 오도록)
         order = latest.assign(_amt=pd.to_numeric(latest["추정가격"], errors="coerce").fillna(0),
@@ -447,12 +519,13 @@ def _print_estimate(cfg, texts, todo, docs, latest, batch=False):
     return est
 
 
-def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = False, import_: bool = False, limit: Optional[int] = None):
+def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = False, import_: bool = False, limit: Optional[int] = None,
+                  redo_low: bool = False):
     """LLM 추출. 세 가지 방식:
       (기본)   extract            → 견적만 / extract --yes → API 로 한 건씩 호출
       --batch  extract --batch    → 대기 중인 배치가 있으면 결과 수거, 없으면 견적 / --batch --yes → Message Batches 제출(50% 할인, 최대 24h)
       --export extract --export   → data/llm_in/<공고키>.txt 로 내보내기(Cowork·사람이 채움) → extract --import 로 data/llm_out/*.json 수거"""
-    latest, texts, docs, todo, hints, cache_path = _extract_context(cfg, limit=limit)
+    latest, texts, docs, todo, hints, cache_path = _extract_context(cfg, limit=limit, redo_low=redo_low)
     in_dir, out_dir = _p(cfg, "llm_in"), _p(cfg, "llm_out")
 
     if export:
@@ -463,10 +536,17 @@ def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = Fa
 
     if import_:
         found, errors = extract_llm.import_results(out_dir, set(latest["공고키"]))
+        done_dir = _p(cfg, "llm_done")
+        os.makedirs(done_dir, exist_ok=True)
+        for k in found:                      # 반영한 작업지시(txt)·결과(json)는 llm_done 으로 옮겨 llm_in/llm_out 에는 남은 일만 보이게
+            for d_, ext in ((in_dir, ".txt"), (out_dir, ".json")):
+                src = os.path.join(d_, k + ext)
+                if os.path.exists(src):
+                    shutil.move(src, os.path.join(done_dir, k + ext))
         for k, d in found.items():
             docs[k] = d
         _save_docs(cache_path, docs)
-        print(f"가져오기: JSON {len(found)}건 반영, 문제 파일 {len(errors)}건")
+        print(f"가져오기: JSON {len(found)}건 반영(파일은 {done_dir} 로 이동), 문제 파일 {len(errors)}건")
         for fn, why in errors[:20]:
             print(f"  - {fn}: {why}")
         remaining = [k for k in latest["공고키"] if k in texts and not (k in docs and "_error" not in docs[k])]
@@ -629,6 +709,7 @@ def main(argv=None):
     ap.add_argument("--retry-failed", dest="retry_failed", action="store_true", help="attach: 추출 실패 파일이 있는 공고를 텍스트가 있어도 다시 처리(HWP 백엔드 설치 뒤 일괄 재시도)")
     ap.add_argument("--report", action="store_true", help="attach: 처리 없이 첨부 결과 요약과 텍스트 없는 공고의 원인만 출력")
     ap.add_argument("--limit", type=int, default=None, help="extract: 건축 공종·추정가격 큰 순으로 N건만(시범 추출용)")
+    ap.add_argument("--redo-low", dest="redo_low", action="store_true", help="extract: 신뢰도 low 또는 건축인데 연면적이 없는 기존 추출 결과를 다시 대상에 포함")
     ap.add_argument("--yes", action="store_true", help="extract: 비용 견적 확인 후 실제 LLM 호출(또는 배치 제출) 실행")
     ap.add_argument("--batch", action="store_true", help="extract: Message Batches 로 제출/수거 (50%% 할인, 최대 24시간)")
     ap.add_argument("--export", action="store_true", help="extract: 공고별 작업지시 txt 를 data/llm_in 에 내보내기 (Cowork·사람이 채움)")
@@ -643,7 +724,7 @@ def main(argv=None):
     elif a.stage == "probe":
         collect.probe(cfg, a.ym)
     elif a.stage == "extract":
-        stage_extract(cfg, yes=a.yes, batch=a.batch, export=a.export, import_=a.import_, limit=a.limit)
+        stage_extract(cfg, yes=a.yes, batch=a.batch, export=a.export, import_=a.import_, limit=a.limit, redo_low=a.redo_low)
     elif a.stage == "discover":
         stage_discover(cfg, fresh=a.fresh)
     elif a.stage == "attach":
