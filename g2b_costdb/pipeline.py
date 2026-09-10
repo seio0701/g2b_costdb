@@ -23,6 +23,8 @@ import platform
 import shutil
 import sys
 
+from typing import Optional
+
 import pandas as pd
 
 from . import attachments, collect, dedup, discover, extract_llm
@@ -276,7 +278,7 @@ def stage_dedup(cfg):
         print(f"  - {l.get('항목')}: {l.get('비고')}")
 
 
-def stage_attach(cfg, retry_failed: bool = False):
+def stage_attach(cfg, retry_failed: bool = False, report_only: bool = False):
     """대표 공고의 첨부를 내려받아 텍스트 추출. 텍스트가 없는 공고는 매 실행마다 다시 시도(내려받은 파일은 재사용).
     retry_failed=True 면 텍스트가 있어도 추출 실패 파일이 하나라도 있는 공고를 다시 처리(HWP 백엔드 설치·파서 개선 뒤 일괄 재시도)."""
     latest = _read(cfg, "notices_latest.parquet")
@@ -287,6 +289,9 @@ def stage_attach(cfg, retry_failed: bool = False):
             texts = json.load(f)
     prev_notes = _p(cfg, "notes_attach.parquet")
     prev_df = pd.read_parquet(prev_notes) if os.path.exists(prev_notes) else pd.DataFrame()
+    if report_only:
+        _attach_report(cfg, latest, texts, prev_df)
+        return
     retry_nos = set()
     if retry_failed and not prev_df.empty and "추출성공" in prev_df.columns:
         retry_nos = set(prev_df.loc[prev_df["추출성공"] != "Y", "공고번호"].astype(str))
@@ -318,13 +323,51 @@ def stage_attach(cfg, retry_failed: bool = False):
     notes_df.to_parquet(prev_notes, index=False)
     with open(texts_path, "w", encoding="utf-8") as f:
         json.dump(texts, f, ensure_ascii=False)
-    print(f"첨부 처리: 공고 {len(latest)}건, 파일 {len(notes_df)}개, 텍스트 확보 {len(texts)}건 (공고 기준 {len([k for k in texts if k in set(latest['공고키'])])}/{len(latest)})")
+    _attach_report(cfg, latest, texts, notes_df)
+
+
+def _attach_report(cfg, latest, texts, notes_df):
+    """첨부 처리 요약 + 텍스트를 못 얻은 공고의 원인 분해(첨부 없음 / 다운로드 실패 / 미지원 형식만 / 추출 실패) → data/notes_notext.parquet"""
+    have = set(latest["공고키"])
+    print(f"첨부 처리: 공고 {len(latest)}건, 파일 {len(notes_df)}개, 텍스트 확보 {len([k for k in texts if k in have])}/{len(latest)}건")
     if not notes_df.empty and "형식" in notes_df.columns:
         s = notes_df.groupby(notes_df["형식"].fillna("(다운로드 실패)")).agg(파일수=("파일명", "size"), 추출성공=("추출성공", lambda x: int((x == "Y").sum())))
         print("형식별 추출 결과:\n" + s.to_string())
+    missing = latest[~latest["공고키"].isin(set(texts))].copy()
+    if missing.empty:
+        return
+    by_no = {}
+    if not notes_df.empty:
+        for no, g in notes_df.groupby(notes_df["공고번호"].astype(str)):
+            by_no[no] = g
+    unsupported = {".xls", ".xlsb", ".doc", ".pptx", ".7z", ".egg", ".cell", ".pme", ".dwg", ".jpg", ".png"}
+
+    def cause(row):
+        g = by_no.get(str(row["공고번호"]))
+        if int(row.get("첨부파일수") or 0) == 0 and (g is None or g.empty):
+            return "첨부 없음"
+        if g is None or g.empty:
+            return "첨부 없음"
+        if (g["다운로드"] != "Y").all():
+            return "다운로드 실패(로그인 페이지 등)"
+        forms = set(g.loc[g["다운로드"] == "Y", "형식"].fillna("").astype(str).str.lower())
+        if forms and forms <= unsupported:
+            return "미지원 형식만(" + "/".join(sorted(forms)) + ")"
+        if forms == {".pdf"}:
+            return "PDF 추출 실패(스캔)"
+        return "추출 실패(" + "/".join(sorted(forms)[:3]) + ")"
+    missing["텍스트없음_원인"] = [cause(r) for _, r in missing.iterrows()]
+    missing["_amt"] = pd.to_numeric(missing["추정가격"], errors="coerce").fillna(0)
+    cnt = missing["텍스트없음_원인"].value_counts()
+    print(f"텍스트 없는 공고 {len(missing)}건의 원인:\n" + cnt.to_string())
+    top = missing.sort_values("_amt", ascending=False).head(10)
+    print("그중 추정가격 상위 10건:\n" + top[["공고번호", "공고명", "공종", "추정가격", "텍스트없음_원인"]].to_string(index=False))
+    out = missing.drop(columns=["_amt"])[[c for c in ("공고키", "공고번호", "공고명", "시설명", "공종", "추정가격", "첨부파일수", "상세URL", "텍스트없음_원인") if c in missing.columns]]
+    out.to_parquet(_p(cfg, "notes_notext.parquet"), index=False)
+    print(f"→ 목록 저장: {_p(cfg, 'notes_notext.parquet')} (상세URL 로 나라장터에서 직접 확인 가능)")
 
 
-def _extract_context(cfg):
+def _extract_context(cfg, limit: Optional[int] = None):
     latest = _read(cfg, "notices_latest.parquet")
     texts_path = _p(cfg, "texts.json")
     if not os.path.exists(texts_path):
@@ -337,6 +380,13 @@ def _extract_context(cfg):
         with open(cache_path, encoding="utf-8") as f:
             docs = json.load(f)
     todo = [k for k in latest["공고키"] if k in texts and not (k in docs and "_error" not in docs[k])]
+    if limit:
+        # 시범 추출용: 건축 공종을 먼저, 그 안에서 추정가격이 큰 순(연면적·규모가 있는 본공사 공고문이 앞에 오도록)
+        order = latest.assign(_amt=pd.to_numeric(latest["추정가격"], errors="coerce").fillna(0),
+                              _arch=(latest["공종"].astype(str) == "건축").astype(int) if "공종" in latest.columns else 0)
+        rank = {k: i for i, k in enumerate(order.sort_values(["_arch", "_amt"], ascending=[False, False])["공고키"])}
+        todo = sorted(todo, key=lambda k: rank.get(k, 10**9))[:int(limit)]
+        print(f"(--limit {limit}) 건축 공종·추정가격 큰 순으로 {len(todo)}건만 대상")
     hints = {r["공고키"]: {"공고번호": r["공고번호"], "공고명": r["공고명"], "수요기관": r["수요기관"]} for _, r in latest.iterrows()}
     return latest, texts, docs, todo, hints, cache_path
 
@@ -374,12 +424,12 @@ def _print_estimate(cfg, texts, todo, docs, latest, batch=False):
     return est
 
 
-def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = False, import_: bool = False):
+def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = False, import_: bool = False, limit: Optional[int] = None):
     """LLM 추출. 세 가지 방식:
       (기본)   extract            → 견적만 / extract --yes → API 로 한 건씩 호출
       --batch  extract --batch    → 대기 중인 배치가 있으면 결과 수거, 없으면 견적 / --batch --yes → Message Batches 제출(50% 할인, 최대 24h)
       --export extract --export   → data/llm_in/<공고키>.txt 로 내보내기(Cowork·사람이 채움) → extract --import 로 data/llm_out/*.json 수거"""
-    latest, texts, docs, todo, hints, cache_path = _extract_context(cfg)
+    latest, texts, docs, todo, hints, cache_path = _extract_context(cfg, limit=limit)
     in_dir, out_dir = _p(cfg, "llm_in"), _p(cfg, "llm_out")
 
     if export:
@@ -554,6 +604,8 @@ def main(argv=None):
     ap.add_argument("--ym", default="2026-08", help="probe 대상 월(YYYY-MM)")
     ap.add_argument("--fresh", action="store_true", help="discover: 이전 검수 파일의 시설ID 만 이어받고 검수 칸은 새 기본값으로(검수 시작 전 규칙이 바뀌었을 때)")
     ap.add_argument("--retry-failed", dest="retry_failed", action="store_true", help="attach: 추출 실패 파일이 있는 공고를 텍스트가 있어도 다시 처리(HWP 백엔드 설치 뒤 일괄 재시도)")
+    ap.add_argument("--report", action="store_true", help="attach: 처리 없이 첨부 결과 요약과 텍스트 없는 공고의 원인만 출력")
+    ap.add_argument("--limit", type=int, default=None, help="extract: 건축 공종·추정가격 큰 순으로 N건만(시범 추출용)")
     ap.add_argument("--yes", action="store_true", help="extract: 비용 견적 확인 후 실제 LLM 호출(또는 배치 제출) 실행")
     ap.add_argument("--batch", action="store_true", help="extract: Message Batches 로 제출/수거 (50%% 할인, 최대 24시간)")
     ap.add_argument("--export", action="store_true", help="extract: 공고별 작업지시 txt 를 data/llm_in 에 내보내기 (Cowork·사람이 채움)")
@@ -568,11 +620,11 @@ def main(argv=None):
     elif a.stage == "probe":
         collect.probe(cfg, a.ym)
     elif a.stage == "extract":
-        stage_extract(cfg, yes=a.yes, batch=a.batch, export=a.export, import_=a.import_)
+        stage_extract(cfg, yes=a.yes, batch=a.batch, export=a.export, import_=a.import_, limit=a.limit)
     elif a.stage == "discover":
         stage_discover(cfg, fresh=a.fresh)
     elif a.stage == "attach":
-        stage_attach(cfg, retry_failed=a.retry_failed)
+        stage_attach(cfg, retry_failed=a.retry_failed, report_only=a.report)
     else:
         {"collect": stage_collect, "discover": stage_discover, "research": stage_research, "dedup": stage_dedup,
          "attach": stage_attach, "excel": stage_excel}[a.stage](cfg)

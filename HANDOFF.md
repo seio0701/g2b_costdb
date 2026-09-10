@@ -96,6 +96,15 @@
   백엔드 순서: olefile 파서 → hwp5txt(pyhwp) → 한컴 COM(Windows + 한컴오피스 + pywin32). 배포용(DRM) HWP 는 한컴 COM 만 가능.
 - 다음: attach 가 끝나면 `git pull` → `research` → `dedup` → `attach`(새로 늘어난 공고만 추가 다운로드) → `extract --export` 로 30~50건 시범 → `excel`.
 
+## 0-9. 2026-09-10 attach 완료(사용자 PC, 11:18~14:54 약 3.6시간)
+- 공고 4,117건 / 파일 8,377개 / **텍스트 확보 3,531건(86%)**. 형식별: .hwp 4,753/4,758, .hwpx 237/237, .pdf 534/668(실패는 스캔 도면),
+  .xlsx 1,673/1,690, .xlsm 79/83, .zip 380/400, .xls 0/513(미지원, 내역서라 불필요), .doc/.xlsb/.pptx/.7z/.egg 소수 미지원.
+  → HWP 파서는 실전에서 문제없음. 로그의 HWP 실패는 zip 안의 표지·간지(본문 없음)와 OLE 아닌 파일.
+- 추가: `attach` 끝에 텍스트 없는 공고의 원인 분해(첨부 없음/다운로드 실패/미지원 형식만/스캔 PDF)를 출력하고 `data/notes_notext.parquet` 저장,
+  `attach --report`(처리 없이 요약만), `extract --limit N`(건축·고액 순 N건 시범).
+- 다음(사용자 PC): `git pull` → `research` → `dedup` → `attach`(새 공고만) → `attach --report` 로 586건 원인 확인 →
+  `extract`(견적) → `extract --export --limit 40` 으로 Cowork 시범 → `extract --import` → `excel` 로 스키마 확인 → 본 처리 방식 결정(배치 vs Cowork).
+
 ## 1. 현재 단계
 - **세션 0(코드 정비) 완료 / 세션 1(환경 점검 + probe)의 사용자 PC 실행 대기**
 - 이번 작업은 네트워크가 막힌 샌드박스(Claude Code 웹)에서 진행되어 **나라장터 API 호출(probe/collect)은 실행하지 못했다.**

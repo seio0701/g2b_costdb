@@ -143,6 +143,8 @@ def run():
         assert "[--retry-failed]" in out and len(notes2) == n_notes and not notes2.duplicated(["공고번호", "URL"]).any(), (n_notes, len(notes2))
         assert sum(v for k, v in server.calls.items() if k.startswith("file:")) == n_file_calls + 1, "실패했던 파일 1개만 다시 요청"
         assert json.load(open(data("texts.json"), encoding="utf-8")).keys() == texts.keys()
+        out = _run(["attach", "--report", "--config", cfg_path])
+        assert "텍스트 없는 공고 2건의 원인" in out and "다운로드 실패" in out and os.path.exists(data("notes_notext.parquet")), out
         # 7) extract — 견적만 / --yes 는 가짜 추출기로
         out = _run(["extract", "--config", cfg_path])
         assert "extract --yes" in out and not os.path.exists(data("llm_docs.json"))
@@ -155,8 +157,8 @@ def run():
         docs["R24010002-000"] = {"_error": "모의 실패"}
         with open(data("llm_docs.json"), "w", encoding="utf-8") as f:
             json.dump(docs, f, ensure_ascii=False)
-        out = _run(["extract", "--export", "--config", cfg_path])
-        assert os.path.exists(data("llm_in", "R24010002-000.txt")) and "내보내기 완료: 1건" in out, out
+        out = _run(["extract", "--export", "--limit", "5", "--config", cfg_path])
+        assert os.path.exists(data("llm_in", "R24010002-000.txt")) and "내보내기 완료: 1건" in out and "(--limit 5)" in out, out
         exported = open(data("llm_in", "R24010002-000.txt"), encoding="utf-8").read()
         fake = _fake_extract(exported.split("[공고문 텍스트]")[1], {"공고명": "가상군 문화예술회관 건립 전기공사"}, cfg["llm"])
         with open(data("llm_out", "R24010002-000.json"), "w", encoding="utf-8") as f:
