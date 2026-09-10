@@ -276,16 +276,26 @@ def stage_dedup(cfg):
         print(f"  - {l.get('항목')}: {l.get('비고')}")
 
 
-def stage_attach(cfg):
+def stage_attach(cfg, retry_failed: bool = False):
+    """대표 공고의 첨부를 내려받아 텍스트 추출. 텍스트가 없는 공고는 매 실행마다 다시 시도(내려받은 파일은 재사용).
+    retry_failed=True 면 텍스트가 있어도 추출 실패 파일이 하나라도 있는 공고를 다시 처리(HWP 백엔드 설치·파서 개선 뒤 일괄 재시도)."""
     latest = _read(cfg, "notices_latest.parquet")
     notes, texts = [], {}
     texts_path = _p(cfg, "texts.json")
     if os.path.exists(texts_path):
         with open(texts_path, encoding="utf-8") as f:
             texts = json.load(f)
+    prev_notes = _p(cfg, "notes_attach.parquet")
+    prev_df = pd.read_parquet(prev_notes) if os.path.exists(prev_notes) else pd.DataFrame()
+    retry_nos = set()
+    if retry_failed and not prev_df.empty and "추출성공" in prev_df.columns:
+        retry_nos = set(prev_df.loc[prev_df["추출성공"] != "Y", "공고번호"].astype(str))
+        print(f"[--retry-failed] 추출 실패 파일이 있는 공고 {len(retry_nos)}건을 다시 처리합니다(내려받은 파일은 재사용)")
+    processed_nos = set()
     for i, (_, row) in enumerate(latest.iterrows(), 1):
-        if row["공고키"] in texts:
+        if row["공고키"] in texts and str(row["공고번호"]) not in retry_nos:
             continue
+        processed_nos.add(str(row["공고번호"]))
         try:
             text, n = attachments.process_notice_attachments(row.to_dict(), cfg["paths"]["files_dir"], cfg["paths"]["text_dir"],
                                                              attach_max=int(cfg["fields"]["attach_max"]))
@@ -301,11 +311,10 @@ def stage_attach(cfg):
                 json.dump(texts, f, ensure_ascii=False)
             log.info("첨부 처리 %d/%d", i, len(latest))
     notes_df = pd.DataFrame(notes)
-    prev_notes = _p(cfg, "notes_attach.parquet")
-    if os.path.exists(prev_notes) and not notes_df.empty:
-        notes_df = pd.concat([pd.read_parquet(prev_notes), notes_df], ignore_index=True)
-    elif os.path.exists(prev_notes):
-        notes_df = pd.read_parquet(prev_notes)
+    # 이번에 다시 처리한 공고의 옛 기록은 버리고 새 기록으로 대체(재시도할 때마다 07 추출노트가 중복되지 않도록)
+    if not prev_df.empty and processed_nos and "공고번호" in prev_df.columns:
+        prev_df = prev_df[~prev_df["공고번호"].astype(str).isin(processed_nos)]
+    notes_df = pd.concat([d for d in (prev_df, notes_df) if not d.empty], ignore_index=True) if (not prev_df.empty or not notes_df.empty) else notes_df
     notes_df.to_parquet(prev_notes, index=False)
     with open(texts_path, "w", encoding="utf-8") as f:
         json.dump(texts, f, ensure_ascii=False)
@@ -544,6 +553,7 @@ def main(argv=None):
     ap.add_argument("--config", default=None)
     ap.add_argument("--ym", default="2026-08", help="probe 대상 월(YYYY-MM)")
     ap.add_argument("--fresh", action="store_true", help="discover: 이전 검수 파일의 시설ID 만 이어받고 검수 칸은 새 기본값으로(검수 시작 전 규칙이 바뀌었을 때)")
+    ap.add_argument("--retry-failed", dest="retry_failed", action="store_true", help="attach: 추출 실패 파일이 있는 공고를 텍스트가 있어도 다시 처리(HWP 백엔드 설치 뒤 일괄 재시도)")
     ap.add_argument("--yes", action="store_true", help="extract: 비용 견적 확인 후 실제 LLM 호출(또는 배치 제출) 실행")
     ap.add_argument("--batch", action="store_true", help="extract: Message Batches 로 제출/수거 (50%% 할인, 최대 24시간)")
     ap.add_argument("--export", action="store_true", help="extract: 공고별 작업지시 txt 를 data/llm_in 에 내보내기 (Cowork·사람이 채움)")
@@ -561,6 +571,8 @@ def main(argv=None):
         stage_extract(cfg, yes=a.yes, batch=a.batch, export=a.export, import_=a.import_)
     elif a.stage == "discover":
         stage_discover(cfg, fresh=a.fresh)
+    elif a.stage == "attach":
+        stage_attach(cfg, retry_failed=a.retry_failed)
     else:
         {"collect": stage_collect, "discover": stage_discover, "research": stage_research, "dedup": stage_dedup,
          "attach": stage_attach, "excel": stage_excel}[a.stage](cfg)

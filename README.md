@@ -30,7 +30,7 @@ python -m g2b_costdb.pipeline doctor       # 파이썬·패키지·키 존재 �
 | **검수** | Excel에서 `검수_포함여부 / 검수_시설명 / 검수_별칭 / 검수_수요기관` 수정 후 저장·닫기. `추정가격_합계` 내림차순으로 '포함'·'검토필요'부터 본다. 지자체명만 붙은 공동주택('구례군 국민임대아파트')에 단지가 여럿 섞여 있으면 `검수_시설명`에 단지·지구명을 넣거나 별칭으로 나눈다. 같은 시설이 두 행(수요기관이 다름)이면 `시설ID` 를 같게 적어 합친다 | — | — |
 | S3 재검색 | `python -m g2b_costdb.pipeline research` | `data/notices_research.parquet` (전 공종 공고), 시설별 공종 분포 표. 정확한 이름으로 없으면 어절 간격을 허용한 예비 검색. 검수 행 여러 개에 **같은 시설ID** 를 적으면 한 시설로 병합(지자체·도시공사로 나뉜 같은 시설) | 0 (기본). `config.yaml api.use_license_limit: true` 로 바꾸면 공고별 면허제한 조회(공고 수만큼) |
 | S4 중복정리 | `python -m g2b_costdb.pipeline dedup` | `data/notices_hist.parquet`, `data/notices_latest.parquet`, `data/logs_dedup.parquet` | 0 |
-| S5 첨부수집 | `python -m g2b_costdb.pipeline attach` | `data/files/`, `data/text/`, `data/texts.json`, `data/notes_attach.parquet` | 0 (파일 다운로드만, 중단 후 재실행 시 이어서) |
+| S5 첨부수집 | `python -m g2b_costdb.pipeline attach` | `data/files/`, `data/text/`, `data/texts.json`, `data/notes_attach.parquet` | 0 (파일 다운로드만, 중단 후 재실행 시 이어서. 텍스트가 없는 공고는 매번 다시 시도하고, HWP 백엔드를 나중에 설치했으면 `attach --retry-failed` 로 실패 파일이 있는 공고를 일괄 재처리) |
 | S6 LLM추출 | `python -m g2b_costdb.pipeline extract` → 견적 확인 → 아래 세 방식 중 택일 | `data/llm_docs.json`, `data/logs_verify.parquet` | Claude API(`--yes` 없이는 비용 견적만 출력) |
 | S7 Excel | `python -m g2b_costdb.pipeline excel` | `output/공사비DB.xlsx` | 0 |
 

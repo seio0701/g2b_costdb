@@ -137,6 +137,12 @@ def run():
         n_file_calls = sum(v for k, v in server.calls.items() if k.startswith("file:"))
         _run(["attach", "--config", cfg_path])
         assert sum(v for k, v in server.calls.items() if k.startswith("file:")) == n_file_calls, "이미 처리한 공고는 재요청 없음"
+        n_notes = len(pd.read_parquet(data("notes_attach.parquet")))
+        out = _run(["attach", "--retry-failed", "--config", cfg_path])          # 실패 파일(login.html)이 있는 공고만 다시 처리, 기록은 중복되지 않음
+        notes2 = pd.read_parquet(data("notes_attach.parquet"))
+        assert "[--retry-failed]" in out and len(notes2) == n_notes and not notes2.duplicated(["공고번호", "URL"]).any(), (n_notes, len(notes2))
+        assert sum(v for k, v in server.calls.items() if k.startswith("file:")) == n_file_calls + 1, "실패했던 파일 1개만 다시 요청"
+        assert json.load(open(data("texts.json"), encoding="utf-8")).keys() == texts.keys()
         # 7) extract — 견적만 / --yes 는 가짜 추출기로
         out = _run(["extract", "--config", cfg_path])
         assert "extract --yes" in out and not os.path.exists(data("llm_docs.json"))

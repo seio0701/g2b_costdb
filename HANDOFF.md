@@ -91,6 +91,9 @@
 - `dedup`: 6,584건 → 대표 4,117건(프로젝트 1,926개, 경고 1,041건). 경고 대부분은 예초·수목전정·디딤돌 같은 관리성 공고가 '기타' 공종으로 들어와
   소액 분리된 것 → 유지보수 어휘(예초·전정·제초·벌초·디딤돌·전원공급) 추가로 다음 research 에서 빠짐.
 - `attach`(진행 중): zip 안의 .xls(구형 Excel) 미지원, 스캔 PDF 는 pytesseract 없어 OCR 생략, 손상 PDF 1건. 25건당 30~90초 → 4,117건에 2~3시간.
+- HWP/HWPX 추출 실패는 파일이 `data/files/<공고번호>/` 에 남으므로 나중에 일괄 재시도 가능: 텍스트가 전혀 없는 공고는 `attach` 재실행 때 자동 재시도,
+  다른 파일로 텍스트를 얻은 공고의 실패 HWP 까지 다시 하려면 `attach --retry-failed`(재처리한 공고의 옛 추출노트는 새 기록으로 대체).
+  백엔드 순서: olefile 파서 → hwp5txt(pyhwp) → 한컴 COM(Windows + 한컴오피스 + pywin32). 배포용(DRM) HWP 는 한컴 COM 만 가능.
 - 다음: attach 가 끝나면 `git pull` → `research` → `dedup` → `attach`(새로 늘어난 공고만 추가 다운로드) → `extract --export` 로 30~50건 시범 → `excel`.
 
 ## 1. 현재 단계
