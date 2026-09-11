@@ -505,6 +505,21 @@ def _save_docs(cache_path, docs):
         json.dump(docs, f, ensure_ascii=False, default=str)
 
 
+def _error_summary(docs: dict, top: int = 8) -> str:
+    """추출 실패(_error) 원인을 앞 70자 기준으로 묶어 상위 top 개를 표로."""
+    from collections import Counter
+    errs = Counter()
+    for d in docs.values():
+        if isinstance(d, dict) and "_error" in d:
+            msg = str(d["_error"])
+            msg = re.sub(r"\| 응답: .*$", "", msg).strip()          # 응답 앞부분(공고마다 다름)은 묶을 때 제외
+            errs[msg[:70]] += 1
+    if not errs:
+        return ""
+    lines = [f"  {n:5d}  {m}" for m, n in errs.most_common(top)]
+    return f"추출 실패 {sum(errs.values())}건의 원인 상위:\n" + "\n".join(lines)
+
+
 def _verify_and_report(cfg, latest, docs, n_ok=None, n_err=None):
     logs = []
     for _, row in latest.iterrows():
@@ -516,6 +531,9 @@ def _verify_and_report(cfg, latest, docs, n_ok=None, n_err=None):
     done = len([k for k in latest["공고키"] if k in docs and "_error" not in docs[k]])
     usage_in = sum((d.get("_usage_in") or 0) for d in docs.values() if isinstance(d, dict))
     usage_out = sum((d.get("_usage_out") or 0) for d in docs.values() if isinstance(d, dict))
+    es = _error_summary(docs)
+    if es:
+        print(es)
     head = f"LLM 추출 성공 {n_ok}건 / 실패 {n_err}건, " if n_ok is not None else ""
     print(f"{head}대표 공고 {len(latest)}건 중 추출 완료 {done}건 (누적 토큰 입력 {usage_in:,} 출력 {usage_out:,}), 검증로그 {len(logs)}건")
     if logs:
@@ -526,6 +544,9 @@ def _print_estimate(cfg, texts, todo, docs, latest, batch=False):
     est = extract_llm.estimate_cost(texts, todo, cfg["llm"], float(cfg["llm"].get("usd_krw", 1400)))
     if batch:
         est["usd"], est["krw"] = round(est["usd"] / 2, 2), est["krw"] // 2
+    es = _error_summary(docs)
+    if es:
+        print(es + "\n  → 실패 건은 다음 extract 실행 때 자동으로 다시 대상에 포함됩니다")
     print(f"LLM 추출 대상: {len(todo)}건 (이미 완료 {len([k for k in docs if '_error' not in docs[k]])}건, 텍스트 없음 "
           f"{len([k for k in latest['공고키'] if k not in texts])}건)")
     print(f"예상 입력 {est['input_tokens']:,} 토큰 / 출력 {est['output_tokens']:,} 토큰, 모델 {est['model']}"
@@ -534,7 +555,7 @@ def _print_estimate(cfg, texts, todo, docs, latest, batch=False):
 
 
 def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = False, import_: bool = False, limit: Optional[int] = None,
-                  redo_low: bool = False):
+                  redo_low: bool = False, refetch: bool = False):
     """LLM 추출. 세 가지 방식:
       (기본)   extract            → 견적만 / extract --yes → API 로 한 건씩 호출
       --batch  extract --batch    → 대기 중인 배치가 있으면 결과 수거, 없으면 견적 / --batch --yes → Message Batches 제출(50% 할인, 최대 24h)
@@ -580,6 +601,29 @@ def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = Fa
     if batch:
         state_path = _p(cfg, "llm_batch.json")
         state = json.load(open(state_path, encoding="utf-8")) if os.path.exists(state_path) else {"batches": []}
+        if refetch:
+            # 끝난 배치의 결과를 다시 내려받아(결과는 29일 보관, 재과금 없음) 실패로 남은 공고만 다시 해석 — 파서를 고친 뒤 복구용
+            if not os.environ.get(env, "").strip():
+                raise SystemExit(f"환경변수 {env} 가 없습니다.")
+            import anthropic  # type: ignore
+            client = anthropic.Anthropic(api_key=os.environ.get(env) or None)
+            n_fix = n_still = 0
+            for b in state["batches"]:
+                status, got, counts = extract_llm.fetch_batch(client, b["id"], cfg["llm"].get("model", ""))
+                if status != "ended":
+                    print(f"배치 {b['id']}: {status} — 아직 끝나지 않음")
+                    continue
+                for k in b["keys"]:
+                    if k in docs and "_error" not in docs[k]:
+                        continue
+                    d = got.get(k, {"_error": "배치 결과에 없음"})
+                    docs[k] = d
+                    n_fix += 0 if "_error" in d else 1
+                    n_still += 1 if "_error" in d else 0
+            _save_docs(cache_path, docs)
+            print(f"[--refetch] 실패 건 다시 해석: 복구 {n_fix}건, 여전히 실패 {n_still}건")
+            _verify_and_report(cfg, latest, docs)
+            return
         pending = [b for b in state["batches"] if b.get("status") != "ended"]
         if pending:
             if not os.environ.get(env, "").strip():
@@ -732,6 +776,7 @@ def main(argv=None):
     ap.add_argument("--report", action="store_true", help="attach: 처리 없이 첨부 결과 요약과 텍스트 없는 공고의 원인만 출력")
     ap.add_argument("--limit", type=int, default=None, help="extract: 건축 공종·추정가격 큰 순으로 N건만(시범 추출용)")
     ap.add_argument("--redo-low", dest="redo_low", action="store_true", help="extract: 신뢰도 low 또는 건축인데 연면적이 없는 기존 추출 결과를 다시 대상에 포함")
+    ap.add_argument("--refetch", action="store_true", help="extract --batch: 끝난 배치 결과를 다시 내려받아 실패 건만 다시 해석(재과금 없음)")
     ap.add_argument("--yes", action="store_true", help="extract: 비용 견적 확인 후 실제 LLM 호출(또는 배치 제출) 실행")
     ap.add_argument("--batch", action="store_true", help="extract: Message Batches 로 제출/수거 (50%% 할인, 최대 24시간)")
     ap.add_argument("--export", action="store_true", help="extract: 공고별 작업지시 txt 를 data/llm_in 에 내보내기 (Cowork·사람이 채움)")
@@ -746,7 +791,7 @@ def main(argv=None):
     elif a.stage == "probe":
         collect.probe(cfg, a.ym)
     elif a.stage == "extract":
-        stage_extract(cfg, yes=a.yes, batch=a.batch, export=a.export, import_=a.import_, limit=a.limit, redo_low=a.redo_low)
+        stage_extract(cfg, yes=a.yes, batch=a.batch, export=a.export, import_=a.import_, limit=a.limit, redo_low=a.redo_low, refetch=a.refetch)
     elif a.stage == "discover":
         stage_discover(cfg, fresh=a.fresh)
     elif a.stage == "attach":

@@ -450,7 +450,10 @@ def fetch_batch(client, batch_id: str, model: str = "") -> Tuple[str, Dict[str, 
                 d["_batch_id"] = batch_id
                 docs[key] = d
             except Exception as e:  # noqa: BLE001
-                docs[key] = {"_error": f"응답 해석 실패: {str(e)[:150]}"}
+                # 원인 진단용: 종료 사유(max_tokens 면 잘림, refusal 이면 거부)와 응답 앞부분을 함께 남긴다
+                stop = getattr(msg, "stop_reason", "") or ""
+                head = (text or "").strip().replace("\n", " ")[:80]
+                docs[key] = {"_error": f"응답 해석 실패(stop={stop}): {str(e)[:80]} | 응답: {head}"}
         else:
             err = getattr(r.result, "error", None)
             docs[key] = {"_error": f"batch {rtype}: {getattr(err, 'type', '') or ''} {getattr(err, 'message', '') or ''}".strip()}

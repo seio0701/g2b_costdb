@@ -348,6 +348,16 @@ def test_awards():
     assert std2.loc["A2-000", "낙찰금액_API"] == 500 and std2.loc["A1-000", "낙찰률_API"] == 90.0
 
 
+def test_error_summary():
+    from g2b_costdb.pipeline import _error_summary
+    docs = {"A": {"_error": "응답 해석 실패(stop=max_tokens): JSON 아님 | 응답: {\"공사명\": ..."},
+            "B": {"_error": "응답 해석 실패(stop=max_tokens): JSON 아님 | 응답: 다른 내용"},
+            "C": {"_error": "batch errored: invalid_request_error x"}, "D": {"공사명": "정상"}}
+    out = _error_summary(docs)
+    assert "추출 실패 3건" in out and "    2  응답 해석 실패(stop=max_tokens): JSON 아님" in out and "batch errored" in out, out
+    assert _error_summary({"D": {"공사명": "정상"}}) == ""
+
+
 def test_output_schema_limits():
     """구조화 출력 스키마: union 타입 파라미터 0개(API 한도 16), 선택 파라미터 0개(한도 24), 빈 문자열 → None."""
     from g2b_costdb.extract_llm import output_schema, normalize_doc
@@ -537,6 +547,7 @@ def run():
         test_research_fallback_and_merge()
         test_attach_merge_and_redo()
         test_output_schema_limits()
+        test_error_summary()
         test_awards()
         test_extract_and_verify()
         test_handoff_and_batch(tmp)
