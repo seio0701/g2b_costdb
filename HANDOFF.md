@@ -152,6 +152,13 @@
   다른 차수에 공고문·현장설명서류가 있는 공고"로 좁힘.
 - 사용자 안내: `copy HANDOFF.md HANDOFF_cowork_backup.md` → `git checkout -- HANDOFF.md` → `git pull` → `attach --retry-failed` → `extract --export --redo-low --limit 40`.
 
+## 0-15. 2026-09-11 낮 — attach --retry-failed(새 코드) 완료, API 즉시 호출로 재추출 검증 단계
+- `attach --retry-failed`: 재처리 1,202건(차수 병합 실제 234건, 약 1시간 50분). 파일 9,239개, 텍스트 3,821/3,834(첨부 없음 12·xls 1).
+  HWP 5,232/5,239. 정정공고 차수가 대표였던 공고들도 원 공고문·현장설명서 텍스트를 갖게 됨.
+- `extract --export --redo-low --limit 40`: 다시 할 15건 + 고액 건축 → llm_in 40건 내보냄(Cowork 용이나, 사용자 결정으로 Cowork 대신 API 경로로 진행).
+- 다음(사용자 PC): `setx ANTHROPIC_API_KEY` → 새 창 → `git pull`(aecba8c: --redo-low 를 --limit 앞에, 1d7bd16: --import 가 API 결과를 덮어쓰지 않음) →
+  `doctor` → `extract --yes --redo-low --limit 15`(즉시, 약 $1) → `excel` → 01 시트 연면적 확인 → `extract --batch --yes`(나머지 약 3,780건, 약 12~13만원).
+
 ## 1. 현재 단계
 - **세션 0(코드 정비) 완료 / 세션 1(환경 점검 + probe)의 사용자 PC 실행 대기**
 - 이번 작업은 네트워크가 막힌 샌드박스(Claude Code 웹)에서 진행되어 **나라장터 API 호출(probe/collect)은 실행하지 못했다.**
