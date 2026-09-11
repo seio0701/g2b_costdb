@@ -169,6 +169,12 @@ def run():
         assert "JSON 1건 반영" in out and "미추출 0건" in out, out
         assert os.path.exists(data("llm_done", "R24010002-000.json")) and os.path.exists(data("llm_done", "R24010002-000.txt")) \
             and not os.path.exists(data("llm_out", "R24010002-000.json")), "반영한 파일은 llm_done 으로 이동"
+        # API(모의) 결과가 있는 R24010001-001 에 사람이 쓴 JSON 이 들어와도 덮어쓰지 않음
+        os.makedirs(data("llm_out"), exist_ok=True)
+        json.dump({"연면적_m2": 1, "신뢰도": "low"}, open(data("llm_out", "R24010001-001.json"), "w", encoding="utf-8"))
+        out = _run(["extract", "--import", "--config", cfg_path])
+        docs = json.load(open(data("llm_docs.json"), encoding="utf-8"))
+        assert "이미 API 결과가 있어 유지한 공고 1건" in out and docs["R24010001-001"]["연면적_m2"] == 15200.0, out
         docs = json.load(open(data("llm_docs.json"), encoding="utf-8"))
         assert docs["R24010002-000"]["추정가격_원"] == 2600000000 and docs["R24010002-000"]["_model"] == "manual/cowork"
         # 배치: 제출 전 견적(50%)만 출력하고 제출하지 않음

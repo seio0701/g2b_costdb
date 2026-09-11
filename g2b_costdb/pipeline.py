@@ -557,10 +557,18 @@ def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = Fa
                 src = os.path.join(d_, k + ext)
                 if os.path.exists(src):
                     shutil.move(src, os.path.join(done_dir, k + ext))
+        kept = []
         for k, d in found.items():
+            old_doc = docs.get(k)
+            # 이미 API 결과가 있는 공고에 사람이 쓴 옛 JSON 이 다시 들어오면 덮어쓰지 않는다(예: 시범 40건 JSON 이 llm_out 에 남아 있다가 재반영)
+            if isinstance(old_doc, dict) and "_error" not in old_doc and not str(old_doc.get("_model", "")).startswith("manual") \
+                    and str(d.get("_model", "")).startswith("manual"):
+                kept.append(k)
+                continue
             docs[k] = d
         _save_docs(cache_path, docs)
-        print(f"가져오기: JSON {len(found)}건 반영(파일은 {done_dir} 로 이동), 문제 파일 {len(errors)}건")
+        print(f"가져오기: JSON {len(found) - len(kept)}건 반영(파일은 {done_dir} 로 이동), 문제 파일 {len(errors)}건"
+              + (f", 이미 API 결과가 있어 유지한 공고 {len(kept)}건" if kept else ""))
         for fn, why in errors[:20]:
             print(f"  - {fn}: {why}")
         remaining = [k for k in latest["공고키"] if k in texts and not (k in docs and "_error" not in docs[k])]
