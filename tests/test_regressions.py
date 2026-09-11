@@ -348,6 +348,17 @@ def test_awards():
     assert std2.loc["A2-000", "낙찰금액_API"] == 500 and std2.loc["A1-000", "낙찰률_API"] == 90.0
 
 
+def test_output_schema_limits():
+    """구조화 출력 스키마: union 타입 파라미터 0개(API 한도 16), 선택 파라미터 0개(한도 24), 빈 문자열 → None."""
+    from g2b_costdb.extract_llm import output_schema, normalize_doc
+    sc = output_schema()
+    unions = [k for k, v in sc["properties"].items() if isinstance(v.get("type"), list) or "anyOf" in v]
+    assert not unions, unions
+    assert set(sc["required"]) == set(sc["properties"]) and sc["additionalProperties"] is False
+    d = normalize_doc({"연면적_m2": "13731.3", "추정가격_원": "23,215,938,082", "지상층수": "", "공사명": "", "근거문구": [{"항목": "연면적_m2", "원문": "연면적 13,731.3㎡"}]})
+    assert d["연면적_m2"] == 13731.3 and d["추정가격_원"] == 23215938082 and d["지상층수"] is None and d["근거문구"] == {"연면적_m2": "연면적 13,731.3㎡"}
+
+
 def test_extract_and_verify():
     doc = extract_llm.normalize_doc({"추정가격_원": "19,100,000,000", "기초금액_원": 21010000000, "연면적_m2": "9,850.5",
                                      "근거문구": [{"항목": "연면적_m2", "원문": "연면적 9,850㎡"}], "지상층수": "4"})
@@ -525,6 +536,7 @@ def run():
         test_institution_prefix()
         test_research_fallback_and_merge()
         test_attach_merge_and_redo()
+        test_output_schema_limits()
         test_awards()
         test_extract_and_verify()
         test_handoff_and_batch(tmp)

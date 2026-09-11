@@ -33,12 +33,14 @@ _STR_FIELDS = ["공사명", "공사위치", "용도", "구조", "공사기간_�
 
 
 def output_schema() -> Dict:
-    """구조화 출력용 JSON 스키마 (모든 필드 필수, 없으면 null). 근거문구는 [{항목, 원문}] 배열로 받아 dict로 변환."""
+    """구조화 출력용 JSON 스키마. 모든 필드 필수이며 값이 없으면 빈 문자열("") — 숫자 필드도 문자열(자릿수만)로 받아 normalize_doc 이 숫자로 바꾼다.
+    API 의 구조화 출력은 union 타입(["number","null"]) 파라미터를 요청당 16개까지만 허용해(초과 시 400 'Schemas contains too many parameters
+    with union types') null 대신 빈 문자열을 쓴다. 근거문구는 [{항목, 원문}] 배열로 받아 dict 로 변환."""
     props: Dict[str, Dict] = {}
     for k in _STR_FIELDS:
-        props[k] = {"type": ["string", "null"]}
+        props[k] = {"type": "string"}
     for k in _NUM_FIELDS:
-        props[k] = {"type": ["number", "null"]}
+        props[k] = {"type": "string"}
     props["사업유형"] = {"type": "string", "enum": ["신축", "증축", "리모델링", "증축·리모델링", "유지보수", "기타"]}
     props["공종"] = {"type": "string", "enum": ["건축", "전기", "정보통신", "소방", "조경", "기계설비", "토목", "기타"]}
     props["신뢰도"] = {"type": "string", "enum": ["high", "medium", "low"]}
@@ -49,14 +51,15 @@ def output_schema() -> Dict:
 
 SYSTEM = (
     "당신은 한국 공공건축 공사 입찰공고문에서 공사개요와 공사금액 구성을 정확히 추출하는 분석가입니다. "
-    "반드시 JSON 객체 하나만 출력합니다(마크다운 코드블록·설명 금지). 문서에 없는 값은 null로 두고 추정하지 않습니다. "
+    "반드시 JSON 객체 하나만 출력합니다(마크다운 코드블록·설명 금지). 문서에 없는 값은 비워 둡니다(null 또는 빈 문자열 \"\") — 추정하지 않습니다. "
+    "숫자 항목은 쉼표·단위 없이 자릿수만 적습니다(예: \"13731.3\", \"23215938082\"). "
     "금액은 원 단위 정수로 변환합니다(예: '1,234백만원'→1234000000, '12.3억원'→1230000000, '천원' 단위 표는 ×1000). "
     "면적은 ㎡ 단위 숫자로 변환하고(평→×3.3058), 층수는 정수로 분리합니다. "
     "기초금액은 통상 추정가격+부가가치세이며, 관급자재(관급자관급액·도급자관급액)는 별도 항목으로 추출합니다. "
     "리모델링·개보수 공사는 '사업유형'을 리모델링으로 하고, 연면적_m2에는 공사 대상 연면적(부분 리모델링이면 대상 부분 면적)을 넣고 "
     "근거문구에 '대상면적'임을 표시합니다. 증축이 함께 있으면 '증축·리모델링'으로 표기합니다. "
     "각 값의 근거가 된 원문 문구를 '근거문구'에 항목명별로 짧게 인용합니다(근거문구는 [{\"항목\": …, \"원문\": …}] 배열). "
-    "메타데이터(공고명·수요기관)는 문서 식별용이며, 금액·면적은 반드시 문서 본문에 표기된 값만 추출하고 없으면 null 로 둡니다."
+    "메타데이터(공고명·수요기관)는 문서 식별용이며, 금액·면적은 반드시 문서 본문에 표기된 값만 추출하고 없으면 비워 둡니다."
 )
 
 _KEYS = ["공사개요", "공사 개요", "규모", "연면적", "건축면적", "층수", "지하", "지상", "구조", "공사기간", "준공",
@@ -209,6 +212,9 @@ def parse_response_text(out: str, model: str = "") -> Dict:
     return data
 
 
+_STRUCTURED_STATE = {"ok": True}      # 한 번 스키마가 거부되면(400) 이 프로세스에서는 더 시도하지 않는다
+
+
 def extract_with_claude(text: str, api_hint: Dict, cfg_llm: Dict) -> Dict:
     """공고문 텍스트 → 구조화 dict. api_hint: {'공고번호','공고명','수요기관'} (문서 식별용 힌트. 금액은 넣지 않는다)."""
     import anthropic  # type: ignore
@@ -217,7 +223,7 @@ def extract_with_claude(text: str, api_hint: Dict, cfg_llm: Dict) -> Dict:
     user = build_user_prompt(text, api_hint, cfg_llm)
     kwargs = dict(model=cfg_llm.get("model", "claude-sonnet-5"), max_tokens=int(cfg_llm.get("max_tokens", 8000)),
                   system=SYSTEM, messages=[{"role": "user", "content": user}])
-    structured = bool(cfg_llm.get("structured_output", True))
+    structured = bool(cfg_llm.get("structured_output", True)) and _STRUCTURED_STATE["ok"]
 
     def _create(**kw):
         nonlocal structured
@@ -228,8 +234,9 @@ def extract_with_claude(text: str, api_hint: Dict, cfg_llm: Dict) -> Dict:
         except anthropic.BadRequestError as e:
             if not structured:
                 raise
-            log.warning("구조화 출력 미지원/거부(%s) → 일반 응답 파싱으로 폴백", str(e)[:120])
+            log.warning("구조화 출력 미지원/거부(%s) → 일반 응답 파싱으로 폴백(이 실행에서는 다시 시도하지 않음)", str(e)[:160])
             structured = False
+            _STRUCTURED_STATE["ok"] = False
             return client.messages.create(**kw)
 
     resp = _create(**kwargs)
