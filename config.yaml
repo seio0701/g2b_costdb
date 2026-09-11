@@ -92,7 +92,7 @@ dedup:
 
 llm:
   model: "claude-sonnet-5"                 # https://docs.claude.com/en/api/overview 에서 최신 모델명 확인 (정확도 우선이면 claude-opus-5)
-  max_tokens: 8000                         # 사고(thinking) 토큰 포함. 잘리면 자동으로 2배 재시도
+  max_tokens: 16000                        # 사고(thinking) 토큰 포함(Sonnet 5 는 기본으로 사고함). 8,000 이면 긴 공고에서 JSON 전에 잘림. 잘린 건은 다음 실행 때 2배로 재요청
   max_input_chars: 60000
   api_key_env: "ANTHROPIC_API_KEY"
   structured_output: true                  # JSON 스키마 강제(output_config.format). 오류 시 자동으로 일반 응답 파싱으로 폴백

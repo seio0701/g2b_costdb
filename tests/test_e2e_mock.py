@@ -32,7 +32,7 @@ def _run(argv):
     return out
 
 
-def _fake_extract(text: str, api_hint: dict, cfg_llm: dict) -> dict:
+def _fake_extract(text: str, api_hint: dict, cfg_llm: dict, max_tokens=None) -> dict:
     """LLM 대신 정규식으로 공고문 텍스트에서 값을 뽑는 모의 추출기."""
     def amt(label):
         m = re.search(label + r"[^\d]{0,20}([\d,]{5,})", text)

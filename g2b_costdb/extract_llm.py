@@ -179,7 +179,7 @@ def estimate_cost(texts: Dict[str, str], keys: List[str], cfg_llm: Dict, usd_krw
             n += 1
             chars += min(len(t), max_chars)
     in_tok = sum(estimate_tokens(min(len(texts[k]), max_chars)) for k in keys if texts.get(k))
-    out_tok = n * 1200
+    out_tok = n * 2000                        # 실측(3,975건 평균 2,012 토큰, 사고 토큰 포함)
     model = cfg_llm.get("model", "claude-sonnet-5")
     pin, pout = PRICE_USD_PER_M.get(model, (5.0, 25.0))
     usd = in_tok / 1e6 * pin + out_tok / 1e6 * pout
@@ -195,11 +195,16 @@ def build_user_prompt(text: str, api_hint: Dict, cfg_llm: Dict) -> str:
             f"[공고문 텍스트]\n{focus_text(text, int(cfg_llm.get('max_input_chars', 60000)))}")
 
 
-def build_request_params(text: str, api_hint: Dict, cfg_llm: Dict, structured: Optional[bool] = None) -> Dict:
-    """messages.create / Batches 요청에 공통으로 쓰는 파라미터."""
+DEFAULT_MAX_TOKENS = 16000     # 사고(thinking) 토큰이 여기에 포함된다 — Sonnet 5 는 기본으로 사고하므로 8,000 이면 긴 공고에서 JSON 전에 잘린다
+
+
+def build_request_params(text: str, api_hint: Dict, cfg_llm: Dict, structured: Optional[bool] = None,
+                         max_tokens: Optional[int] = None) -> Dict:
+    """messages.create / Batches 요청에 공통으로 쓰는 파라미터. max_tokens 를 주면 설정값 대신 사용(잘린 건 재제출용)."""
     if structured is None:
         structured = bool(cfg_llm.get("structured_output", True))
-    params = dict(model=cfg_llm.get("model", "claude-sonnet-5"), max_tokens=int(cfg_llm.get("max_tokens", 8000)),
+    params = dict(model=cfg_llm.get("model", "claude-sonnet-5"),
+                  max_tokens=int(max_tokens or cfg_llm.get("max_tokens", DEFAULT_MAX_TOKENS)),
                   system=SYSTEM, messages=[{"role": "user", "content": build_user_prompt(text, api_hint, cfg_llm)}])
     if structured:
         params["output_config"] = {"format": {"type": "json_schema", "schema": output_schema()}}
@@ -215,13 +220,15 @@ def parse_response_text(out: str, model: str = "") -> Dict:
 _STRUCTURED_STATE = {"ok": True}      # 한 번 스키마가 거부되면(400) 이 프로세스에서는 더 시도하지 않는다
 
 
-def extract_with_claude(text: str, api_hint: Dict, cfg_llm: Dict) -> Dict:
-    """공고문 텍스트 → 구조화 dict. api_hint: {'공고번호','공고명','수요기관'} (문서 식별용 힌트. 금액은 넣지 않는다)."""
+def extract_with_claude(text: str, api_hint: Dict, cfg_llm: Dict, max_tokens: Optional[int] = None) -> Dict:
+    """공고문 텍스트 → 구조화 dict. api_hint: {'공고번호','공고명','수요기관'} (문서 식별용 힌트. 금액은 넣지 않는다).
+    max_tokens: 설정값 대신 쓸 출력 한도(이전에 잘린 건은 2배로 시작)."""
     import anthropic  # type: ignore
 
     client = anthropic.Anthropic(api_key=os.environ.get(cfg_llm.get("api_key_env", "ANTHROPIC_API_KEY")) or None)
     user = build_user_prompt(text, api_hint, cfg_llm)
-    kwargs = dict(model=cfg_llm.get("model", "claude-sonnet-5"), max_tokens=int(cfg_llm.get("max_tokens", 8000)),
+    kwargs = dict(model=cfg_llm.get("model", "claude-sonnet-5"),
+                  max_tokens=int(max_tokens or cfg_llm.get("max_tokens", DEFAULT_MAX_TOKENS)),
                   system=SYSTEM, messages=[{"role": "user", "content": user}])
     structured = bool(cfg_llm.get("structured_output", True)) and _STRUCTURED_STATE["ok"]
 
@@ -408,13 +415,16 @@ def import_results(out_dir: str, valid_keys: Optional[set] = None) -> Tuple[Dict
 BATCH_CHUNK = 500
 
 
-def submit_batches(client, items: List[Tuple[str, str, Dict]], cfg_llm: Dict, chunk: int = BATCH_CHUNK) -> List[Dict]:
-    """items: [(공고키, 텍스트, 힌트)]. 반환: [{'id', 'keys', 'status'}]. 구조화 출력이 거부되면 일반 요청으로 재시도."""
+def submit_batches(client, items: List[Tuple[str, str, Dict]], cfg_llm: Dict, chunk: int = BATCH_CHUNK,
+                   max_tokens_by_key: Optional[Dict[str, int]] = None) -> List[Dict]:
+    """items: [(공고키, 텍스트, 힌트)]. 반환: [{'id', 'keys', 'status'}]. 구조화 출력이 거부되면 일반 요청으로 재시도.
+    max_tokens_by_key: 공고키별 max_tokens 재정의(이전에 max_tokens 에서 잘린 건은 2배로 재제출)."""
     out = []
+    mt = max_tokens_by_key or {}
     for i in range(0, len(items), chunk):
         part = items[i:i + chunk]
         for structured in (bool(cfg_llm.get("structured_output", True)), False):
-            reqs = [{"custom_id": k, "params": build_request_params(t, h, cfg_llm, structured)} for k, t, h in part]
+            reqs = [{"custom_id": k, "params": build_request_params(t, h, cfg_llm, structured, max_tokens=mt.get(k))} for k, t, h in part]
             try:
                 b = client.messages.batches.create(requests=reqs)
                 out.append({"id": b.id, "keys": [k for k, _, _ in part], "status": "submitted", "structured": structured})
@@ -456,5 +466,8 @@ def fetch_batch(client, batch_id: str, model: str = "") -> Tuple[str, Dict[str, 
                 docs[key] = {"_error": f"응답 해석 실패(stop={stop}): {str(e)[:80]} | 응답: {head}"}
         else:
             err = getattr(r.result, "error", None)
-            docs[key] = {"_error": f"batch {rtype}: {getattr(err, 'type', '') or ''} {getattr(err, 'message', '') or ''}".strip()}
+            inner = getattr(err, "error", None)            # ErrorResponse(type='error', error=ErrorObject(type, message)) — 실제 원인은 안쪽
+            etype = getattr(inner, "type", None) or getattr(err, "type", "") or ""
+            emsg = getattr(inner, "message", None) or getattr(err, "message", "") or ""
+            docs[key] = {"_error": f"batch {rtype}: {etype} {str(emsg)[:120]}".strip()}
     return "ended", docs, counts

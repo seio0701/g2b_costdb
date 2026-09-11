@@ -24,7 +24,7 @@ import re
 import shutil
 import sys
 
-from typing import Optional
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -540,6 +540,15 @@ def _verify_and_report(cfg, latest, docs, n_ok=None, n_err=None):
         print(pd.DataFrame(logs)["판정"].value_counts().to_string())
 
 
+def _truncated_retry_tokens(cfg, docs: dict, todo: List[str]) -> Dict[str, int]:
+    """이전 시도가 max_tokens 에서 잘린 공고 → 이번엔 설정값의 2배로. (사고 토큰이 한도를 다 써 JSON 이 나오기 전에 끊긴 경우)"""
+    base = int(cfg["llm"].get("max_tokens", extract_llm.DEFAULT_MAX_TOKENS))
+    out = {k: base * 2 for k in todo if "stop=max_tokens" in str((docs.get(k) or {}).get("_error", ""))}
+    if out:
+        print(f"이전에 max_tokens({base:,})에서 잘린 {len(out)}건은 max_tokens {base * 2:,} 로 다시 요청합니다")
+    return out
+
+
 def _print_estimate(cfg, texts, todo, docs, latest, batch=False):
     est = extract_llm.estimate_cost(texts, todo, cfg["llm"], float(cfg["llm"].get("usd_krw", 1400)))
     if batch:
@@ -661,8 +670,10 @@ def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = Fa
             raise SystemExit(f"환경변수 {env} 가 없습니다. PowerShell 에서 setx {env} \"키\" 로 설정한 뒤 새 터미널에서 다시 실행하세요.")
         import anthropic  # type: ignore
         client = anthropic.Anthropic(api_key=os.environ.get(env) or None)
+        retry_mt = _truncated_retry_tokens(cfg, docs, todo)
         try:
-            submitted = extract_llm.submit_batches(client, [(k, texts[k], hints.get(k, {})) for k in todo], cfg["llm"])
+            submitted = extract_llm.submit_batches(client, [(k, texts[k], hints.get(k, {})) for k in todo], cfg["llm"],
+                                                   max_tokens_by_key=retry_mt)
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
             raise SystemExit(f"[중단] Claude API 인증 실패: {e}. {env} 값을 확인하세요.")
         state["batches"].extend(submitted)
@@ -680,9 +691,10 @@ def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = Fa
         raise SystemExit(f"환경변수 {env} 가 없습니다. PowerShell 에서 setx {env} \"키\" 로 설정한 뒤 새 터미널에서 다시 실행하세요.")
     import anthropic  # type: ignore
     n_ok = n_err = 0
+    retry_mt = _truncated_retry_tokens(cfg, docs, todo)
     for k in todo:
         try:
-            docs[k] = extract_llm.extract_with_claude(texts[k], hints.get(k, {}), cfg["llm"])
+            docs[k] = extract_llm.extract_with_claude(texts[k], hints.get(k, {}), cfg["llm"], max_tokens=retry_mt.get(k))
             n_ok += 1
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
             raise SystemExit(f"[중단] Claude API 인증 실패: {e}. {env} 값을 확인하세요.")

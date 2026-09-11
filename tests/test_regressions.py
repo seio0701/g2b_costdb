@@ -417,6 +417,7 @@ def test_handoff_and_batch(tmp):
         def create(self, requests):
             calls["create"] += 1
             assert all("output_config" in r["params"] for r in requests) and requests[0]["custom_id"] == "K1-000"
+            calls["max_tokens"] = {r["custom_id"]: r["params"]["max_tokens"] for r in requests}
             return NS(id="msgbatch_1", processing_status="in_progress")
 
         def retrieve(self, bid):
@@ -427,16 +428,26 @@ def test_handoff_and_batch(tmp):
         def results(self, bid):
             ok = NS(custom_id="K1-000", result=NS(type="succeeded", message=NS(content=[NS(type="text", text='{"연면적_m2": 1000, "추정가격_원": 100000000, "근거문구": []}')],
                                                                                    usage=NS(input_tokens=500, output_tokens=80))))
-            bad = NS(custom_id="K2-000", result=NS(type="errored", error=NS(type="invalid_request", message="too long")))
+            # 실제 SDK 형태: result.error = ErrorResponse(type='error', error=ErrorObject(type, message)) — 안쪽 원인이 메시지에 남아야 한다
+            bad = NS(custom_id="K2-000", result=NS(type="errored", error=NS(type="error", error=NS(type="overloaded_error", message="Overloaded"))))
             return [ok, bad]
     client = NS(messages=NS(batches=FakeBatches()))
-    sub = extract_llm.submit_batches(client, [(k, texts[k], hints.get(k, {})) for k in ("K1-000", "K2-000")], cfg_llm)
+    sub = extract_llm.submit_batches(client, [(k, texts[k], hints.get(k, {})) for k in ("K1-000", "K2-000")], cfg_llm,
+                                     max_tokens_by_key={"K2-000": 32000})
     assert sub[0]["id"] == "msgbatch_1" and sub[0]["keys"] == ["K1-000", "K2-000"] and calls["create"] == 1
+    assert calls["max_tokens"] == {"K1-000": extract_llm.DEFAULT_MAX_TOKENS, "K2-000": 32000}, calls["max_tokens"]
     st, got, counts = extract_llm.fetch_batch(client, "msgbatch_1", "claude-sonnet-5")
     assert st == "in_progress" and got == {}
     st, got, counts = extract_llm.fetch_batch(client, "msgbatch_1", "claude-sonnet-5")
     assert st == "ended" and got["K1-000"]["연면적_m2"] == 1000.0 and got["K1-000"]["_usage_in"] == 500 and "_error" in got["K2-000"]
+    assert got["K2-000"]["_error"] == "batch errored: overloaded_error Overloaded", got["K2-000"]
     assert counts["succeeded"] == 1 and counts["errored"] == 1
+    # 이전에 잘린 건은 2배 max_tokens 로 재요청 (pipeline._truncated_retry_tokens)
+    from g2b_costdb import pipeline as _pl
+    docs_prev = {"K1-000": {"_error": "응답 해석 실패(stop=max_tokens): JSON 미검출 | 응답: "}, "K2-000": {"_error": "batch errored: api_error x"}}
+    assert _pl._truncated_retry_tokens({"llm": {"max_tokens": 8000}}, docs_prev, ["K1-000", "K2-000", "K3-000"]) == {"K1-000": 16000}
+    assert _pl._truncated_retry_tokens({"llm": {}}, {}, ["K1-000"]) == {}
+    assert extract_llm.build_request_params("본문", {}, {"max_tokens": 8000}, max_tokens=24000)["max_tokens"] == 24000
     params = extract_llm.build_request_params("본문", {"공고명": "x"}, cfg_llm)
     assert params["model"] == "claude-sonnet-5" and params["output_config"]["format"]["type"] == "json_schema" and "본문" in params["messages"][0]["content"]
 
