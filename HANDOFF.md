@@ -145,6 +145,13 @@
 - 다음(사용자 PC): `git pull` → `attach --retry-failed`(오류 7건 + 차수 병합 대상, 수십 분) → `extract --export --redo-low --limit 40` → Cowork 로 llm_out 작성 → `extract --import` → `excel`
   → 연면적 채움률 확인 후 본 처리(배치) 결정. 06 검증로그는 시범 38건 기준 추정가격 정상 23/오류 3, 기초금액≈추정×1.1 경고 29(부가세 면제 공공주택은 1.1 배가 아님 → 규칙 보완 검토).
 
+## 0-14. 2026-09-11 아침 — git pull 충돌(Cowork 가 HANDOFF.md 수정) → 옛 코드로 --retry-failed 실행됨
+- Cowork 세션이 지시문의 "HANDOFF.md 갱신"대로 파일을 고쳐 `git pull` 이 거부됨 → 사용자는 7f5776e 이전 코드로 `attach --retry-failed`(682건, 1h46m) 실행.
+  텍스트 확보 3,820/3,834 그대로(서로게이트 7건·차수 병합은 미반영). `--redo-low` 는 인식 안 됨.
+- 조치: PC 세션은 `HANDOFF_local.md`(gitignore)에만 기록(PROMPTS·CLAUDE.md 갱신). 차수 병합 재처리 대상을 "대표 텍스트 5,000자 미만이거나
+  다른 차수에 공고문·현장설명서류가 있는 공고"로 좁힘.
+- 사용자 안내: `copy HANDOFF.md HANDOFF_cowork_backup.md` → `git checkout -- HANDOFF.md` → `git pull` → `attach --retry-failed` → `extract --export --redo-low --limit 40`.
+
 ## 1. 현재 단계
 - **세션 0(코드 정비) 완료 / 세션 1(환경 점검 + probe)의 사용자 PC 실행 대기**
 - 이번 작업은 네트워크가 막힌 샌드박스(Claude Code 웹)에서 진행되어 **나라장터 API 호출(probe/collect)은 실행하지 못했다.**

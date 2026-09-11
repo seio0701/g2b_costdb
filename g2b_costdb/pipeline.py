@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import sys
 
@@ -340,18 +341,29 @@ def stage_attach(cfg, retry_failed: bool = False, report_only: bool = False):
     if retry_failed and not prev_df.empty and "추출성공" in prev_df.columns:
         err = prev_df["오류"].fillna("").astype(str).str.strip() != "" if "오류" in prev_df.columns else False
         retry_nos = set(prev_df.loc[(prev_df["추출성공"] != "Y") | err, "공고번호"].astype(str))
-        # 다른 차수의 첨부 URL 이 추출노트에 없는 공고(차수 병합 이전에 처리됨)도 다시
+        # 다른 차수의 첨부가 아직 반영되지 않은 공고도 다시 — 단, 대표 텍스트가 짧거나(정정공고서뿐) 다른 차수에 공고문·현장설명서류가 있을 때만
         seen_urls = prev_df.groupby(prev_df["공고번호"].astype(str))["URL"].apply(set).to_dict() if "URL" in prev_df.columns else {}
+        rep_len = {str(r["공고번호"]): len(texts.get(r["공고키"], "")) for _, r in latest.iterrows()}
+        key_doc = re.compile(r"공고문|공고서|입찰공고|현장설명|설계설명|입찰안내|과업")
         n_merge = 0
         for no, rows in others_by_no.items():
-            urls = {str(r.get(f"첨부URL{i}") or "").strip() for r in rows for i in range(1, attach_max + 1)}
-            urls |= {str(r.get(f"현장설명서URL{i}") or "").strip() for r in rows for i in range(1, 6)}
-            urls = {u for u in urls if len(u) >= 5 and u.lower() not in ("nan", "none")}
-            if urls - seen_urls.get(no, set()) and no in set(latest["공고번호"].astype(str)):
+            if no not in rep_len:
+                continue
+            unseen = []
+            for r in rows:
+                for i in range(1, attach_max + 1):
+                    u, nm = str(r.get(f"첨부URL{i}") or "").strip(), str(r.get(f"첨부파일명{i}") or "")
+                    if len(u) >= 5 and u.lower() not in ("nan", "none") and u not in seen_urls.get(no, set()):
+                        unseen.append(nm)
+                for i in range(1, 6):
+                    u = str(r.get(f"현장설명서URL{i}") or "").strip()
+                    if len(u) >= 5 and u.lower() not in ("nan", "none") and u not in seen_urls.get(no, set()):
+                        unseen.append("현장설명서")
+            if unseen and (rep_len.get(no, 0) < 5000 or any(key_doc.search(nm) for nm in unseen)):
                 if no not in retry_nos:
                     n_merge += 1
                 retry_nos.add(no)
-        print(f"[--retry-failed] 추출 실패·오류 기록이 있는 공고와 다른 차수 첨부가 아직 반영되지 않은 공고 {len(retry_nos)}건"
+        print(f"[--retry-failed] 추출 실패·오류 기록이 있는 공고와 다른 차수의 공고문·현장설명서가 아직 반영되지 않은 공고 {len(retry_nos)}건"
               f"(그중 차수 병합 {n_merge}건)을 다시 처리합니다(내려받은 파일은 재사용)")
     processed_nos, n_merged = set(), 0
     for i, (_, row) in enumerate(latest.iterrows(), 1):

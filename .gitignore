@@ -5,3 +5,5 @@ output/
 __pycache__/
 *.pyc
 .env
+HANDOFF_local.md
+HANDOFF_cowork_backup.md
