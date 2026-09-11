@@ -483,17 +483,19 @@ def _extract_context(cfg, limit: Optional[int] = None, redo_low: bool = False):
             docs = json.load(f)
     # 같은 공고가 여러 시설의 대표로 잡혀 latest 에 두 번 나올 수 있다 → 공고키 기준으로 한 번만 추출(비용 중복 방지)
     todo = list(dict.fromkeys(k for k in latest["공고키"] if k in texts and not (k in docs and "_error" not in docs[k])))
+    redo = []
     if redo_low:
         redo = [k for k in _redo_keys(latest, docs) if k in texts]
-        todo = list(dict.fromkeys(todo + redo))
-        print(f"(--redo-low) 신뢰도 low 또는 건축인데 연면적이 없는 기존 추출 {len(redo)}건을 다시 대상에 포함")
+        todo = list(dict.fromkeys(redo + todo))          # 다시 할 것을 맨 앞에 → --limit 과 함께 쓰면 그것부터
+        print(f"(--redo-low) 신뢰도 low 또는 건축인데 연면적이 없는 기존 추출 {len(redo)}건을 다시 대상에 포함(맨 앞)")
     if limit:
         # 시범 추출용: 건축 공종을 먼저, 그 안에서 추정가격이 큰 순(연면적·규모가 있는 본공사 공고문이 앞에 오도록)
         order = latest.assign(_amt=pd.to_numeric(latest["추정가격"], errors="coerce").fillna(0),
                               _arch=(latest["공종"].astype(str) == "건축").astype(int) if "공종" in latest.columns else 0)
         rank = {k: i for i, k in enumerate(order.sort_values(["_arch", "_amt"], ascending=[False, False])["공고키"])}
-        todo = sorted(todo, key=lambda k: rank.get(k, 10**9))[:int(limit)]
-        print(f"(--limit {limit}) 건축 공종·추정가격 큰 순으로 {len(todo)}건만 대상")
+        redo_set = set(redo)
+        todo = sorted(todo, key=lambda k: (0 if k in redo_set else 1, rank.get(k, 10**9)))[:int(limit)]
+        print(f"(--limit {limit}) {'다시 할 것 → ' if redo else ''}건축 공종·추정가격 큰 순으로 {len(todo)}건만 대상")
     hints = {r["공고키"]: {"공고번호": r["공고번호"], "공고명": r["공고명"], "수요기관": r["수요기관"]} for _, r in latest.iterrows()}
     return latest, texts, docs, todo, hints, cache_path
 
