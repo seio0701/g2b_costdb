@@ -452,6 +452,21 @@ def test_handoff_and_batch(tmp):
     assert params["model"] == "claude-sonnet-5" and params["output_config"]["format"]["type"] == "json_schema" and "본문" in params["messages"][0]["content"]
 
 
+def test_included_trades():
+    """한 계약에 묶인 공종 표기(금액은 나누지 않음): 배정 공종 + API 주공종명·부공종명 → 공종 라벨."""
+    from g2b_costdb.classify import included_trades
+    from g2b_costdb.build_excel import bundled_trades_by_project
+    assert included_trades("건축공사", "토목공사업 / 조경공사업", "건축") == "건축·토목·조경"
+    assert included_trades("전기공사", "", "전기") == "전기"
+    assert included_trades("건축공사", "기계설비ㆍ가스공사업 / 토공사업", "건축") == "건축·기계설비·토공사", "라벨 없는 업종명은 '업' 만 떼고 유지"
+    assert included_trades("토목건축공사업", "", "건축") == "건축", "토목건축공사업은 건축 하나로"
+    assert included_trades(None, None, "기타") == "" and included_trades("nan", "nan", "소방") == "소방"
+    tr = pd.DataFrame({"프로젝트ID": ["P1", "P1", "P1", "P2"], "공종": ["건축", "전기", "기계설비", "건축"],
+                       "포함공종_API": ["건축·토목·조경", "전기", "기계설비·가스시설시공", "건축"]})
+    assert bundled_trades_by_project(tr) == {"P1": "건축(+토목·조경); 기계설비(+가스시설시공)"}, bundled_trades_by_project(tr)
+    assert bundled_trades_by_project(pd.DataFrame()) == {}
+
+
 def _hwp_record(tag: int, payload: bytes, level: int = 0) -> bytes:
     size = len(payload)
     if size < 0xFFF:
@@ -562,6 +577,7 @@ def run():
         test_awards()
         test_extract_and_verify()
         test_handoff_and_batch(tmp)
+        test_included_trades()
         test_attachments(tmp)
     print("OK: 회귀 테스트 통과")
 

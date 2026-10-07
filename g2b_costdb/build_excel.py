@@ -76,9 +76,25 @@ def _write_df(ws, df: pd.DataFrame, money_cols: Optional[List[str]] = None, blue
 
 
 NOTICE_COLS = ["공고번호", "공고차수", "공고키", "공고명", "공고종류", "재공고여부", "공고일시", "입찰마감일시", "개찰일시", "공고기관",
-               "수요기관", "공사현장지역", "추정가격", "기초금액", "주공종명", "면허제한업종", "공종", "공종근거", "사업유형", "사업유형_원분류",
+               "수요기관", "공사현장지역", "추정가격", "기초금액", "주공종명", "부공종명", "면허제한업종", "공종", "공종근거", "사업유형", "사업유형_원분류",
                "낙찰금액_API", "낙찰률_API", "낙찰자", "참가업체수", "낙찰하한율", "이전공고번호",
                "시설ID", "시설명", "프로젝트ID", "프로젝트키", "최신여부", "대체공고번호", "대표선정사유", "사전규격번호", "첨부파일수", "상세URL"]
+
+
+def bundled_trades_by_project(trade: pd.DataFrame) -> Dict[str, str]:
+    """프로젝트별 통합발주 표기: 04 행 중 포함공종이 배정 공종 외에 더 있는 공고만 '건축(+토목·조경); 기계설비(+가스)' 로."""
+    out: Dict[str, List[str]] = {}
+    if trade is None or trade.empty or "포함공종_API" not in trade.columns:
+        return {}
+    for pid, tr, inc in zip(trade["프로젝트ID"], trade["공종"], trade["포함공종_API"]):
+        parts = [p for p in str(inc or "").split("·") if p]
+        extra = [p for p in parts if p != str(tr)]
+        if not extra:
+            continue
+        item = f"{tr}(+{'·'.join(extra)})"
+        if item not in out.setdefault(str(pid), []):
+            out[str(pid)].append(item)
+    return {k: "; ".join(v) for k, v in out.items()}
 
 
 def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest: pd.DataFrame,
@@ -98,6 +114,7 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
         ["프로젝트ID", "시설ID-사업유형코드(N 신축 / E 증축 / R 리모델링 / ER 증축·리모델링). 같은 시설의 신축과 리모델링은 별도 프로젝트로 집계되며, ㎡당 공사비 비교는 반드시 사업유형이 같은 프로젝트끼리 할 것."],
         ["색상", "파란 글자=원천값(API/문서), 검은 글자=수식, 노란 배경=사용자 입력·검수 셀 (01 시트의 연면적·층수 등은 문서 추출값이며 직접 고치면 05 ㎡당 공사비에 반영됨)"],
         ["단위", "금액: 원 / 면적: ㎡ / 기간: 일"],
+        ["포함공종", "04 '포함공종_API' = 그 공고(계약) 금액에 묶여 있는 공종(API 주공종명·부공종명 기준, 예: 건축·토목·조경). 금액은 공종별로 나뉘지 않으므로 05 의 '건축(수식)' 은 그 안의 토목·조경을 포함한 값. 05 '통합발주_포함공종_API' 는 프로젝트의 통합발주 공고만 모아 표기. '분리발주_언급공종_문서' 는 공고문이 별도 발주라고 언급한 공종(LLM 추출, 참고)."],
         [],
         ["시트", "내용"],
         ["01_시설마스터", "시설(프로젝트) 단위 개요·공종 커버리지"],
@@ -138,7 +155,8 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
 
     # ── 04 공종별 ──
     ws = wb.create_sheet(S_TRADE)
-    tcols = ["프로젝트ID", "시설ID", "시설명", "사업유형", "공종", "공고번호", "공고차수", "공고명", "공고일시", "수요기관",
+    tcols = ["프로젝트ID", "시설ID", "시설명", "사업유형", "공종", "포함공종_API", "분리발주_언급공종_문서",
+             "공고번호", "공고차수", "공고명", "공고일시", "수요기관",
              "추정가격_API", "기초금액_API", "부가세(수식)", "관급자재_API", "도급자관급액_API", "관급자관급액_API",
              "도급자관급액_문서", "관급자관급액_문서", "총공사비(수식)",
              "예산금액_API", "낙찰금액_API", "낙찰률_API", "낙찰률(수식)", "낙찰자", "낙찰하한율",
@@ -151,7 +169,7 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
     _write_df(ws, t, money_cols=["추정가격_API", "기초금액_API", "부가세(수식)", "관급자재_API", "도급자관급액_API", "관급자관급액_API",
                                  "도급자관급액_문서", "관급자관급액_문서", "총공사비(수식)", "예산금액_API", "낙찰금액_API", "추정가격_문서", "기초금액_문서"],
               blue_cols=[c for c in tcols if "(수식)" not in c],
-              widths={"시설명": 30, "공고명": 55, "근거문구": 50, "출처파일": 30, "상세URL": 40})
+              widths={"시설명": 30, "공고명": 55, "포함공종_API": 22, "분리발주_언급공종_문서": 22, "근거문구": 50, "출처파일": 30, "상세URL": 40})
     col = {c: get_column_letter(i + 1) for i, c in enumerate(tcols)}
     for r in range(2, ws.max_row + 1):
         P, B = f"{col['추정가격_API']}{r}", f"{col['기초금액_API']}{r}"
@@ -177,12 +195,13 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
     ws = wb.create_sheet(S_FAC)
     fcols = ["프로젝트ID", "시설ID", "시설명", "사업유형", "표2_대분류", "표2_중분류", "수요기관", "연면적_m2", "지상층수", "지하층수", "구조",
              "공고연도"] + [f"{tr}(수식)" for tr in TRADES] + ["총공사비합계(수식)", "㎡당공사비_원(수식)", "건설공사비지수_보정계수(입력)",
-                                                              "보정_㎡당공사비_원(수식)", "공종누락경고(수식)", "공고건수_최신", "메모"]
+                                                              "보정_㎡당공사비_원(수식)", "공종누락경고(수식)", "통합발주_포함공종_API", "공고건수_최신", "메모"]
     f5 = pd.DataFrame({c: facility[c] if c in facility.columns else None for c in
                        ["프로젝트ID", "시설ID", "시설명", "사업유형", "표2_대분류", "표2_중분류", "수요기관", "연면적_m2", "지상층수", "지하층수", "구조",
                         "공고건수_최신"]}, index=facility.index)
     f5["공고연도"] = facility["최종공고일"].astype(str).str[:4] if ("최종공고일" in facility.columns and len(facility)) else None
     f5["건설공사비지수_보정계수(입력)"] = 1.0
+    f5["통합발주_포함공종_API"] = f5["프로젝트ID"].map(bundled_trades_by_project(trade))
     f5["메모"] = ""
     for c in fcols:
         if c not in f5.columns:
@@ -191,8 +210,8 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
     _write_df(ws, f5, money_cols=["연면적_m2"] + [f"{tr}(수식)" for tr in TRADES] + ["총공사비합계(수식)", "㎡당공사비_원(수식)",
                                                                               "보정_㎡당공사비_원(수식)"],
               blue_cols=["프로젝트ID", "시설ID", "시설명", "사업유형", "표2_대분류", "표2_중분류", "수요기관", "연면적_m2", "지상층수", "지하층수", "구조",
-                         "공고연도", "공고건수_최신"],
-              yellow_cols=["건설공사비지수_보정계수(입력)", "메모"], widths={"시설명": 30, "공종누락경고(수식)": 28})
+                         "공고연도", "공고건수_최신", "통합발주_포함공종_API"],
+              yellow_cols=["건설공사비지수_보정계수(입력)", "메모"], widths={"시설명": 30, "공종누락경고(수식)": 28, "통합발주_포함공종_API": 34})
     fc = {c: get_column_letter(i + 1) for i, c in enumerate(fcols)}
     tot_rng = f"'{S_TRADE}'!${col['총공사비(수식)']}:${col['총공사비(수식)']}"
     id_rng, tr_rng = f"'{S_TRADE}'!${col['프로젝트ID']}:${col['프로젝트ID']}", f"'{S_TRADE}'!${col['공종']}:${col['공종']}"

@@ -28,7 +28,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-from . import attachments, collect, dedup, discover, extract_llm
+from . import attachments, collect, dedup, discover, extract_llm, classify
 from .api_client import ApiError
 from .build_excel import build_workbook
 from .classify import ROOT, load_config
@@ -718,7 +718,9 @@ def assemble_trade_table(latest: pd.DataFrame, docs: dict) -> pd.DataFrame:
         ev = d.get("근거문구") or {}
         rows.append({
             "프로젝트ID": r["프로젝트ID"], "시설ID": r["시설ID"], "시설명": r["시설명"], "사업유형": r["사업유형"],
-            "공종": r["공종"], "공고번호": r["공고번호"], "공고차수": r["공고차수"],
+            "공종": r["공종"], "포함공종_API": classify.included_trades(r.get("주공종명"), r.get("부공종명"), r["공종"]),
+            "분리발주_언급공종_문서": d.get("분리발주_언급공종") or "",
+            "공고번호": r["공고번호"], "공고차수": r["공고차수"],
             "공고명": r["공고명"], "공고일시": r["공고일시"], "수요기관": r["수요기관"],
             "추정가격_API": r.get("추정가격"), "기초금액_API": r.get("기초금액"),
             "관급자재_API": r.get("관급자재_API"), "도급자관급액_API": r.get("도급자관급액_API"), "관급자관급액_API": r.get("관급자관급액_API"),

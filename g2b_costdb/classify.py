@@ -262,31 +262,51 @@ def work_type_for(notice_name: str, keyword: str = "", facility_name: str = "") 
     return classify_work_type(notice_name, kw["work_type_rules"], anc)
 
 
+def match_trade_label(text: str, rules: Dict[str, List[str]]) -> Optional[str]:
+    """업종명·공종명·공고명 한 조각 → 8개 공종 라벨(없으면 None)."""
+    t = re.sub(r"[\sㆍ·・∙]", "", text or "")     # '기계설비ㆍ가스공사업' 같은 구분자 제거
+    if not t:
+        return None
+    hits = [label for label, words in rules.items() if any(re.sub(r"[\sㆍ·・∙]", "", w) in t for w in words)]
+    if not hits:
+        return None
+    # '토목건축공사업' 처럼 토목·건축이 함께 걸리면 건축(건물 본공사)으로 본다
+    if "건축" in hits and "토목" in hits:
+        hits.remove("토목")
+    for label in rules:                      # 규칙 순서 = 우선순위(건축은 마지막)
+        if label in hits and label != "건축":
+            return label
+    return "건축" if "건축" in hits else None
+
+
 def classify_trade(notice_name: str = "", main_cnstty: str = "", license_names: str = "",
                    rules: Optional[Dict[str, List[str]]] = None) -> Tuple[str, str]:
     """공종 분류. 우선순위: 면허제한 업종명 → 주공종명 → 공고명. 반환 (공종, 근거)."""
     rules = rules or load_keywords()["trade_rules"]
-
-    def _match(text: str) -> Optional[str]:
-        t = re.sub(r"[\sㆍ·・∙]", "", text or "")     # '기계설비ㆍ가스공사업' 같은 구분자 제거
-        if not t:
-            return None
-        hits = [label for label, words in rules.items() if any(re.sub(r"[\sㆍ·・∙]", "", w) in t for w in words)]
-        if not hits:
-            return None
-        # '토목건축공사업' 처럼 토목·건축이 함께 걸리면 건축(건물 본공사)으로 본다
-        if "건축" in hits and "토목" in hits:
-            hits.remove("토목")
-        for label in rules:                      # 규칙 순서 = 우선순위(건축은 마지막)
-            if label in hits and label != "건축":
-                return label
-        return "건축" if "건축" in hits else None
-
     for src, text in (("면허제한", license_names), ("주공종명", main_cnstty), ("공고명", notice_name)):
-        lab = _match(text)
+        lab = match_trade_label(text, rules)
         if lab:
             return lab, src
     return "기타", "미분류"
+
+
+def included_trades(main_cnstty: str = "", sub_cnstty: str = "", assigned: str = "",
+                    rules: Optional[Dict[str, List[str]]] = None) -> str:
+    """한 공고(계약)에 포함된 공종 표기: 배정 공종 + API 주공종명·부공종명(업종명, ' / ' 구분)을 공종 라벨로 바꿔 '건축·토목·조경' 형태로.
+    금액은 나누지 않는다 — 어떤 공종이 한 금액 안에 묶여 있는지만 보여 준다. 라벨로 못 바꾼 업종명은 '…업' 을 떼고 그대로 둔다."""
+    rules = rules or load_keywords()["trade_rules"]
+    out: List[str] = []
+    assigned = str(assigned or "").strip()
+    if assigned and assigned not in ("기타", "nan", "None"):
+        out.append(assigned)
+    for raw in [main_cnstty] + re.split(r"\s*/\s*", str(sub_cnstty or "")):
+        raw = str(raw or "").strip()
+        if not raw or raw.lower() in ("nan", "none"):
+            continue
+        lab = match_trade_label(raw, rules) or re.sub(r"업$", "", raw)      # '토공사업'→'토공사', '가스시설시공업'→'가스시설시공'
+        if lab and lab not in out:
+            out.append(lab)
+    return "·".join(out)
 
 
 def classify_notice_kind(kind: str = "", re_notice: str = "", reg_type: str = "", notice_name: str = "") -> str:

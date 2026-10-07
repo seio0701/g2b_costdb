@@ -197,6 +197,16 @@ def run():
         assert ws4.cell(r4, h4.index("낙찰금액_API") + 1).value == 28500000000 and ws4.cell(r4, h4.index("낙찰률_API") + 1).value == 86.36, "낙찰 참고 컬럼(차수 001 로 연결)"
         assert ws4.cell(r4, h4.index("낙찰자") + 1).value == "가상건설(주)"
         assert str(ws4.cell(r4, h4.index("낙찰률(수식)") + 1).value).startswith("=IF(")
+        inc = ws4.cell(r4, h4.index("포함공종_API") + 1).value
+        assert inc == "건축·토목", f"통합발주 공고의 포함 공종(대표 차수 001 의 주공종명+부공종명): {inc!r}"
+        r4e = next(r for r in range(2, ws4.max_row + 1) if ws4.cell(r, h4.index("공고번호") + 1).value == "R24010002")
+        assert ws4.cell(r4e, h4.index("포함공종_API") + 1).value == "전기"
+        ws5 = wb["05_공사비DB_시설합산"]; h5 = [c.value for c in ws5[1]]
+        pid4 = ws4.cell(r4, h4.index("프로젝트ID") + 1).value
+        r5 = next(r for r in range(2, ws5.max_row + 1) if ws5.cell(r, h5.index("프로젝트ID") + 1).value == pid4)
+        b5 = ws5.cell(r5, h5.index("통합발주_포함공종_API") + 1).value
+        assert b5 == "건축(+토목)", f"05 프로젝트 단위 통합발주 표기: {b5!r}"
+        assert "부공종명" in [c.value for c in wb["03_공고목록_최신"][1]]
         hist_df = pd.read_parquet(data("notices_hist.parquet"))
         e_row = hist_df[hist_df["공고번호"] == "R24010002"].iloc[0]
         assert e_row["낙찰자"] == "가상전기(주)" and e_row["낙찰금액_API"] == 2574000000 and e_row["참가업체수"] == 7, "재개찰 2행 중 최신 개찰일시 행"
