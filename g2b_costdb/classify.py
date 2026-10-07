@@ -290,6 +290,83 @@ def classify_trade(notice_name: str = "", main_cnstty: str = "", license_names: 
     return "기타", "미분류"
 
 
+# 문서(공고문·현장설명서)의 공종 표기 → 8개 공종 라벨. 긴 단어가 먼저 와야 '기계설비' 가 '기계' 로, '정보통신' 이 '통신' 으로 깨지지 않는다
+_DOC_TRADE_WORDS = [("기계설비", "기계설비"), ("기계", "기계설비"), ("정보통신", "정보통신"), ("통신", "정보통신"), ("소방시설", "소방"),
+                    ("소방", "소방"), ("전기", "전기"), ("실내건축", "건축"), ("건축", "건축"), ("토목", "토목"), ("조경", "조경"),
+                    ("철거", "철거"), ("해체", "철거"), ("가스", "가스"), ("승강기", "승강기"), ("창호", "창호")]
+_DOC_SEP = re.compile(r"[\s,、，·ㆍ・/∙및와과\(\)\[\]\-–:：]+")
+_DOC_NOISE = re.compile(r"공사업|공사|시설|설비|부문|분야|공종|구분|포함|일식|등|외")
+_DOC_ANCHOR = re.compile(r"공\s*사\s*금\s*액|공사비\s*(?:내역|구성|산출|총괄)|총\s*공\s*사\s*비|도\s*급\s*비|공\s*사\s*개\s*요|공\s*종\s*구\s*분")
+_DOC_EXCLUDE = re.compile(r"분리\s*발주|별도\s*발주|별도\s*계약|별도\s*시행|타\s*공사")   # '관급'·'제외' 는 표 머리글('관급자재비', '부가세 제외')에 흔해 넣지 않는다
+
+
+def _doc_labels(line: str) -> Tuple[List[str], str]:
+    """한 줄에서 공종 라벨을 등장 순서대로 뽑고, 공종어를 지운 나머지를 돌려준다."""
+    rest, found = line, []
+    for w, lab in _DOC_TRADE_WORDS:
+        i = rest.find(w)
+        while i >= 0:
+            found.append((i, lab))
+            rest = rest[:i] + " " * len(w) + rest[i + len(w):]
+            i = rest.find(w)
+    labels: List[str] = []
+    for _, lab in sorted(found):
+        if lab not in labels:
+            labels.append(lab)
+    return labels, rest
+
+
+def normalize_trade_list(s: str) -> str:
+    """LLM 이 적은 '건축, 토목, 기계, 조경' → '건축·토목·기계설비·조경'. 라벨로 못 바꾼 어절은 '공사' 를 떼고 그대로."""
+    out: List[str] = []
+    for tok in _DOC_SEP.split(str(s or "")):
+        tok = tok.strip()
+        if not tok or tok.lower() in ("nan", "none"):
+            continue
+        labels, rest = _doc_labels(tok)
+        if labels:
+            out.extend(l for l in labels if l not in out)
+        else:
+            raw = re.sub(r"(공사업|공사|업)$", "", tok)
+            if 1 < len(raw) <= 12 and raw not in out and not _DOC_NOISE.fullmatch(raw):
+                out.append(raw)
+    return "·".join(out)
+
+
+def included_trades_from_text(text: str, assigned: str = "", window: int = 1500) -> str:
+    """공고문·현장설명서 텍스트의 공사금액 표에서 '건축, 토목, 기계, 조경' 같은 공종 나열 셀을 찾아 라벨로 돌려준다(LLM 없이, 규칙).
+    조건: 공사금액·공사개요 등 앵커 뒤 window 자 안의 짧은 줄(60자 이하)이 공종어·구분자만으로 이루어지고 공종이 2개 이상이며,
+    그 줄과 앞 두 줄에 분리발주·별도발주·제외 같은 말이 없고, assigned(배정 공종)가 있으면 그 공종이 목록에 들어 있어야 한다."""
+    if not text:
+        return ""
+    for m in _DOC_ANCHOR.finditer(text):
+        lines = text[m.end(): m.end() + window].splitlines()
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if not line or len(line) > 60:
+                continue
+            ctx = " ".join(l.strip() for l in lines[max(0, i - 2): i + 1])
+            if _DOC_EXCLUDE.search(ctx):
+                continue
+            labels, rest = _doc_labels(line)
+            if len(labels) < 2 or (assigned and assigned not in labels):
+                continue
+            leftover = _DOC_NOISE.sub("", _DOC_SEP.sub("", rest))
+            if len(leftover) <= 4:
+                return "·".join(labels)
+    return ""
+
+
+def merge_trade_lists(*lists: str, assigned: str = "") -> str:
+    """API·문서 포함공종을 합친다(배정 공종 먼저, 등장 순서 유지, 중복 제거)."""
+    out: List[str] = []
+    for item in [assigned] + [p for s in lists for p in str(s or "").split("·")]:
+        item = str(item or "").strip()
+        if item and item.lower() not in ("nan", "none", "기타") and item not in out:
+            out.append(item)
+    return "·".join(out)
+
+
 def included_trades(main_cnstty: str = "", sub_cnstty: str = "", assigned: str = "",
                     rules: Optional[Dict[str, List[str]]] = None) -> str:
     """한 공고(계약)에 포함된 공종 표기: 배정 공종 + API 주공종명·부공종명(업종명, ' / ' 구분)을 공종 라벨로 바꿔 '건축·토목·조경' 형태로.

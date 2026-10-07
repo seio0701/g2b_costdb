@@ -199,13 +199,16 @@ def run():
         assert str(ws4.cell(r4, h4.index("낙찰률(수식)") + 1).value).startswith("=IF(")
         inc = ws4.cell(r4, h4.index("포함공종_API") + 1).value
         assert inc == "건축·토목", f"통합발주 공고의 포함 공종(대표 차수 001 의 주공종명+부공종명): {inc!r}"
+        doc_inc = (ws4.cell(r4, h4.index("포함공종_문서") + 1).value, ws4.cell(r4, h4.index("포함공종_출처") + 1).value,
+                   ws4.cell(r4, h4.index("포함공종(종합)") + 1).value)
+        assert doc_inc == ("건축·토목·조경", "규칙", "건축·토목·조경"), f"현장설명서 공사금액 표의 공종 나열(텍스트 규칙, 차수 병합 텍스트): {doc_inc!r}"
         r4e = next(r for r in range(2, ws4.max_row + 1) if ws4.cell(r, h4.index("공고번호") + 1).value == "R24010002")
         assert ws4.cell(r4e, h4.index("포함공종_API") + 1).value == "전기"
         ws5 = wb["05_공사비DB_시설합산"]; h5 = [c.value for c in ws5[1]]
         pid4 = ws4.cell(r4, h4.index("프로젝트ID") + 1).value
         r5 = next(r for r in range(2, ws5.max_row + 1) if ws5.cell(r, h5.index("프로젝트ID") + 1).value == pid4)
-        b5 = ws5.cell(r5, h5.index("통합발주_포함공종_API") + 1).value
-        assert b5 == "건축(+토목)", f"05 프로젝트 단위 통합발주 표기: {b5!r}"
+        b5 = ws5.cell(r5, h5.index("통합발주_포함공종") + 1).value
+        assert b5 == "건축(+토목·조경)", f"05 프로젝트 단위 통합발주 표기(API+문서 합집합): {b5!r}"
         assert "부공종명" in [c.value for c in wb["03_공고목록_최신"][1]]
         hist_df = pd.read_parquet(data("notices_hist.parquet"))
         e_row = hist_df[hist_df["공고번호"] == "R24010002"].iloc[0]

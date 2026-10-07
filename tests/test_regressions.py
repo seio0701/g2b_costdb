@@ -468,6 +468,30 @@ def test_included_trades():
     from g2b_costdb.build_excel import _clean
     assert _clean("도장\x01·습식·방수·석공사업") == "도장·습식·방수·석공사업", "API 업종명의 제어문자는 Excel 셀에서 제거"
     assert _clean("a\ud800b") == "ab" and _clean("정상") == "정상"
+    # 문서 쪽: 현장설명서 공사금액 표의 '건축, 토목, 기계, 조경' 셀(실제 HWP 추출 형태 — 셀마다 한 줄, 빈 줄 섞임)
+    from g2b_costdb.classify import included_trades_from_text, normalize_trade_list, merge_trade_lists
+    doc = ("2. 위 치 :\n\n - 서귀포시 성산읍\n\n 3. 공사금액\n\n   (단위: 원/ 부가가치세 포함)\n\n구 분\n\n총공사비\n\n도급비\n\n관급자재비\n\n"
+           "건축, 토목, 기계, 조경\n\n9,394,053,000\n\n7,893,683,000\n\n1,500,370,000\n")
+    assert included_trades_from_text(doc, "건축") == "건축·토목·기계설비·조경", included_trades_from_text(doc, "건축")
+    assert included_trades_from_text("1. 공사개요\n분리발주 공종\n전기, 통신, 소방\n", "건축") == "", "분리발주 목록은 포함공종이 아님"
+    assert included_trades_from_text("공사금액\n구분\n전기, 통신, 소방공사\n", "건축") == "", "배정 공종(건축)이 없는 목록은 채택하지 않음"
+    assert included_trades_from_text("공사개요\n본 공사는 건축, 토목, 조경 등 모든 공종을 포함한 턴키 공사이며 상세는 별첨 참조\n", "건축") == "", "긴 문장은 채택하지 않음"
+    assert included_trades_from_text("2. 공사금액(부가가치세 포함)\n구 분\n건축공사·기계설비공사·조경공사\n1,000원\n", "건축") == "건축·기계설비·조경"
+    assert included_trades_from_text("", "건축") == ""
+    assert normalize_trade_list("건축, 토목, 기계, 조경") == "건축·토목·기계설비·조경" and normalize_trade_list("건축공사 및 토목공사(철거 포함)") == "건축·토목·철거"
+    assert merge_trade_lists("건축·토목", "건축·토목·기계설비·조경", assigned="건축") == "건축·토목·기계설비·조경"
+    assert merge_trade_lists("", "", assigned="소방") == "소방" and merge_trade_lists("nan", None, assigned="기타") == ""
+    # LLM 값이 있으면 규칙보다 우선, 없으면 텍스트 규칙으로 채움 (assemble_trade_table)
+    from g2b_costdb.pipeline import assemble_trade_table
+    latest = pd.DataFrame([{"공고키": "A-000", "프로젝트ID": "P1", "시설ID": "F1", "시설명": "s", "사업유형": "신축", "공종": "건축",
+                            "공고번호": "A", "공고차수": "000", "공고명": "n", "공고일시": "2025-01-01", "수요기관": "d", "주공종명": "건축공사업", "부공종명": ""},
+                           {"공고키": "B-000", "프로젝트ID": "P1", "시설ID": "F1", "시설명": "s", "사업유형": "신축", "공종": "건축",
+                            "공고번호": "B", "공고차수": "000", "공고명": "n", "공고일시": "2025-01-01", "수요기관": "d", "주공종명": "건축공사업", "부공종명": "토목공사업"}])
+    docs = {"A-000": {"포함공종_문서": "건축, 토목, 기계"}, "B-000": {}}
+    tt = assemble_trade_table(latest, docs, {"B-000": doc})
+    a, b = tt[tt["공고번호"] == "A"].iloc[0], tt[tt["공고번호"] == "B"].iloc[0]
+    assert (a["포함공종_문서"], a["포함공종_출처"], a["포함공종(종합)"]) == ("건축·토목·기계설비", "LLM", "건축·토목·기계설비"), a.to_dict()
+    assert (b["포함공종_API"], b["포함공종_문서"], b["포함공종_출처"], b["포함공종(종합)"]) == ("건축·토목", "건축·토목·기계설비·조경", "규칙", "건축·토목·기계설비·조경"), b.to_dict()
 
 
 def _hwp_record(tag: int, payload: bytes, level: int = 0) -> bytes:

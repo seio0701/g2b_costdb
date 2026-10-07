@@ -709,16 +709,25 @@ def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = Fa
     _verify_and_report(cfg, latest, docs, n_ok, n_err)
 
 
-def assemble_trade_table(latest: pd.DataFrame, docs: dict) -> pd.DataFrame:
+def assemble_trade_table(latest: pd.DataFrame, docs: dict, texts: Optional[dict] = None) -> pd.DataFrame:
+    """04 시트 행. 포함공종: API(주공종명·부공종명) / 문서(LLM 필드 '포함공종_문서', 없으면 텍스트 규칙) / 종합(합집합)."""
     rows = []
+    texts = texts or {}
     for _, r in latest.iterrows():
         d = docs.get(r["공고키"], {}) or {}
         if "_error" in d:
             d = {}
         ev = d.get("근거문구") or {}
+        inc_api = classify.included_trades(r.get("주공종명"), r.get("부공종명"), r["공종"])
+        inc_doc, inc_src = classify.normalize_trade_list(d.get("포함공종_문서") or ""), "LLM"
+        if not inc_doc:
+            inc_doc, inc_src = classify.included_trades_from_text(texts.get(r["공고키"], ""), assigned=str(r["공종"])), "규칙"
+        if not inc_doc:
+            inc_src = ""
         rows.append({
             "프로젝트ID": r["프로젝트ID"], "시설ID": r["시설ID"], "시설명": r["시설명"], "사업유형": r["사업유형"],
-            "공종": r["공종"], "포함공종_API": classify.included_trades(r.get("주공종명"), r.get("부공종명"), r["공종"]),
+            "공종": r["공종"], "포함공종_API": inc_api, "포함공종_문서": inc_doc, "포함공종_출처": inc_src,
+            "포함공종(종합)": classify.merge_trade_lists(inc_api, inc_doc, assigned=str(r["공종"])),
             "분리발주_언급공종_문서": d.get("분리발주_언급공종") or "",
             "공고번호": r["공고번호"], "공고차수": r["공고차수"],
             "공고명": r["공고명"], "공고일시": r["공고일시"], "수요기관": r["수요기관"],
@@ -763,7 +772,9 @@ def stage_excel(cfg):
     logs = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     notes = pd.read_parquet(_p(cfg, "notes_attach.parquet")) if os.path.exists(_p(cfg, "notes_attach.parquet")) else pd.DataFrame()
     fac = enrich_facility(dedup.facility_summary(latest, hist), latest, docs)
-    trade = assemble_trade_table(latest, docs)
+    texts_path = _p(cfg, "texts.json")
+    texts = json.load(open(texts_path, encoding="utf-8")) if os.path.exists(texts_path) else {}
+    trade = assemble_trade_table(latest, docs, texts)
     os.makedirs(cfg["paths"]["out_dir"], exist_ok=True)
     out = os.path.join(cfg["paths"]["out_dir"], cfg["paths"]["excel_name"])
     try:
