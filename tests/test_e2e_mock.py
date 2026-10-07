@@ -210,6 +210,8 @@ def run():
         b5 = ws5.cell(r5, h5.index("통합발주_포함공종") + 1).value
         assert b5 == "건축(+토목·조경)", f"05 프로젝트 단위 통합발주 표기(API+문서 합집합): {b5!r}"
         assert "부공종명" in [c.value for c in wb["03_공고목록_최신"][1]]
+        h1 = [c.value for c in wb["01_시설마스터"][1]]
+        assert h1.index("대지면적_m2") == h1.index("건축면적_m2") + 1, "01 시트에 대지면적 열(건축면적 뒤)"
         hist_df = pd.read_parquet(data("notices_hist.parquet"))
         e_row = hist_df[hist_df["공고번호"] == "R24010002"].iloc[0]
         assert e_row["낙찰자"] == "가상전기(주)" and e_row["낙찰금액_API"] == 2574000000 and e_row["참가업체수"] == 7, "재개찰 2행 중 최신 개찰일시 행"

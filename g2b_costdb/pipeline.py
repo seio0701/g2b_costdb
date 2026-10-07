@@ -746,7 +746,7 @@ def assemble_trade_table(latest: pd.DataFrame, docs: dict, texts: Optional[dict]
 def enrich_facility(fac: pd.DataFrame, latest: pd.DataFrame, docs: dict) -> pd.DataFrame:
     """프로젝트(시설×사업유형) 개요(연면적·층수·구조·용도·공사기간)는 건축 공종 문서 → 없으면 다른 공종 문서 순으로 채움."""
     fac = fac.copy()
-    cols = ["연면적_m2", "건축면적_m2", "지하층수", "지상층수", "구조", "용도", "공사기간_일"]
+    cols = ["연면적_m2", "건축면적_m2", "대지면적_m2", "지하층수", "지상층수", "구조", "용도", "공사기간_일"]
     for c in cols:
         fac[c] = None
     for i, f in fac.iterrows():
