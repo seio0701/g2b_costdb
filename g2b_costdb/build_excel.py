@@ -25,7 +25,12 @@ MONEY = "#,##0;(#,##0);-"
 TRADES = ["건축", "전기", "정보통신", "소방", "조경", "기계설비", "토목", "기타"]
 
 S_TRADE = "04_공사비DB_공종별"
+S_TRADE_DETAIL = "04b_공종세부내역(문서)"
 S_FAC = "05_공사비DB_시설합산"
+DETAIL_COLS = ["프로젝트ID", "시설ID", "시설명", "사업유형", "상위공종", "공고번호", "공고차수", "공고키", "세부공종", "항목명_원문",
+               "금액_원_문서", "비율(수식)", "배분금액(수식)", "금액기준", "관급자재_포함", "단위", "집계표합계_원_문서", "출처파일", "신뢰도", "근거문구"]
+DETAIL_EXCLUDED = ["공통가설", "간접비", "관급자재", "부가세"]           # 비율 배분의 분자·분모에서 빼는 행
+DETAIL_ALLOC_TRADES = ["전기", "정보통신", "소방", "조경", "기계설비", "토목", "철거", "기타"]   # 05 문서배분 열
 
 
 _ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff]")   # openpyxl 이 거부하는 제어문자·서로게이트(API 업종명·LLM 출력에 섞여 들어옴)
@@ -105,7 +110,8 @@ def bundled_trades_by_project(trade: pd.DataFrame) -> Dict[str, str]:
 
 
 def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest: pd.DataFrame,
-                   trade: pd.DataFrame, logs: pd.DataFrame, notes: pd.DataFrame, meta: Optional[Dict] = None) -> None:
+                   trade: pd.DataFrame, logs: pd.DataFrame, notes: pd.DataFrame, meta: Optional[Dict] = None,
+                   trade_detail: Optional[pd.DataFrame] = None) -> None:
     wb = Workbook()
     # ── README ──
     ws = wb.active
@@ -128,7 +134,8 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
         ["02_공고목록_전체", "수집된 모든 공고(차수·재공고·취소 이력 포함)"],
         ["03_공고목록_최신", "프로젝트키(시설×공종)당 대표 공고"],
         ["04_공사비DB_공종별", "대표 공고 기준 공종별 금액 구성(API+문서), 총공사비 수식 (관급자재는 API 값 우선, 없으면 문서 추출값)"],
-        ["05_공사비DB_시설합산", "시설 단위 공종 합산(SUMIFS), ㎡당 공사비, 보정계수 입력, 공종 누락 경고"],
+        ["04b_공종세부내역(문서)", "건축·통합발주 공고의 첨부 내역서 집계표에서 읽은 공종별 금액(2차 추출, extract-trades). 비율 = 금액 / 공종 행 합(공통가설·간접비·관급자재·부가세 제외), 배분금액 = 비율 × 04 총공사비. 참고용이며 05 총공사비합계에는 더하지 않는다"],
+        ["05_공사비DB_시설합산", "시설 단위 공종 합산(SUMIFS), ㎡당 공사비, 보정계수 입력, 공종 누락 경고, 문서배분_*(04b 비율 배분, 참고)·건축_순건축추정·문서배분_중복경고"],
         ["06_검증로그", "API-문서 교차검증, 재발주 금액변동, 정합성 점검 결과"],
         ["07_추출노트", "첨부파일별 다운로드·텍스트 추출 결과"],
     ]
@@ -167,7 +174,7 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
     # ── 04 공종별 ──
     ws = wb.create_sheet(S_TRADE)
     tcols = ["프로젝트ID", "시설ID", "시설명", "사업유형", "공종", "포함공종(종합)", "포함공종_API", "포함공종_문서", "포함공종_출처",
-             "분리발주_언급공종_문서", "공고번호", "공고차수", "공고명", "공고일시", "수요기관",
+             "분리발주_언급공종_문서", "공고번호", "공고차수", "공고키", "공고명", "공고일시", "수요기관",
              "추정가격_API", "기초금액_API", "부가세(수식)", "관급자재_API", "도급자관급액_API", "관급자관급액_API",
              "도급자관급액_문서", "관급자관급액_문서", "총공사비(수식)",
              "예산금액_API", "낙찰금액_API", "낙찰률_API", "낙찰률(수식)", "낙찰자", "낙찰하한율",
@@ -203,11 +210,45 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
         for c in ("부가세(수식)", "총공사비(수식)", "추정가격_차이율(수식)", "낙찰률(수식)"):
             ws[f"{col[c]}{r}"].font = FONT
 
+    # ── 04b 공종세부내역(문서) — 내역서 집계표의 공종별 금액(2차 추출). 금액은 04 와 별도 시트에 두어 05 SUMIFS 에 섞이지 않게 한다 ──
+    ws = wb.create_sheet(S_TRADE_DETAIL)
+    det = (trade_detail if trade_detail is not None else pd.DataFrame()).copy()
+    for c in DETAIL_COLS:
+        if c not in det.columns:
+            det[c] = None
+    det = det[DETAIL_COLS]
+    _write_df(ws, det, money_cols=["금액_원_문서", "배분금액(수식)", "집계표합계_원_문서"],
+              blue_cols=[c for c in DETAIL_COLS if "(수식)" not in c],
+              widths={"시설명": 30, "항목명_원문": 28, "출처파일": 36, "근거문구": 40})
+    dcol = {c: get_column_letter(i + 1) for i, c in enumerate(DETAIL_COLS)}
+    n_d = max(len(det), 1) + 1
+    D = {c: f"'{S_TRADE_DETAIL}'!${dcol[c]}$2:${dcol[c]}${n_d}" for c in ("금액_원_문서", "배분금액(수식)", "공고키", "프로젝트ID", "세부공종", "상위공종")}
+    t_tot = f"'{S_TRADE}'!${col['총공사비(수식)']}:${col['총공사비(수식)']}"
+    t_key, t_pid = f"'{S_TRADE}'!${col['공고키']}:${col['공고키']}", f"'{S_TRADE}'!${col['프로젝트ID']}:${col['프로젝트ID']}"
+    kA, kK, kL = dcol["프로젝트ID"], dcol["공고키"], dcol["세부공종"]
+    for r in range(2, len(det) + 2):
+        base_sum = f"SUMIFS({D['금액_원_문서']},{D['공고키']},${kK}{r},{D['프로젝트ID']},${kA}{r}"
+        denom = "(" + base_sum + ")" + "".join(f'-{base_sum},{D["세부공종"]},"{x}")' for x in DETAIL_EXCLUDED) + ")"   # 바깥 괄호 닫기
+        excl = ",".join(f'${kL}{r}="{x}"' for x in DETAIL_EXCLUDED)
+        amt = f"${dcol['금액_원_문서']}{r}"
+        ratio = f"{dcol['비율(수식)']}{r}"
+        ws[ratio] = f'=IF(OR({excl}),"",IF(AND(ISNUMBER({amt}),{denom}>0),{amt}/{denom},""))'
+        ws[ratio].number_format = "0.00%"
+        ws[f"{dcol['배분금액(수식)']}{r}"] = f'=IF(ISNUMBER({ratio}),{ratio}*SUMIFS({t_tot},{t_key},${kK}{r},{t_pid},${kA}{r}),"")'
+        for c in ("비율(수식)", "배분금액(수식)"):
+            ws[f"{dcol[c]}{r}"].font = FONT
+    nd = len(det) + 3
+    ws[f"A{nd}"] = ("주: 금액_원_문서는 첨부 내역서 집계표(또는 공고문 공사금액 표)에서 읽은 값으로, 금액기준(부가세 포함/제외/직접공사비)이 공고마다 달라 절대금액을 그대로 쓰지 않는다. "
+                    "비율 = 금액 / 같은 공고의 공종 행 합(공통가설·간접비·관급자재·부가세 제외), 배분금액 = 비율 × 04 총공사비(수식). "
+                    "05 의 문서배분_* 는 이 배분금액을 프로젝트·세부공종별로 합한 참고값이며 총공사비합계에는 더하지 않는다. 분리발주 공고가 따로 있는 공종(전기·정보통신·소방)은 05 '문서배분_중복경고' 확인.")
+    ws[f"A{nd}"].font = FONT
+
     # ── 05 시설합산 ──
     ws = wb.create_sheet(S_FAC)
     fcols = ["프로젝트ID", "시설ID", "시설명", "사업유형", "표2_대분류", "표2_중분류", "수요기관", "연면적_m2", "지상층수", "지하층수", "구조",
              "공고연도"] + [f"{tr}(수식)" for tr in TRADES] + ["총공사비합계(수식)", "㎡당공사비_원(수식)", "건설공사비지수_보정계수(입력)",
-                                                              "보정_㎡당공사비_원(수식)", "공종누락경고(수식)", "통합발주_포함공종", "공고건수_최신", "메모"]
+                                                              "보정_㎡당공사비_원(수식)", "공종누락경고(수식)", "통합발주_포함공종"] \
+        + [f"문서배분_{tr}(수식)" for tr in DETAIL_ALLOC_TRADES] + ["건축_순건축추정(수식)", "문서배분_중복경고(수식)", "공고건수_최신", "메모"]
     f5 = pd.DataFrame({c: facility[c] if c in facility.columns else None for c in
                        ["프로젝트ID", "시설ID", "시설명", "사업유형", "표2_대분류", "표2_중분류", "수요기관", "연면적_m2", "지상층수", "지하층수", "구조",
                         "공고건수_최신"]}, index=facility.index)
@@ -220,7 +261,8 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
             f5[c] = None
     f5 = f5[fcols]
     _write_df(ws, f5, money_cols=["연면적_m2"] + [f"{tr}(수식)" for tr in TRADES] + ["총공사비합계(수식)", "㎡당공사비_원(수식)",
-                                                                              "보정_㎡당공사비_원(수식)"],
+                                                                              "보정_㎡당공사비_원(수식)", "건축_순건축추정(수식)"]
+              + [f"문서배분_{tr}(수식)" for tr in DETAIL_ALLOC_TRADES],
               blue_cols=["프로젝트ID", "시설ID", "시설명", "사업유형", "표2_대분류", "표2_중분류", "수요기관", "연면적_m2", "지상층수", "지하층수", "구조",
                          "공고연도", "공고건수_최신", "통합발주_포함공종"],
               yellow_cols=["건설공사비지수_보정계수(입력)", "메모"], widths={"시설명": 30, "공종누락경고(수식)": 28, "통합발주_포함공종": 34})
@@ -250,13 +292,23 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
                         for tr in ("건축", "전기", "정보통신", "소방"))
         ws[f"{fc['공종누락경고(수식)']}{r}"] = (f'=TRIM(IF(TRIM({miss})="","",TRIM({miss})&"누락 ")'
                                             f'&IF(TRIM({zero})="","",TRIM({zero})&"금액없음"))')
+        # 04b 참고 배분: 프로젝트·세부공종별 배분금액 합(총공사비합계에는 더하지 않음)
+        for tr in DETAIL_ALLOC_TRADES:
+            ws[f"{fc[f'문서배분_{tr}(수식)']}{r}"] = f'=SUMIFS({D["배분금액(수식)"]},{D["프로젝트ID"]},$A{r},{D["세부공종"]},"{tr}")'
+        arch_all = f'SUMIFS({D["배분금액(수식)"]},{D["프로젝트ID"]},$A{r},{D["상위공종"]},"건축")'
+        arch_own = f'SUMIFS({D["배분금액(수식)"]},{D["프로젝트ID"]},$A{r},{D["상위공종"]},"건축",{D["세부공종"]},"건축")'
+        ws[f"{fc['건축_순건축추정(수식)']}{r}"] = (f'=IF(COUNTIFS({D["프로젝트ID"]},$A{r},{D["상위공종"]},"건축")=0,"",'
+                                               f'{fc["건축(수식)"]}{r}-({arch_all}-{arch_own}))')
+        dup = "&".join(f'IF(AND(N({fc[f"문서배분_{tr}(수식)"]}{r})>0,N({fc[f"{tr}(수식)"]}{r})>0),"{tr} ","")' for tr in ("전기", "정보통신", "소방"))
+        ws[f"{fc['문서배분_중복경고(수식)']}{r}"] = f'=TRIM(IF(TRIM({dup})="","",TRIM({dup})&" 중복가능"))'
         for c in fcols:
             if "(수식)" in c:
                 ws[f"{fc[c]}{r}"].font = FONT
     n = ws.max_row + 2
     ws[f"A{n}"] = ("주: 건설공사비지수 보정계수는 사용자 입력(기준연도 지수/공고연도 지수). 총공사비 = 기초금액(API, 없으면 추정가격×1.1, 그것도 없으면 문서 추출값) + 관급자재(API 도급자·관급자 설치액 우선, 없으면 API 합계, 없으면 문서 추출값). "
                    "연면적은 01_시설마스터 값을 참조(01 에서 수정). 공종누락경고: '누락'=해당 공종 공고 없음, '금액없음'=공고는 있으나 금액 0. "
-                   "㎡당 공사비는 사업유형(신축/증축/리모델링)이 같은 프로젝트끼리만 비교할 것 — 리모델링의 연면적은 공사 대상 연면적임.")
+                   "㎡당 공사비는 사업유형(신축/증축/리모델링)이 같은 프로젝트끼리만 비교할 것 — 리모델링의 연면적은 공사 대상 연면적임. "
+                   "문서배분_*(수식)은 04b 집계표 비율 × 04 총공사비의 참고 배분(총공사비합계에 미포함), 건축_순건축추정 = 건축(수식) − 건축 공고 안의 비건축 배분.")
     ws[f"A{n}"].font = FONT
 
     # ── 06 / 07 ──

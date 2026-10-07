@@ -37,6 +37,34 @@ def _hwpx(paragraphs: List[str], table: List[List[str]] | None = None) -> bytes:
     return buf.getvalue()
 
 
+def _xlsx_bill() -> bytes:
+    """내역서 Excel: 갑지 + 총괄집계표(공종별 합계·간접비·부가세·총공사비) + 긴 세부내역 시트(400행 넘김 → 집계표 시트 선택 로직 검증)."""
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "갑지"
+    ws.append(["공 사 명", "가상군 문화예술회관 건립공사"])
+    ws.append(["공사기간", "착공일로부터 1,080일"])
+    ws2 = wb.create_sheet("총괄집계표")
+    ws2.append(["(단위: 원)"])
+    ws2.append(["공종", "재료비", "노무비", "경비", "합계"])
+    for name, amt in (("건축공사", 20_000_000_000), ("기계설비공사", 3_000_000_000), ("토목공사", 2_000_000_000), ("조경공사", 1_000_000_000)):
+        ws2.append([name, amt * 0.5, amt * 0.4, amt * 0.1, amt])
+    ws2.append(["소계", "", "", "", 26_000_000_000])
+    ws2.append(["간접노무비", "", "", "", 1_000_000_000])
+    ws2.append(["일반관리비", "", "", "", 1_500_000_000])
+    ws2.append(["이윤", "", "", "", 1_500_000_000])
+    ws2.append(["부가가치세", "", "", "", 3_000_000_000])
+    ws2.append(["총공사비", "", "", "", 33_000_000_000])
+    ws3 = wb.create_sheet("세부내역")
+    ws3.append(["품명", "규격", "수량", "단가", "금액"])
+    for i in range(600):
+        ws3.append([f"세부항목{i}", "EA", 1, 100, 100])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def _docx(paragraphs: List[str]) -> bytes:
     import docx  # python-docx
     d = docx.Document()
@@ -62,6 +90,7 @@ def build_dataset(base: str) -> Dict:
         dict(common, bidNtceNo="R24010001", bidNtceOrd="000", bidNtceNm="가상군 문화예술회관 건립공사", ntceKindNm="등록공고", reNtceYn="N",
              bidNtceDt="2024-01-10 10:00:00", ntceInsttNm="가상군", dminsttNm="가상군", presmptPrce="30000000000", mainCnsttyNm="건축공사",
              cnstrtsiteRgnNm="전라남도 가상군", ntceSpecDocUrl1=f("입찰공고문.hwpx"), ntceSpecFileNm1="입찰공고문.hwpx",
+             ntceSpecDocUrl2=f("공내역서_가상군문화예술회관.xlsx"), ntceSpecFileNm2="공내역서_가상군문화예술회관.xlsx",
              sptDscrptDocUrl1=f("현장설명서.docx"), dminsttCd="4790000", bdgtAmt="35100000000", VAT="3000000000",
              govsplyAmt="2100000000", govcnstrtnGovsplyMtrlAmt="2100000000", subsiCnsttyNm1="토목공사업", subsiCnsttyNm2="조경공사업"),
         # 같은 공고의 변경 차수(001)
@@ -141,6 +170,7 @@ def build_dataset(base: str) -> Dict:
                                [["구분", "금액"], ["추정가격", "30,000,000,000원"], ["기초금액(부가세 포함)", "33,000,000,000원"],
                                 ["관급자관급액", "2,100,000,000원"], ["총공사금액", "35,100,000,000원"]]), "application/octet-stream"),
         "변경공고문.hwpx": (_hwpx(["변경 공고 (가상군 문화예술회관 건립공사)", "공고 기간을 2024-01-31 까지로 정정합니다."]), "application/octet-stream"),
+        "공내역서_가상군문화예술회관.xlsx": (_xlsx_bill(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         "현장설명서.docx": (_docx(["현장설명서 — 가상군 문화예술회관 건립공사", "연면적 15,200㎡, 건축면적 6,300㎡", "용도: 공연장(문화 및 집회시설)",
                                 "3. 공사금액 (단위: 원, 부가가치세 포함)", "구 분", "총공사비", "건축, 토목, 조경", "35,100,000,000"]),
                         "application/octet-stream"),

@@ -494,6 +494,96 @@ def test_included_trades():
     assert (b["포함공종_API"], b["포함공종_문서"], b["포함공종_출처"], b["포함공종(종합)"]) == ("건축·토목", "건축·토목·기계설비·조경", "규칙", "건축·토목·기계설비·조경"), b.to_dict()
 
 
+def test_trade_second_pass(tmp):
+    """2차 추출(내역서 집계표의 공종별 금액): 집계표 행 추림, 스키마 한도, 정규화, 검증, 대상 선정, 04b 표, 본문 창."""
+    from openpyxl import Workbook
+    from g2b_costdb import attachments, pipeline
+    from g2b_costdb.extract_llm import (trade_output_schema, normalize_trade_doc, cross_verify_trades, keyword_windows, _TRADE_KEYS,
+                                        build_trade_request_params)
+    # 집계표 시트 선택: 총괄집계표는 3,000행까지, 세부내역은 400행에서 끊김. 추림은 공종·합계·단위 행만
+    d = os.path.join(tmp, "files", "B1")
+    os.makedirs(d)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "세부내역"
+    for i in range(700):
+        ws.append([f"세부{i}", 1, 100, 100])
+    ws2 = wb.create_sheet("총괄집계표")
+    ws2.append(["(단위: 천원)"])
+    ws2.append(["공종", "합계"])
+    for name, amt in (("건축공사", 20_000_000), ("기계설비공사", 3_000_000), ("조경공사", 1_000_000), ("소계", 24_000_000),
+                      ("간접노무비", 1_000_000), ("부가가치세", 2_500_000), ("총공사비", 27_500_000)):
+        ws2.append([name, amt])
+    for i in range(450):
+        ws2.append([f"세부{i}", 5])
+    p = os.path.join(d, "공내역서_B1.xlsx")
+    wb.save(p)
+    txt = attachments.extract_xlsx(p)
+    assert "세부699" not in txt and "세부399" in txt, "일반 시트는 400행 제한"
+    assert txt.count("세부449") == 1, "집계표류 시트는 행 제한이 커서 끝까지"
+    snip = attachments.cost_sheet_snippets(p)
+    assert snip.startswith("## [공내역서_B1.xlsx] 시트: 총괄집계표") and "(단위: 천원)" in snip and "기계설비공사\t3000000" in snip and "총공사비\t27500000" in snip
+    assert "세부1\t" not in snip and "세부내역" not in snip, snip
+    assert attachments.find_cost_sheet_files(os.path.join(tmp, "files"), "B1") == [p] and attachments.find_cost_sheet_files(os.path.join(tmp, "files"), "B9") == []
+    open(os.path.join(d, "관급자재목록.xlsx"), "wb").write(b"x")
+    assert attachments.find_cost_sheet_files(os.path.join(tmp, "files"), "B1") == [p], "내역서류 이름만"
+    # 스키마: union 0·optional 0, 객체 배열
+    sch = trade_output_schema()
+    u = o = 0
+
+    def walk(x):
+        nonlocal u, o
+        if isinstance(x, dict):
+            if "anyOf" in x or isinstance(x.get("type"), list):
+                u += 1
+            if x.get("type") == "object":
+                o += len([k for k in x.get("properties", {}) if k not in set(x.get("required", []))])
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    walk(sch)
+    assert (u, o) == (0, 0) and sch["properties"]["공종별금액"]["items"]["properties"]["공종"]["enum"][0] == "건축"
+    prm = build_trade_request_params("발췌", {"공고번호": "B1"}, {"max_tokens": 8000}, max_tokens=16000)
+    assert prm["max_tokens"] == 16000 and prm["output_config"]["format"]["schema"] == sch and "발췌" in prm["messages"][0]["content"]
+    # 정규화·검증: 천원 단위 표를 원으로 읽은 경우 → ×1000 하면 API 와 일치 → 경고
+    t = normalize_trade_doc({"합계_원": "27,500,000", "금액기준": "부가세포함", "공종별금액": [
+        {"공종": "건축", "항목명_원문": "건축공사", "금액_원": "20000000"}, {"공종": "기계설비", "항목명_원문": "기계설비공사", "금액_원": "3000000"},
+        {"공종": "조경", "항목명_원문": "조경공사", "금액_원": "1000000"}, {"공종": "간접비", "항목명_원문": "간접노무비", "금액_원": "1000000"},
+        {"공종": "부가세", "항목명_원문": "부가가치세", "금액_원": "2500000"}, {"공종": "?", "항목명_원문": "빈값", "금액_원": ""}]})
+    assert t["_공종합_원"] == 24_000_000 and t["합계_원"] == 27_500_000 and len(t["공종별금액"]) == 5
+    logs = cross_verify_trades("B1", {"추정가격": 25_000_000_000, "기초금액": 27_500_000_000}, t)
+    assert [l["항목"] for l in logs] == ["공종합=집계표합계", "집계표합계 기준"] and logs[0]["판정"] == "정상" and "천원 단위" in logs[1]["비고"], logs
+    ok = cross_verify_trades("B2", {"추정가격": 25_000_000_000, "기초금액": 27_500_000_000}, normalize_trade_doc({"합계_원": "27500000000", "공종별금액": [
+        {"공종": "건축", "항목명_원문": "a", "금액_원": "27500000000"}]}))
+    assert ok[-1]["판정"] == "참고" and "부가세 포함" in ok[-1]["비고"]
+    assert cross_verify_trades("B3", {}, normalize_trade_doc({"공종별금액": []}))[0]["비고"].startswith("집계표에 공종별 금액 없음")
+    # 대상 선정: 건축 또는 포함공종 2개 이상. 04b 표. 분리발주 중복 경고. 본문 창은 Excel 블록 제외
+    latest = pd.DataFrame([
+        {"공고키": "A-000", "프로젝트ID": "P1", "시설ID": "F1", "시설명": "s", "사업유형": "신축", "공종": "건축", "공고번호": "A", "공고차수": "000", "공고명": "n", "수요기관": "d", "추정가격": 100, "주공종명": "건축공사업", "부공종명": ""},
+        {"공고키": "E-000", "프로젝트ID": "P1", "시설ID": "F1", "시설명": "s", "사업유형": "신축", "공종": "전기", "공고번호": "E", "공고차수": "000", "공고명": "n", "수요기관": "d", "추정가격": 10, "주공종명": "전기공사업", "부공종명": ""},
+        {"공고키": "M-000", "프로젝트ID": "P1", "시설ID": "F1", "시설명": "s", "사업유형": "신축", "공종": "기계설비", "공고번호": "M", "공고차수": "000", "공고명": "n", "수요기관": "d", "추정가격": 20, "주공종명": "기계설비공사업", "부공종명": "토목공사업"},
+        {"공고키": "A-000", "프로젝트ID": "P2", "시설ID": "F2", "시설명": "s2", "사업유형": "신축", "공종": "건축", "공고번호": "A", "공고차수": "000", "공고명": "n", "수요기관": "d", "추정가격": 100, "주공종명": "건축공사업", "부공종명": ""}])
+    assert pipeline._trade_targets(latest, {}, {}) == ["A-000", "M-000"], "건축 + 통합발주(기계설비·토목), 복수 시설 배정은 한 번"
+    tdocs = {"A-000": dict(t, _files=["공내역서_B1.xlsx"], 공종별금액=t["공종별금액"] + [{"공종": "전기", "항목명_원문": "전기공사", "금액_원": 500}])}
+    det = pipeline.assemble_trade_detail_table(latest, tdocs)
+    assert list(det.columns) == pipeline.DETAIL_COLS and len(det) == 12 and set(det["프로젝트ID"]) == {"P1", "P2"}, "복수 시설 배정은 프로젝트마다"
+    assert det.iloc[0]["출처파일"] == "공내역서_B1.xlsx" and det.iloc[0]["상위공종"] == "건축"
+    dup = pipeline._trade_dup_logs(latest, tdocs)
+    assert len(dup) == 1 and "전기" in dup[0]["비고"], dup       # P1 에만 전기 분리발주 공고가 있음(P2 는 건축뿐)
+    assert pipeline.assemble_trade_detail_table(latest, {}).empty
+    text = "공고문 본문 … 2. 공사금액 표 … 건축 토목 조경\n===== [공내역서.xlsx] =====\n## 세부내역\n세부항목0\t1\n===== [현장설명서.docx] =====\n집계 참고"
+    body = pipeline._non_excel_text(text)
+    assert "세부항목0" not in body and "집계 참고" in body and "공사금액 표" in body
+    assert "공사금액 표" in keyword_windows(body, _TRADE_KEYS, 500) and keyword_windows("", _TRADE_KEYS, 500) == ""
+    cfg = {"paths": {"files_dir": os.path.join(tmp, "files")}}
+    snip2, used = pipeline._trade_input(cfg, "B1", text, 20000)
+    assert used == ["공내역서_B1.xlsx"] and "총괄집계표" in snip2 and "세부항목0" not in snip2 and "[공고문·현장설명서 발췌]" in snip2
+    assert pipeline._trade_input(cfg, "B9", "공고문에 공사금액 합계만 있고 다른 단서 없음", 20000) == ("", []), "내역서도 단서도 없으면 제외"
+    assert pipeline._trade_input(cfg, "B9", "공종별 집계: 건축 1,000 토목 200", 20000)[0].startswith("## [공고문·현장설명서 발췌]")
+
+
 def _hwp_record(tag: int, payload: bytes, level: int = 0) -> bytes:
     size = len(payload)
     if size < 0xFFF:
@@ -605,6 +695,7 @@ def run():
         test_extract_and_verify()
         test_handoff_and_batch(tmp)
         test_included_trades()
+        test_trade_second_pass(tmp)
         test_attachments(tmp)
     print("OK: 회귀 테스트 통과")
 

@@ -363,18 +363,105 @@ def extract_docx(path: str) -> str:
     return "\n".join(lines)
 
 
-def extract_xlsx(path: str, max_rows: int = 400) -> str:
+# 내역서 집계표 시트·파일·행 식별(2차 공종별 금액 추출용). 시트명이 맞으면 행 제한을 크게 둬 집계표가 잘리지 않게 한다
+_COST_SHEET_RE = re.compile(r"총괄|집계|갑지|원가|공종별|공사비|요약|총괄표|내역총괄", re.I)
+_COST_FILE_RE = re.compile(r"내역|산출|원가|총괄|집계|공사비|갑지", re.I)
+_COST_ROW_RE = re.compile(r"건축|토목|기계|설비|전기|통신|소방|조경|철거|해체|가설|간접|합계|소계|총계|^계$|부가가치세|부가세|관급|이윤|일반관리|순공사|총공사|공사비|직접|단위|공종|구분")
+COST_SHEET_MAX_ROWS = 3000
+
+
+def _iter_sheets(path: str):
+    """(시트명, 행 반복자) 를 xlsx/xlsm(openpyxl)·xls(xlrd) 공통으로."""
+    ext = os.path.splitext(path.lower())[1]
+    if ext == ".xls":
+        import xlrd  # type: ignore
+        book = xlrd.open_workbook(path, on_demand=True)
+        for sh in book.sheets():
+            yield sh.name, (tuple(sh.row_values(i)) for i in range(sh.nrows))
+        return
     from openpyxl import load_workbook
     wb = load_workbook(path, read_only=True, data_only=True)
-    lines = []
     for ws in wb.worksheets:
-        lines.append(f"## {ws.title}")
-        for i, row in enumerate(ws.iter_rows(values_only=True)):
+        yield ws.title, ws.iter_rows(values_only=True)
+
+
+def _cell(v) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def extract_xlsx(path: str, max_rows: int = 400, cost_rows: int = COST_SHEET_MAX_ROWS) -> str:
+    """통합문서 전체 시트를 텍스트로. 집계표류 시트(총괄·집계·갑지·원가…)는 cost_rows 행까지, 나머지는 max_rows 행까지."""
+    lines = []
+    for title, rows in _iter_sheets(path):
+        lines.append(f"## {title}")
+        cap = cost_rows if _COST_SHEET_RE.search(str(title)) else max_rows
+        for i, row in enumerate(rows):
+            if i >= cap:
+                break
+            if any(v is not None and v != "" for v in row):
+                lines.append("\t".join(_cell(v) for v in row))
+    return "\n".join(lines)
+
+
+def extract_xls(path: str, max_rows: int = 400) -> str:
+    """구형 Excel(.xls). xlrd 가 필요하다(pip install xlrd)."""
+    try:
+        import xlrd  # noqa: F401
+    except ImportError as e:
+        raise ValueError("xls 해석에 xlrd 가 필요합니다: pip install xlrd") from e
+    return extract_xlsx(path, max_rows=max_rows)
+
+
+def find_cost_sheet_files(files_dir: str, bid_no: str) -> List[str]:
+    """공고 폴더(zip 풀린 _unz 포함)에서 내역서류 Excel 파일 경로를 찾는다(이미 내려받은 파일만, 재다운로드 없음)."""
+    root = os.path.join(files_dir, str(bid_no))
+    out: List[str] = []
+    if not os.path.isdir(root):
+        return out
+    for dirpath, _, names in os.walk(root):
+        for n in names:
+            if os.path.splitext(n.lower())[1] in (".xlsx", ".xlsm", ".xls") and _COST_FILE_RE.search(n):
+                out.append(os.path.join(dirpath, n))
+    return sorted(out)
+
+
+def _looks_numeric(v) -> bool:
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return abs(v) >= 1000
+    s = str(v or "").replace(",", "").strip()
+    return bool(re.fullmatch(r"-?\d{4,}(\.\d+)?", s))
+
+
+def cost_sheet_snippets(path: str, max_chars: int = 12000, max_rows: int = COST_SHEET_MAX_ROWS) -> str:
+    """내역서 Excel 에서 집계표 후보 행만 추린다: 집계표류 시트(없으면 전체 시트)에서 첫 글자 셀이 공종·합계·단위 어휘를 담고
+    같은 행에 1,000 이상 숫자가 있는 행(단위 표기 행은 숫자 없어도 포함). LLM 입력을 작게 만들기 위한 전처리이며 금액 해석은 하지 않는다."""
+    try:
+        sheets = list(_iter_sheets(path))
+    except Exception as e:  # noqa: BLE001
+        log.info("집계표 읽기 실패 %s: %s", path, e)
+        return ""
+    picked = [(t, r) for t, r in sheets if _COST_SHEET_RE.search(str(t))] or sheets
+    out: List[str] = []
+    for title, rows in picked:
+        kept = []
+        for i, row in enumerate(rows):
             if i >= max_rows:
                 break
-            if any(v is not None for v in row):
-                lines.append("\t".join("" if v is None else str(v) for v in row))
-    return "\n".join(lines)
+            cells = [_cell(v).strip() for v in row]
+            texts = [c for c in cells if c and not _looks_numeric(c)]
+            if not texts:
+                continue
+            head = " ".join(texts[:2])
+            if "단위" in head or (_COST_ROW_RE.search(head) and any(_looks_numeric(v) for v in row)):
+                kept.append("\t".join(c for c in cells if c))
+        if kept:
+            out.append(f"## [{os.path.basename(path)}] 시트: {title}\n" + "\n".join(kept))
+    text = "\n\n".join(out)
+    return text[:max_chars]
 
 
 def extract_any(path: str) -> Tuple[str, str]:
@@ -389,6 +476,8 @@ def extract_any(path: str) -> Tuple[str, str]:
         return extract_docx(path), "python-docx"
     if ext in (".xlsx", ".xlsm"):
         return extract_xlsx(path), "openpyxl"
+    if ext == ".xls":
+        return extract_xls(path), "xlrd"
     if ext == ".zip":
         return extract_zip(path)
     if ext in (".txt", ".csv"):
@@ -433,7 +522,7 @@ def extract_zip(path: str) -> Tuple[str, str]:
     return "\n\n".join(out), "zip(" + ",".join(sorted(set(parsers))) + ")"
 
 
-_EXT_PREF = {".pdf": 0, ".hwpx": 1, ".hwp": 2, ".docx": 3, ".xlsx": 4, ".xlsm": 4, ".zip": 5, ".txt": 6}
+_EXT_PREF = {".pdf": 0, ".hwpx": 1, ".hwp": 2, ".docx": 3, ".xlsx": 4, ".xlsm": 4, ".xls": 4, ".zip": 5, ".txt": 6}
 
 
 def _stem_key(pr: int, url: str, name: str):

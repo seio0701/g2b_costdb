@@ -172,8 +172,9 @@ def estimate_tokens(chars: int) -> int:
     return int(chars / 1.5) + 600
 
 
-def estimate_cost(texts: Dict[str, str], keys: List[str], cfg_llm: Dict, usd_krw: float = 1400.0) -> Dict:
-    max_chars = int(cfg_llm.get("max_input_chars", 60000))
+def estimate_cost(texts: Dict[str, str], keys: List[str], cfg_llm: Dict, usd_krw: float = 1400.0,
+                  max_chars: Optional[int] = None, out_per_doc: int = 2000) -> Dict:
+    max_chars = int(max_chars or cfg_llm.get("max_input_chars", 60000))
     n, chars = 0, 0
     for k in keys:
         t = texts.get(k)
@@ -181,7 +182,7 @@ def estimate_cost(texts: Dict[str, str], keys: List[str], cfg_llm: Dict, usd_krw
             n += 1
             chars += min(len(t), max_chars)
     in_tok = sum(estimate_tokens(min(len(texts[k]), max_chars)) for k in keys if texts.get(k))
-    out_tok = n * 2000                        # 실측(3,975건 평균 2,012 토큰, 사고 토큰 포함)
+    out_tok = n * int(out_per_doc)            # 기본 2,000 = 실측(3,975건 평균 2,012 토큰, 사고 토큰 포함)
     model = cfg_llm.get("model", "claude-sonnet-5")
     pin, pout = PRICE_USD_PER_M.get(model, (5.0, 25.0))
     usd = in_tok / 1e6 * pin + out_tok / 1e6 * pout
@@ -222,6 +223,201 @@ def parse_response_text(out: str, model: str = "") -> Dict:
 _STRUCTURED_STATE = {"ok": True}      # 한 번 스키마가 거부되면(400) 이 프로세스에서는 더 시도하지 않는다
 
 
+def _finish_call(create, kwargs: Dict):
+    """호출 후 잘림(max_tokens)이면 1회 2배로 재시도, 거부(refusal)면 예외."""
+    resp = create(**kwargs)
+    if getattr(resp, "stop_reason", "") == "max_tokens":     # 사고 토큰까지 포함해 잘린 경우 1회 2배로 재시도
+        kwargs["max_tokens"] = kwargs["max_tokens"] * 2
+        resp = create(**kwargs)
+        if getattr(resp, "stop_reason", "") == "max_tokens":
+            raise ValueError("응답이 max_tokens 에서 잘림 — config.llm.max_tokens 를 늘리세요")
+    if getattr(resp, "stop_reason", "") == "refusal":
+        raise ValueError("모델이 응답을 거부함(refusal)")
+    return resp
+
+
+def _structured_create(client, schema: Dict):
+    """구조화 출력 → 400 이면 일반 응답으로 폴백하는 create 함수를 만든다(프로세스 내 1회만 시도)."""
+    import anthropic  # type: ignore
+    state = {"structured": _STRUCTURED_STATE["ok"]}
+
+    def _create(**kw):
+        try:
+            if state["structured"]:
+                return client.messages.create(output_config={"format": {"type": "json_schema", "schema": schema}}, **kw)
+            return client.messages.create(**kw)
+        except anthropic.BadRequestError as e:
+            if not state["structured"]:
+                raise
+            log.warning("구조화 출력 미지원/거부(%s) → 일반 응답 파싱으로 폴백(이 실행에서는 다시 시도하지 않음)", str(e)[:160])
+            state["structured"] = False
+            _STRUCTURED_STATE["ok"] = False
+            return client.messages.create(**kw)
+    return _create
+
+
+# ── 2차 추출: 내역서 집계표의 공종별 금액 ──────────────────────────────────
+TRADE_LABELS = ["건축", "전기", "정보통신", "소방", "조경", "기계설비", "토목", "철거", "공통가설", "간접비", "관급자재", "부가세", "기타"]
+TRADE_ALLOC_LABELS = ["건축", "전기", "정보통신", "소방", "조경", "기계설비", "토목", "철거", "기타"]   # 비율 배분에 쓰는 라벨(공통가설·간접비·관급·부가세 제외)
+TRADE_SYSTEM = (
+    "당신은 한국 공공 건축공사 입찰 내역서(설계내역서·원가계산서·총괄집계표)와 공고문의 공사금액 표를 읽어 공종별 금액 구성을 추출하는 분석가입니다. "
+    "반드시 JSON 객체 하나만 출력합니다. 입력은 집계표에서 추려 낸 행들입니다. "
+    "'공종별금액'에는 대공종 행(건축·기계설비·토목·조경·전기·정보통신·소방·철거 등)과 공통가설·간접비(간접노무비·산재·고용보험·안전관리비·일반관리비·이윤 등 합쳐서 하나)·관급자재·부가세 행을 넣고, "
+    "세부 공종(철근콘크리트·미장·창호 등)은 넣지 않습니다. 금액은 원 단위 정수 자릿수만 적고 '천원' 단위 표는 ×1000 합니다(단위 표기를 '단위'에 적음). "
+    "'합계_원'에는 집계표의 총합계(총공사비·총계) 값을, '금액기준'에는 그 합계가 부가세 포함인지·제외(순공사비)인지·직접공사비인지 적고 모르면 '불명'. "
+    "집계표에 합계만 있고 공종별 금액이 없으면 '공종별금액'은 빈 배열로 둡니다. 추정하거나 계산해 만들지 않습니다. "
+    "각 값의 근거 행을 '근거문구'에 짧게 인용합니다."
+)
+_TRADE_KEYS = ["공사금액", "공사 금액", "공사비 내역", "공종별", "집계", "총괄", "원가계산", "공사개요", "구분"]
+TRADE_FIELDS = {"금액기준": "부가세포함|부가세제외|직접공사비|불명", "관급자재_포함여부": "포함|제외|불명", "단위": "원|천원|불명",
+                "합계_원": "integer|null", "공종별금액": "[{공종, 항목명_원문, 금액_원}]", "출처": "string", "신뢰도": "high|medium|low", "근거문구": "string"}
+
+
+def trade_output_schema() -> Dict:
+    """2차 추출 구조화 출력 스키마. 모두 string/enum·required(union 0·optional 0) — 1차와 같은 제약."""
+    item = {"type": "object", "additionalProperties": False,
+            "properties": {"공종": {"type": "string", "enum": TRADE_LABELS}, "항목명_원문": {"type": "string"}, "금액_원": {"type": "string"}},
+            "required": ["공종", "항목명_원문", "금액_원"]}
+    props = {
+        "금액기준": {"type": "string", "enum": ["부가세포함", "부가세제외", "직접공사비", "불명"]},
+        "관급자재_포함여부": {"type": "string", "enum": ["포함", "제외", "불명"]},
+        "단위": {"type": "string", "enum": ["원", "천원", "불명"]},
+        "합계_원": {"type": "string"},
+        "공종별금액": {"type": "array", "items": item},
+        "출처": {"type": "string"},
+        "신뢰도": {"type": "string", "enum": ["high", "medium", "low"]},
+        "근거문구": {"type": "string"},
+    }
+    return {"type": "object", "properties": props, "required": list(props.keys()), "additionalProperties": False}
+
+
+def keyword_windows(text: str, keys: List[str], budget: int, window: int = 1200) -> str:
+    """키워드 주변 창만 모아 budget 자 안으로(앞부분 없이). 2차 추출에서 공고문·현장설명서의 공사금액 표를 끌어오는 데 쓴다."""
+    if not text or budget <= 0:
+        return ""
+    spans = []
+    for k in keys:
+        for m in re.finditer(re.escape(k), text):
+            spans.append((max(0, m.start() - window // 3), min(len(text), m.end() + window)))
+    spans.sort()
+    merged: List[List[int]] = []
+    for s, e in spans:
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    body, left = [], budget
+    for s, e in merged:
+        seg = text[s:e][:left]
+        if not seg:
+            break
+        body.append(f"...\n{seg}\n...")
+        left -= len(seg)
+        if left <= 0:
+            break
+    return "\n".join(body)
+
+
+def build_trade_prompt(snippet: str, api_hint: Dict) -> str:
+    hint = {k: jsonable(v) for k, v in (api_hint or {}).items()}
+    return (f"[공고 메타데이터(API)]\n{json.dumps(hint, ensure_ascii=False)}\n\n"
+            f"[출력 스키마]\n{json.dumps(TRADE_FIELDS, ensure_ascii=False, indent=1)}\n\n"
+            f"[집계표·공사금액 표 발췌]\n{snippet}")
+
+
+def build_trade_request_params(snippet: str, api_hint: Dict, cfg_llm: Dict, structured: Optional[bool] = None,
+                               max_tokens: Optional[int] = None) -> Dict:
+    if structured is None:
+        structured = bool(cfg_llm.get("structured_output", True))
+    params = dict(model=cfg_llm.get("model", "claude-sonnet-5"),
+                  max_tokens=int(max_tokens or cfg_llm.get("max_tokens", DEFAULT_MAX_TOKENS)),
+                  system=TRADE_SYSTEM, messages=[{"role": "user", "content": build_trade_prompt(snippet, api_hint)}])
+    if structured:
+        params["output_config"] = {"format": {"type": "json_schema", "schema": trade_output_schema()}}
+    return params
+
+
+def normalize_trade_doc(data: Dict) -> Dict:
+    """2차 추출 출력 정규화: 금액 → 정수(원), 빈 항목 제거, 공종 라벨 밖 값은 '기타', 비율 배분용 공종 합(_공종합_원) 계산."""
+    out = dict(data)
+    total = _num(out.get("합계_원"))
+    out["합계_원"] = int(round(total)) if total is not None else None
+    items = []
+    for it in out.get("공종별금액") or []:
+        if not isinstance(it, dict):
+            continue
+        amt = _num(it.get("금액_원"))
+        if amt is None:
+            continue
+        lab = str(it.get("공종") or "").strip()
+        if lab not in TRADE_LABELS:
+            lab = "기타"
+        items.append({"공종": lab, "항목명_원문": str(it.get("항목명_원문") or "")[:80], "금액_원": int(round(amt))})
+    out["공종별금액"] = items
+    out["_공종합_원"] = sum(i["금액_원"] for i in items if i["공종"] in TRADE_ALLOC_LABELS) or None
+    for k in ("금액기준", "관급자재_포함여부", "단위", "출처", "신뢰도", "근거문구"):
+        out[k] = str(out.get(k) or "")
+    return out
+
+
+def parse_trade_response_text(out: str, model: str = "") -> Dict:
+    data = normalize_trade_doc(_parse_json(out))
+    data["_model"] = model
+    return data
+
+
+def extract_trades_with_claude(snippet: str, api_hint: Dict, cfg_llm: Dict, max_tokens: Optional[int] = None) -> Dict:
+    """집계표 발췌 → 공종별 금액 dict(즉시 호출)."""
+    import anthropic  # type: ignore
+    client = anthropic.Anthropic(api_key=os.environ.get(cfg_llm.get("api_key_env", "ANTHROPIC_API_KEY")) or None)
+    kwargs = dict(model=cfg_llm.get("model", "claude-sonnet-5"),
+                  max_tokens=int(max_tokens or cfg_llm.get("max_tokens", DEFAULT_MAX_TOKENS)),
+                  system=TRADE_SYSTEM, messages=[{"role": "user", "content": build_trade_prompt(snippet, api_hint)}])
+    create = _structured_create(client, trade_output_schema()) if bool(cfg_llm.get("structured_output", True)) else (lambda **kw: client.messages.create(**kw))
+    resp = _finish_call(create, kwargs)
+    out = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
+    data = parse_trade_response_text(out, kwargs["model"])
+    data["_usage_in"] = getattr(getattr(resp, "usage", None), "input_tokens", None)
+    data["_usage_out"] = getattr(getattr(resp, "usage", None), "output_tokens", None)
+    return data
+
+
+def cross_verify_trades(bid_no: str, api_row: Dict, tdoc: Dict, vat: float = 0.10) -> List[Dict]:
+    """2차 추출 정합성: 공종 합 vs 집계표 합계, 집계표 합계의 금액 기준(부가세 포함/제외/직접공사비/천원 단위) 판별."""
+    logs: List[Dict] = []
+    total, tsum = _num(tdoc.get("합계_원")), _num(tdoc.get("_공종합_원"))
+    items = tdoc.get("공종별금액") or []
+    if not items:
+        logs.append({"공고번호": bid_no, "항목": "공종별 금액(문서)", "판정": "참고", "비고": "집계표에 공종별 금액 없음(합계만 또는 미발견)"})
+        return logs
+    gross = tsum
+    if gross is not None:
+        gross += sum(i["금액_원"] for i in items if i["공종"] in ("공통가설", "간접비", "관급자재", "부가세"))
+    if total and gross:
+        r = (gross - total) / total
+        logs.append({"공고번호": bid_no, "항목": "공종합=집계표합계", "API값": total, "문서값": gross, "차이": gross - total, "차이율": round(r, 5),
+                     "판정": "정상" if abs(r) <= 0.01 else ("경고" if abs(r) <= 0.05 else "경고"),
+                     "비고": "" if abs(r) <= 0.01 else "공종 행 합과 합계 행 불일치(간접비·관급·부가세 행 누락 또는 세부 공종 중복 의심)"})
+    base = total or gross
+    api_p, api_b = _num(api_row.get("추정가격")), _num(api_row.get("기초금액"))
+    if base and (api_p or api_b):
+        def near(a, b, tol=0.01):
+            return a and b and abs(a - b) / b <= tol
+        if near(base, api_b):
+            verdict, note = "참고", "집계표 합계 = 기초금액(부가세 포함)"
+        elif near(base, api_p):
+            verdict, note = "참고", "집계표 합계 = 추정가격(부가세 제외)"
+        elif api_p and 0.6 <= base / api_p <= 0.95:
+            verdict, note = "참고", "집계표 합계가 추정가격의 60~95% → 직접공사비(간접비 제외) 가능성"
+        elif near(base * 1000, api_b) or near(base * 1000, api_p):
+            verdict, note = "경고", "천원 단위 표를 원으로 읽은 의심(×1000 하면 API 금액과 일치)"
+        else:
+            verdict, note = "경고", "집계표 합계가 API 추정가격·기초금액과 불일치(차수·변경 내역서 혼입 또는 다른 공사 집계표 의심)"
+        logs.append({"공고번호": bid_no, "항목": "집계표합계 기준", "API값": api_b or api_p, "문서값": base,
+                     "차이": base - (api_b or api_p), "차이율": round((base - (api_b or api_p)) / (api_b or api_p), 5), "판정": verdict, "비고": note})
+    return logs
+
+
 def extract_with_claude(text: str, api_hint: Dict, cfg_llm: Dict, max_tokens: Optional[int] = None) -> Dict:
     """공고문 텍스트 → 구조화 dict. api_hint: {'공고번호','공고명','수요기관'} (문서 식별용 힌트. 금액은 넣지 않는다).
     max_tokens: 설정값 대신 쓸 출력 한도(이전에 잘린 건은 2배로 시작)."""
@@ -248,14 +444,7 @@ def extract_with_claude(text: str, api_hint: Dict, cfg_llm: Dict, max_tokens: Op
             _STRUCTURED_STATE["ok"] = False
             return client.messages.create(**kw)
 
-    resp = _create(**kwargs)
-    if getattr(resp, "stop_reason", "") == "max_tokens":     # 사고 토큰까지 포함해 잘린 경우 1회 2배로 재시도
-        kwargs["max_tokens"] = kwargs["max_tokens"] * 2
-        resp = _create(**kwargs)
-        if getattr(resp, "stop_reason", "") == "max_tokens":
-            raise ValueError("응답이 max_tokens 에서 잘림 — config.llm.max_tokens 를 늘리세요")
-    if getattr(resp, "stop_reason", "") == "refusal":
-        raise ValueError("모델이 응답을 거부함(refusal)")
+    resp = _finish_call(_create, kwargs)
     out = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
     data = normalize_doc(_parse_json(out))
     data["_model"] = cfg_llm.get("model")
@@ -418,15 +607,17 @@ BATCH_CHUNK = 500
 
 
 def submit_batches(client, items: List[Tuple[str, str, Dict]], cfg_llm: Dict, chunk: int = BATCH_CHUNK,
-                   max_tokens_by_key: Optional[Dict[str, int]] = None) -> List[Dict]:
+                   max_tokens_by_key: Optional[Dict[str, int]] = None, params_builder=None) -> List[Dict]:
     """items: [(공고키, 텍스트, 힌트)]. 반환: [{'id', 'keys', 'status'}]. 구조화 출력이 거부되면 일반 요청으로 재시도.
-    max_tokens_by_key: 공고키별 max_tokens 재정의(이전에 max_tokens 에서 잘린 건은 2배로 재제출)."""
+    max_tokens_by_key: 공고키별 max_tokens 재정의(이전에 max_tokens 에서 잘린 건은 2배로 재제출).
+    params_builder: 요청 파라미터 생성 함수(기본 build_request_params, 2차 공종 추출은 build_trade_request_params)."""
     out = []
     mt = max_tokens_by_key or {}
+    build = params_builder or build_request_params
     for i in range(0, len(items), chunk):
         part = items[i:i + chunk]
         for structured in (bool(cfg_llm.get("structured_output", True)), False):
-            reqs = [{"custom_id": k, "params": build_request_params(t, h, cfg_llm, structured, max_tokens=mt.get(k))} for k, t, h in part]
+            reqs = [{"custom_id": k, "params": build(t, h, cfg_llm, structured, max_tokens=mt.get(k))} for k, t, h in part]
             try:
                 b = client.messages.batches.create(requests=reqs)
                 out.append({"id": b.id, "keys": [k for k, _, _ in part], "status": "submitted", "structured": structured})
@@ -439,8 +630,9 @@ def submit_batches(client, items: List[Tuple[str, str, Dict]], cfg_llm: Dict, ch
     return out
 
 
-def fetch_batch(client, batch_id: str, model: str = "") -> Tuple[str, Dict[str, Dict], Dict[str, int]]:
-    """반환 (processing_status, {공고키: doc 또는 {'_error':…}}, request_counts dict)."""
+def fetch_batch(client, batch_id: str, model: str = "", parser=None) -> Tuple[str, Dict[str, Dict], Dict[str, int]]:
+    """반환 (processing_status, {공고키: doc 또는 {'_error':…}}, request_counts dict). parser: 응답 텍스트 → dict(기본 parse_response_text)."""
+    parse = parser or parse_response_text
     b = client.messages.batches.retrieve(batch_id)
     counts = {}
     rc = getattr(b, "request_counts", None)
@@ -456,7 +648,7 @@ def fetch_batch(client, batch_id: str, model: str = "") -> Tuple[str, Dict[str, 
             msg = r.result.message
             text = "".join(getattr(blk, "text", "") for blk in msg.content if getattr(blk, "type", "") == "text")
             try:
-                d = parse_response_text(text, model)
+                d = parse(text, model)
                 d["_usage_in"] = getattr(getattr(msg, "usage", None), "input_tokens", None)
                 d["_usage_out"] = getattr(getattr(msg, "usage", None), "output_tokens", None)
                 d["_batch_id"] = batch_id
