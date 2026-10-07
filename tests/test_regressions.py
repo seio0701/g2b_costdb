@@ -465,6 +465,9 @@ def test_included_trades():
                        "포함공종_API": ["건축·토목·조경", "전기", "기계설비·가스시설시공", "건축"]})
     assert bundled_trades_by_project(tr) == {"P1": "건축(+토목·조경); 기계설비(+가스시설시공)"}, bundled_trades_by_project(tr)
     assert bundled_trades_by_project(pd.DataFrame()) == {}
+    from g2b_costdb.build_excel import _clean
+    assert _clean("도장\x01·습식·방수·석공사업") == "도장·습식·방수·석공사업", "API 업종명의 제어문자는 Excel 셀에서 제거"
+    assert _clean("a\ud800b") == "ab" and _clean("정상") == "정상"
 
 
 def _hwp_record(tag: int, payload: bytes, level: int = 0) -> bytes:

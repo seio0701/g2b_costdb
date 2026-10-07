@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import re
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -27,9 +28,14 @@ S_TRADE = "04_공사비DB_공종별"
 S_FAC = "05_공사비DB_시설합산"
 
 
+_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff]")   # openpyxl 이 거부하는 제어문자·서로게이트(API 업종명·LLM 출력에 섞여 들어옴)
+
+
 def _clean(v):
     if v is None or v is pd.NA or v is pd.NaT:
         return None
+    if isinstance(v, str):
+        v = _ILLEGAL.sub("", v)
     if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
         return None
     if isinstance(v, (pd.Timestamp, dt.datetime)):
