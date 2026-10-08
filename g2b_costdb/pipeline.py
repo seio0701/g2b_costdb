@@ -419,7 +419,7 @@ def _attach_report(cfg, latest, texts, notes_df):
     if not notes_df.empty:
         for no, g in notes_df.groupby(notes_df["공고번호"].astype(str)):
             by_no[no] = g
-    unsupported = {".xls", ".xlsb", ".doc", ".pptx", ".7z", ".egg", ".cell", ".pme", ".dwg", ".jpg", ".png"}
+    unsupported = {".xlsb", ".doc", ".pptx", ".7z", ".egg", ".cell", ".pme", ".dwg", ".jpg", ".png"}      # .xls 는 xlrd 로 지원
 
     def cause(row):
         g = by_no.get(str(row["공고번호"]))
@@ -671,14 +671,19 @@ def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = Fa
         import anthropic  # type: ignore
         client = anthropic.Anthropic(api_key=os.environ.get(env) or None)
         retry_mt = _truncated_retry_tokens(cfg, docs, todo)
+
+        def _keep(b):                                    # 청크(500건)마다 바로 기록 → 뒤 청크가 실패해도 앞 배치를 잃지 않는다(이중 과금 방지)
+            state["batches"].append(b)
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=1)
         try:
             submitted = extract_llm.submit_batches(client, [(k, texts[k], hints.get(k, {})) for k in todo], cfg["llm"],
-                                                   max_tokens_by_key=retry_mt)
+                                                   max_tokens_by_key=retry_mt, on_submitted=_keep)
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
             raise SystemExit(f"[중단] Claude API 인증 실패: {e}. {env} 값을 확인하세요.")
-        state["batches"].extend(submitted)
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=1)
+        except Exception as e:  # noqa: BLE001
+            kept = getattr(e, "submitted", None) or []
+            raise SystemExit(f"[중단] 배치 제출 실패: {e}. 이미 제출된 배치 {len(kept)}개는 기록했으니 extract --batch 로 수거한 뒤 다시 --yes 하세요.")
         print(f"배치 {len(submitted)}개 제출 (공고 {len(todo)}건). 대개 1시간 안에, 늦어도 24시간 안에 끝납니다.")
         print("결과 수거:  python -m g2b_costdb.pipeline extract --batch")
         return
@@ -711,7 +716,9 @@ def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = Fa
 
 # ── 2차 추출: 내역서 집계표의 공종별 금액(건축 공고·통합발주 공고만) ─────────────────────────────
 TRADE_INPUT_CHARS = 20000
-_TRADE_TEXT_HINT = re.compile(r"공종별|집계|총괄|원가계산|공사비\s*내역")
+# 본문(공고문·현장설명서)만으로 2차 대상에 넣는 단서: 공종별 금액 표가 있을 법한 표현만('원가계산에 의한 예정가격' 같은 상투어는 제외)
+_TRADE_TEXT_HINT = re.compile(r"공종별\s*(금액|공사비|내역|추정가격|예정가격)|집계표|총괄\s*(내역|집계)|원가계산서"
+                              r"|(건축|토목|기계|조경|전기|정보통신|통신|소방|철거)[^\n]{0,20}\d{1,3}(,\d{3}){2,}")
 _TEXT_BLOCK = re.compile(r"^===== \[(.+?)\] =====$", re.M)
 
 
@@ -785,13 +792,15 @@ def _trade_context(cfg, limit: Optional[int] = None):
     max_chars = int(cfg["llm"].get("trades_max_input_chars", TRADE_INPUT_CHARS))
     bid_of = dict(zip(latest["공고키"], latest["공고번호"].astype(str)))
     inputs, skipped = {}, []
-    for k in todo:
+    for n, k in enumerate(todo, 1):
+        if len(todo) > 200 and n % 200 == 0:
+            print(f"  집계표 발췌 중 … {n}/{len(todo)}")
         snip, used = _trade_input(cfg, bid_of.get(k, ""), texts.get(k, ""), max_chars)
         if snip:
             inputs[k] = (snip, used)
         else:
             skipped.append(k)
-            tdocs[k] = {"_error": "건너뜀: 집계표 없음(첨부에 내역서 Excel 없고 본문에 공종별 금액 단서 없음)"}
+            tdocs[k] = {"_error": "건너뜀: 집계표 없음(첨부에 내역서 Excel 없고 본문에 공종별 금액 표 단서 없음)"}
     todo = [k for k in todo if k in inputs]
     if limit:
         amt = dict(zip(latest["공고키"], pd.to_numeric(latest["추정가격"], errors="coerce").fillna(0)))
@@ -800,8 +809,9 @@ def _trade_context(cfg, limit: Optional[int] = None):
     hints = {r["공고키"]: {"공고번호": r["공고번호"], "공고명": r["공고명"], "수요기관": r["수요기관"], "공종": r["공종"]}
              for _, r in latest.iterrows()}
     done = len([k for k in targets if k in tdocs and "_error" not in tdocs[k]])
-    print(f"2차 추출 대상 {len(targets)}건(건축 공고 + 통합발주 공고, 고유 공고키) 중 완료 {done}건, 이번 대상 {len(todo)}건, "
-          f"집계표 없음 {len(skipped)}건(제외)")
+    n_xl = sum(1 for k in todo if inputs[k][1])
+    print(f"2차 추출 대상 {len(targets)}건(건축 공고 + 통합발주 공고, 고유 공고키) 중 완료 {done}건, 이번 대상 {len(todo)}건"
+          f"(내역서 Excel 있음 {n_xl}건 / 본문 표만 {len(todo) - n_xl}건), 집계표 없음 {len(skipped)}건(제외)")
     return latest, texts, tdocs, todo, inputs, hints, cache_path, max_chars
 
 
@@ -836,11 +846,14 @@ def _verify_trades_and_report(cfg, latest, tdocs, n_ok=None, n_err=None):
     with_items = len({k for k in latest["공고키"] if k in tdocs and "_error" not in tdocs[k] and (tdocs[k].get("공종별금액") or [])})
     usage_in = sum((d.get("_usage_in") or 0) for d in tdocs.values() if isinstance(d, dict))
     usage_out = sum((d.get("_usage_out") or 0) for d in tdocs.values() if isinstance(d, dict))
-    es = _error_summary(tdocs)
+    is_skip = lambda d: isinstance(d, dict) and str(d.get("_error", "")).startswith("건너뜀")
+    n_skip = sum(1 for d in tdocs.values() if is_skip(d))
+    es = _error_summary({k: d for k, d in tdocs.items() if not is_skip(d)})      # 건너뜀(집계표 없음)은 실패가 아니므로 따로 센다
     if es:
         print(es)
     head = f"2차 추출 성공 {n_ok}건 / 실패 {n_err}건, " if n_ok is not None else ""
-    print(f"{head}완료 {done}건(공종별 금액이 나온 공고 {with_items}건, 누적 토큰 입력 {usage_in:,} 출력 {usage_out:,}), 검증로그 {len(logs)}건")
+    print(f"{head}완료 {done}건(공종별 금액이 나온 공고 {with_items}건, 누적 토큰 입력 {usage_in:,} 출력 {usage_out:,}), "
+          f"집계표 없음(건너뜀) {n_skip}건, 검증로그 {len(logs)}건")
     if logs:
         print(pd.DataFrame(logs)["판정"].value_counts().to_string())
 
@@ -867,9 +880,10 @@ def stage_extract_trades(cfg, yes: bool = False, batch: bool = False, limit: Opt
         import anthropic  # type: ignore
         return anthropic.Anthropic(api_key=os.environ.get(env) or None)
 
-    def _attach_files(k, d):
+    def _attach_files(k, d, files_map=None):
+        """04b 출처파일: 제출 때 상태 파일에 적어 둔 파일명(files_map) 우선, 없으면 이번 실행의 입력."""
         if isinstance(d, dict) and "_error" not in d:
-            d["_files"] = inputs.get(k, ("", []))[1] or d.get("_files") or []
+            d["_files"] = (files_map or {}).get(k) or inputs.get(k, ("", []))[1] or d.get("_files") or []
         return d
 
     if batch:
@@ -887,7 +901,7 @@ def stage_extract_trades(cfg, yes: bool = False, batch: bool = False, limit: Opt
                     if k in tdocs and "_error" not in tdocs[k]:
                         continue
                     d = got.get(k, {"_error": "배치 결과에 없음"})
-                    tdocs[k] = _attach_files(k, d)
+                    tdocs[k] = _attach_files(k, d, b.get("files"))
                     n_fix += 0 if "_error" in d else 1
                     n_still += 1 if "_error" in d else 0
             _save_docs(cache_path, tdocs)
@@ -906,7 +920,7 @@ def stage_extract_trades(cfg, yes: bool = False, batch: bool = False, limit: Opt
                     continue
                 for k in b["keys"]:
                     d = got.get(k, {"_error": "배치 결과에 없음"})
-                    tdocs[k] = _attach_files(k, d)
+                    tdocs[k] = _attach_files(k, d, b.get("files"))
                     n_ok += 0 if "_error" in d else 1
                     n_err += 1 if "_error" in d else 0
                 b["status"] = "ended"
@@ -917,6 +931,9 @@ def stage_extract_trades(cfg, yes: bool = False, batch: bool = False, limit: Opt
             if any(b.get("status") != "ended" for b in state["batches"]):
                 return
             _verify_trades_and_report(cfg, latest, tdocs, n_ok, n_err)
+            new_todo = [k for k in todo if not (k in tdocs and "_error" not in tdocs[k])]
+            if new_todo:
+                print(f"[안내] 아직 제출되지 않은 2차 대상 {len(new_todo)}건(실패 재대상 또는 1차 결과로 새로 대상이 된 공고) → extract-trades --batch --yes 로 제출")
             return
         _estimate(True)
         _save_docs(cache_path, tdocs)                    # 건너뜀 표시 저장
@@ -928,16 +945,20 @@ def stage_extract_trades(cfg, yes: bool = False, batch: bool = False, limit: Opt
             return
         client = _client()
         retry_mt = _truncated_retry_tokens(cfg, tdocs, todo)
+
+        def _keep(b):                                    # 청크마다 바로 기록(배치 ID + 공고별 출처파일) → 뒤 청크 실패 시에도 수거 가능, 이중 과금 방지
+            b["kind"] = "trades"
+            b["files"] = {k: inputs[k][1] for k in b["keys"] if k in inputs}
+            state["batches"].append(b)
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=1)
         try:
             submitted = extract_llm.submit_batches(client, [(k, inputs[k][0], hints.get(k, {})) for k in todo], cfg["llm"],
-                                                   max_tokens_by_key=retry_mt, params_builder=extract_llm.build_trade_request_params)
+                                                   max_tokens_by_key=retry_mt, params_builder=extract_llm.build_trade_request_params,
+                                                   on_submitted=_keep)
         except Exception as e:  # noqa: BLE001
-            raise SystemExit(f"[중단] 2차 배치 제출 실패: {e}")
-        for b in submitted:
-            b["kind"] = "trades"
-        state["batches"].extend(submitted)
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=1)
+            kept = getattr(e, "submitted", None) or []
+            raise SystemExit(f"[중단] 2차 배치 제출 실패: {e}. 이미 제출된 배치 {len(kept)}개는 기록했으니 extract --batch --trades 로 수거한 뒤 다시 --yes 하세요.")
         print(f"2차 배치 {len(submitted)}개 제출 (공고 {len(todo)}건). 결과 수거:  python -m g2b_costdb.pipeline extract-trades --batch   (또는 extract --batch --trades)")
         return
 

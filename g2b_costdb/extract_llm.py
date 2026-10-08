@@ -223,6 +223,17 @@ def parse_response_text(out: str, model: str = "") -> Dict:
 _STRUCTURED_STATE = {"ok": True}      # 한 번 스키마가 거부되면(400) 이 프로세스에서는 더 시도하지 않는다
 
 
+NONSTREAM_MAX_TOKENS = 21_333      # SDK 가 비스트리밍 요청에 허용하는 상한(10분 안에 끝날 수 있는 크기). 넘으면 스트리밍으로 받아야 한다
+
+
+def _messages_call(client, **kw):
+    """max_tokens 가 비스트리밍 상한을 넘으면(잘린 건 2배 재시도 등) 스트리밍으로 받아 최종 메시지를 돌려준다."""
+    if int(kw.get("max_tokens", 0) or 0) > NONSTREAM_MAX_TOKENS:
+        with client.messages.stream(**kw) as s:
+            return s.get_final_message()
+    return client.messages.create(**kw)
+
+
 def _finish_call(create, kwargs: Dict):
     """호출 후 잘림(max_tokens)이면 1회 2배로 재시도, 거부(refusal)면 예외."""
     resp = create(**kwargs)
@@ -230,7 +241,7 @@ def _finish_call(create, kwargs: Dict):
         kwargs["max_tokens"] = kwargs["max_tokens"] * 2
         resp = create(**kwargs)
         if getattr(resp, "stop_reason", "") == "max_tokens":
-            raise ValueError("응답이 max_tokens 에서 잘림 — config.llm.max_tokens 를 늘리세요")
+            raise ValueError("응답 해석 실패(stop=max_tokens): 두 번 잘림 — config.llm.max_tokens 를 늘리세요")   # 'stop=max_tokens' 가 있어야 다음 실행에서 2배 재요청
     if getattr(resp, "stop_reason", "") == "refusal":
         raise ValueError("모델이 응답을 거부함(refusal)")
     return resp
@@ -244,15 +255,15 @@ def _structured_create(client, schema: Dict):
     def _create(**kw):
         try:
             if state["structured"]:
-                return client.messages.create(output_config={"format": {"type": "json_schema", "schema": schema}}, **kw)
-            return client.messages.create(**kw)
+                return _messages_call(client, output_config={"format": {"type": "json_schema", "schema": schema}}, **kw)
+            return _messages_call(client, **kw)
         except anthropic.BadRequestError as e:
             if not state["structured"]:
                 raise
             log.warning("구조화 출력 미지원/거부(%s) → 일반 응답 파싱으로 폴백(이 실행에서는 다시 시도하지 않음)", str(e)[:160])
             state["structured"] = False
             _STRUCTURED_STATE["ok"] = False
-            return client.messages.create(**kw)
+            return _messages_call(client, **kw)
     return _create
 
 
@@ -266,11 +277,14 @@ TRADE_SYSTEM = (
     "세부 공종(철근콘크리트·미장·창호 등)은 넣지 않습니다. 금액은 원 단위 정수 자릿수만 적고 '천원' 단위 표는 ×1000 합니다(단위 표기를 '단위'에 적음). "
     "'합계_원'에는 집계표의 총합계(총공사비·총계) 값을, '금액기준'에는 그 합계가 부가세 포함인지·제외(순공사비)인지·직접공사비인지 적고 모르면 '불명'. "
     "집계표에 합계만 있고 공종별 금액이 없으면 '공종별금액'은 빈 배열로 둡니다. 추정하거나 계산해 만들지 않습니다. "
+    "발췌는 셀 위치를 탭으로 보존한 것입니다: 첫 열에 있는 행은 대공종(건축공사·기계설비공사 등), 들여쓴 행은 그 대공종의 세부 공종이며 '소계'는 바로 위 대공종의 합입니다. "
+    "대공종 소계 안에 이미 든 가설공사·안전관리비 등은 '공통가설'로 따로 적지 말고, 집계표 최상위에 별도 행으로 있는 공통가설(가설전기·가설용수 포함)만 '공통가설'로 적습니다. "
     "각 값의 근거 행을 '근거문구'에 짧게 인용합니다."
 )
 _TRADE_KEYS = ["공사금액", "공사 금액", "공사비 내역", "공종별", "집계", "총괄", "원가계산", "공사개요", "구분"]
 TRADE_FIELDS = {"금액기준": "부가세포함|부가세제외|직접공사비|불명", "관급자재_포함여부": "포함|제외|불명", "단위": "원|천원|불명",
-                "합계_원": "integer|null", "공종별금액": "[{공종, 항목명_원문, 금액_원}]", "출처": "string", "신뢰도": "high|medium|low", "근거문구": "string"}
+                "합계_원": "integer|null", "공종별금액": "[{공종(" + "|".join(TRADE_LABELS) + " 중 하나), 항목명_원문, 금액_원}]",
+                "출처": "string", "신뢰도": "high|medium|low", "근거문구": "string"}
 
 
 def trade_output_schema() -> Dict:
@@ -337,6 +351,24 @@ def build_trade_request_params(snippet: str, api_hint: Dict, cfg_llm: Dict, stru
     return params
 
 
+def _trade_label(raw: str) -> str:
+    """모델이 적은 공종명을 13개 라벨로. 구조화 출력이 거부돼 일반 응답으로 폴백한 경우 '건축공사비'·'기계설비(공조)' 같은 원문이 올 수 있다."""
+    lab = raw.strip()
+    if lab in TRADE_LABELS:
+        return lab
+    if "가설" in lab:
+        return "공통가설"
+    if "부가" in lab:
+        return "부가세"
+    if "관급" in lab:
+        return "관급자재"
+    if any(w in lab for w in ("간접", "일반관리", "이윤", "경비", "보험")):
+        return "간접비"
+    from . import classify
+    labels = [l for l in classify._doc_labels(lab)[0] if l in TRADE_LABELS]
+    return labels[0] if len(labels) == 1 else "기타"
+
+
 def normalize_trade_doc(data: Dict) -> Dict:
     """2차 추출 출력 정규화: 금액 → 정수(원), 빈 항목 제거, 공종 라벨 밖 값은 '기타', 비율 배분용 공종 합(_공종합_원) 계산."""
     out = dict(data)
@@ -349,9 +381,7 @@ def normalize_trade_doc(data: Dict) -> Dict:
         amt = _num(it.get("금액_원"))
         if amt is None:
             continue
-        lab = str(it.get("공종") or "").strip()
-        if lab not in TRADE_LABELS:
-            lab = "기타"
+        lab = _trade_label(str(it.get("공종") or ""))
         items.append({"공종": lab, "항목명_원문": str(it.get("항목명_원문") or "")[:80], "금액_원": int(round(amt))})
     out["공종별금액"] = items
     out["_공종합_원"] = sum(i["금액_원"] for i in items if i["공종"] in TRADE_ALLOC_LABELS) or None
@@ -373,7 +403,7 @@ def extract_trades_with_claude(snippet: str, api_hint: Dict, cfg_llm: Dict, max_
     kwargs = dict(model=cfg_llm.get("model", "claude-sonnet-5"),
                   max_tokens=int(max_tokens or cfg_llm.get("max_tokens", DEFAULT_MAX_TOKENS)),
                   system=TRADE_SYSTEM, messages=[{"role": "user", "content": build_trade_prompt(snippet, api_hint)}])
-    create = _structured_create(client, trade_output_schema()) if bool(cfg_llm.get("structured_output", True)) else (lambda **kw: client.messages.create(**kw))
+    create = _structured_create(client, trade_output_schema()) if bool(cfg_llm.get("structured_output", True)) else (lambda **kw: _messages_call(client, **kw))
     resp = _finish_call(create, kwargs)
     out = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
     data = parse_trade_response_text(out, kwargs["model"])
@@ -398,6 +428,10 @@ def cross_verify_trades(bid_no: str, api_row: Dict, tdoc: Dict, vat: float = 0.1
         logs.append({"공고번호": bid_no, "항목": "공종합=집계표합계", "API값": total, "문서값": gross, "차이": gross - total, "차이율": round(r, 5),
                      "판정": "정상" if abs(r) <= 0.01 else ("경고" if abs(r) <= 0.05 else "경고"),
                      "비고": "" if abs(r) <= 0.01 else "공종 행 합과 합계 행 불일치(간접비·관급·부가세 행 누락 또는 세부 공종 중복 의심)"})
+    etc = sum(i["금액_원"] for i in items if i["공종"] == "기타")
+    if tsum and etc / tsum > 0.5:
+        logs.append({"공고번호": bid_no, "항목": "공종 라벨 미매핑(문서)", "문서값": etc, "판정": "경고",
+                     "비고": "'기타' 금액이 공종 합의 50% 초과 → 공종명을 라벨로 못 바꾼 것(비구조화 응답) 의심, 04b 세부공종 확인"})
     base = total or gross
     api_p, api_b = _num(api_row.get("추정가격")), _num(api_row.get("기초금액"))
     if base and (api_p or api_b):
@@ -434,15 +468,15 @@ def extract_with_claude(text: str, api_hint: Dict, cfg_llm: Dict, max_tokens: Op
         nonlocal structured
         try:
             if structured:
-                return client.messages.create(output_config={"format": {"type": "json_schema", "schema": output_schema()}}, **kw)
-            return client.messages.create(**kw)
+                return _messages_call(client, output_config={"format": {"type": "json_schema", "schema": output_schema()}}, **kw)
+            return _messages_call(client, **kw)
         except anthropic.BadRequestError as e:
             if not structured:
                 raise
             log.warning("구조화 출력 미지원/거부(%s) → 일반 응답 파싱으로 폴백(이 실행에서는 다시 시도하지 않음)", str(e)[:160])
             structured = False
             _STRUCTURED_STATE["ok"] = False
-            return client.messages.create(**kw)
+            return _messages_call(client, **kw)
 
     resp = _finish_call(_create, kwargs)
     out = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
@@ -607,7 +641,7 @@ BATCH_CHUNK = 500
 
 
 def submit_batches(client, items: List[Tuple[str, str, Dict]], cfg_llm: Dict, chunk: int = BATCH_CHUNK,
-                   max_tokens_by_key: Optional[Dict[str, int]] = None, params_builder=None) -> List[Dict]:
+                   max_tokens_by_key: Optional[Dict[str, int]] = None, params_builder=None, on_submitted=None) -> List[Dict]:
     """items: [(공고키, 텍스트, 힌트)]. 반환: [{'id', 'keys', 'status'}]. 구조화 출력이 거부되면 일반 요청으로 재시도.
     max_tokens_by_key: 공고키별 max_tokens 재정의(이전에 max_tokens 에서 잘린 건은 2배로 재제출).
     params_builder: 요청 파라미터 생성 함수(기본 build_request_params, 2차 공종 추출은 build_trade_request_params)."""
@@ -621,11 +655,14 @@ def submit_batches(client, items: List[Tuple[str, str, Dict]], cfg_llm: Dict, ch
             try:
                 b = client.messages.batches.create(requests=reqs)
                 out.append({"id": b.id, "keys": [k for k, _, _ in part], "status": "submitted", "structured": structured})
+                if on_submitted:
+                    on_submitted(out[-1])                 # 청크마다 상태 파일에 바로 기록 → 뒤 청크가 실패해도 앞 배치 ID 를 잃지 않는다
                 break
             except Exception as e:  # noqa: BLE001
                 if structured and "output_config" in str(e) or (structured and "400" in str(e)):
                     log.warning("구조화 출력 배치가 거부됨(%s) → 일반 요청으로 재제출", str(e)[:120])
                     continue
+                e.submitted = out                           # 이미 만들어진 배치를 호출부가 저장할 수 있게 예외에 붙여 전달
                 raise
     return out
 

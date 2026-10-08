@@ -364,10 +364,13 @@ def extract_docx(path: str) -> str:
 
 
 # 내역서 집계표 시트·파일·행 식별(2차 공종별 금액 추출용). 시트명이 맞으면 행 제한을 크게 둬 집계표가 잘리지 않게 한다
-_COST_SHEET_RE = re.compile(r"총괄|집계|갑지|원가|공종별|공사비|요약|총괄표|내역총괄", re.I)
-_COST_FILE_RE = re.compile(r"내역|산출|원가|총괄|집계|공사비|갑지", re.I)
-_COST_ROW_RE = re.compile(r"건축|토목|기계|설비|전기|통신|소방|조경|철거|해체|가설|간접|합계|소계|총계|^계$|부가가치세|부가세|관급|이윤|일반관리|순공사|총공사|공사비|직접|단위|공종|구분")
+_COST_SHEET_RE = re.compile(r"총괄|집계|갑지|원가|요약", re.I)                 # '공종별'·'공사비' 는 세부 시트명(공종별내역서·공사비내역서)과 겹쳐 제외
+_COST_FILE_RE = re.compile(r"내역|원가|총괄|집계|공사비|갑지", re.I)            # '산출' 은 수량·단가산출서라 제외
+_COST_FILE_EXCL_RE = re.compile(r"관급|수량산출|단가산출|일위대가|자재", re.I)
+_COST_ROW_RE = re.compile(r"건축|토목|기계|설비|전기|통신|소방|조경|철거|해체|가설|간접|합계|소계|총계|^계$|부가가치세|부가세|관급|이윤|일반관리|순공사|총공사|공사비|직접|단위|공종|구분"
+                          r"|보험료|공제부금|안전관리비|안전보건관리비|환경보전비|보증수수료|보증서|재료비|노무비|경비|총원가|도급액|도급금액|공사원가")
 COST_SHEET_MAX_ROWS = 3000
+_COST_FALLBACK_ROWS = 80                 # 집계표류 시트가 없을 때 각 시트 상단만(갑지·집계표는 보통 시트 상단에 있다)
 
 
 def _iter_sheets(path: str):
@@ -377,12 +380,24 @@ def _iter_sheets(path: str):
         import xlrd  # type: ignore
         book = xlrd.open_workbook(path, on_demand=True)
         for sh in book.sheets():
-            yield sh.name, (tuple(sh.row_values(i)) for i in range(sh.nrows))
+            yield sh.name, _xls_rows(sh)        # 별도 함수로 sh 를 즉시 바인딩(제너레이터식의 지연 바인딩으로 마지막 시트만 읽히는 문제 방지)
         return
     from openpyxl import load_workbook
     wb = load_workbook(path, read_only=True, data_only=True)
     for ws in wb.worksheets:
         yield ws.title, ws.iter_rows(values_only=True)
+
+
+def _xls_rows(sh):
+    return (tuple(sh.row_values(i)) for i in range(sh.nrows))
+
+
+def has_cost_sheet(path: str) -> bool:
+    """시트명만 보고 집계표류 시트가 있는지(행은 읽지 않음)."""
+    try:
+        return any(_COST_SHEET_RE.search(str(t)) for t, _ in _iter_sheets(path))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _cell(v) -> str:
@@ -424,9 +439,10 @@ def find_cost_sheet_files(files_dir: str, bid_no: str) -> List[str]:
         return out
     for dirpath, _, names in os.walk(root):
         for n in names:
-            if os.path.splitext(n.lower())[1] in (".xlsx", ".xlsm", ".xls") and _COST_FILE_RE.search(n):
+            if os.path.splitext(n.lower())[1] in (".xlsx", ".xlsm", ".xls") and _COST_FILE_RE.search(n) and not _COST_FILE_EXCL_RE.search(n):
                 out.append(os.path.join(dirpath, n))
-    return sorted(out)
+    # 집계표류 시트를 가진 파일을 먼저(예산을 산출서류가 먼저 쓰지 않게), 그 다음 이름순
+    return sorted(out, key=lambda f: (not has_cost_sheet(f), os.path.basename(f)))
 
 
 def _looks_numeric(v) -> bool:
@@ -437,14 +453,19 @@ def _looks_numeric(v) -> bool:
 
 
 def cost_sheet_snippets(path: str, max_chars: int = 12000, max_rows: int = COST_SHEET_MAX_ROWS) -> str:
-    """내역서 Excel 에서 집계표 후보 행만 추린다: 집계표류 시트(없으면 전체 시트)에서 첫 글자 셀이 공종·합계·단위 어휘를 담고
-    같은 행에 1,000 이상 숫자가 있는 행(단위 표기 행은 숫자 없어도 포함). LLM 입력을 작게 만들기 위한 전처리이며 금액 해석은 하지 않는다."""
+    """내역서 Excel 에서 집계표 후보 행만 추린다. 집계표류 시트(총괄·집계·갑지·원가·요약)에서
+    ① 공종·합계·비목 어휘가 있고 같은 행에 1,000 이상 숫자가 있는 행 ② 단위 표기 행 ③ 머리글·대공종 헤더처럼 숫자 없이 어휘만 있는 짧은 행(열 의미와 계층을 모델이 알도록)을 남긴다.
+    빈 셀은 탭으로 남겨 열 위치(들여쓰기)를 보존한다. 집계표류 시트가 없으면 각 시트 상단 80행만 보고, 합계류 행이 전혀 없으면 집계표가 아니므로 빈 문자열(→ 건너뜀).
+    LLM 입력을 작게 만들기 위한 전처리이며 금액 해석은 하지 않는다."""
     try:
         sheets = list(_iter_sheets(path))
     except Exception as e:  # noqa: BLE001
         log.info("집계표 읽기 실패 %s: %s", path, e)
         return ""
-    picked = [(t, r) for t, r in sheets if _COST_SHEET_RE.search(str(t))] or sheets
+    picked = [(t, r) for t, r in sheets if _COST_SHEET_RE.search(str(t))]
+    fallback = not picked
+    if fallback:
+        picked, max_rows = sheets, min(max_rows, _COST_FALLBACK_ROWS)
     out: List[str] = []
     for title, rows in picked:
         kept = []
@@ -456,11 +477,14 @@ def cost_sheet_snippets(path: str, max_chars: int = 12000, max_rows: int = COST_
             if not texts:
                 continue
             head = " ".join(texts[:2])
-            if "단위" in head or (_COST_ROW_RE.search(head) and any(_looks_numeric(v) for v in row)):
-                kept.append("\t".join(c for c in cells if c))
+            has_num = any(_looks_numeric(v) for v in row)
+            if "단위" in head or (_COST_ROW_RE.search(head) and (has_num or i < 10 or len(texts) <= 2)):
+                kept.append("\t".join(cells).rstrip("\t"))
         if kept:
             out.append(f"## [{os.path.basename(path)}] 시트: {title}\n" + "\n".join(kept))
     text = "\n\n".join(out)
+    if fallback and not re.search(r"합계|총계|총공사비|도급액", text):
+        return ""
     return text[:max_chars]
 
 

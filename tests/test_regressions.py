@@ -581,7 +581,169 @@ def test_trade_second_pass(tmp):
     snip2, used = pipeline._trade_input(cfg, "B1", text, 20000)
     assert used == ["공내역서_B1.xlsx"] and "총괄집계표" in snip2 and "세부항목0" not in snip2 and "[공고문·현장설명서 발췌]" in snip2
     assert pipeline._trade_input(cfg, "B9", "공고문에 공사금액 합계만 있고 다른 단서 없음", 20000) == ("", []), "내역서도 단서도 없으면 제외"
-    assert pipeline._trade_input(cfg, "B9", "공종별 집계: 건축 1,000 토목 200", 20000)[0].startswith("## [공고문·현장설명서 발췌]")
+    assert pipeline._trade_input(cfg, "B9", "공종별 금액: 건축 1,000,000,000 토목 200,000,000", 20000)[0].startswith("## [공고문·현장설명서 발췌]")
+
+
+def test_trade_review_fixes(tmp):
+    """반박 검증에서 나온 결함의 회귀: 계층형 집계표 발췌, 세부내역만 있는 파일, .xls 다중 시트, 라벨 매핑, 본문 단서, 배치 부분 실패 보존, 스트리밍 전환."""
+    from types import SimpleNamespace as NS
+    from unittest import mock
+    from openpyxl import Workbook
+    from g2b_costdb import attachments, pipeline
+    from g2b_costdb.extract_llm import (_trade_label, normalize_trade_doc, cross_verify_trades, submit_batches, fetch_batch, _messages_call,
+                                        build_trade_request_params, parse_trade_response_text, TRADE_SYSTEM, trade_output_schema)
+    d = os.path.join(tmp, "files2", "C1")
+    os.makedirs(d)
+    # ① 계층형 집계표: 머리글·대공종 헤더(금액 없음)·들여쓴 세부·소계가 탭 위치를 유지한 채 남는다
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "공종별집계표"
+    for row in ([["(단위: 원)"], ["공종", "합계", "재료비", "노무비", "경비"], ["건축공사", None, None, None, None],
+                 [None, "가설공사", 300000000, 1, 1], [None, "철근콘크리트공사", 5000000000, 1, 1], [None, "소계", 5500000000, 1, 1],
+                 ["기계설비공사", None, None, None, None], [None, "위생기구설비", 400000000, 1, 1], [None, "소계", 400000000, 1, 1], ["합계", 5900000000, 1, 1, 1]]):
+        ws.append(row)
+    p = os.path.join(d, "설계내역서.xlsx")
+    wb.save(p)
+    s = attachments.cost_sheet_snippets(p)
+    lines = s.splitlines()
+    assert lines[1] == "(단위: 원)" and lines[2] == "공종\t합계\t재료비\t노무비\t경비" and "건축공사" in lines and "기계설비공사" in lines, lines
+    assert "\t소계\t5500000000\t1\t1" in lines and "\t가설공사\t300000000\t1\t1" in lines, "들여쓰기(빈 첫 셀) 보존"
+    # ② 집계표류 시트가 없고 세부내역만 있는 파일 → 빈 결과(건너뜀), 산출서·관급 파일은 후보에서 제외, 집계표 시트 있는 파일이 먼저
+    wb2 = Workbook()
+    ws2 = wb2.active
+    ws2.title = "공종별내역서"
+    for i in range(300):
+        ws2.append(["건축공사", "철근콘크리트공사", f"콘크리트 {i}", "m3", 10, 120000, 1200000])
+    wb2.save(os.path.join(d, "내역서.xlsx"))
+    wb2.save(os.path.join(d, "수량산출서.xlsx"))
+    wb2.save(os.path.join(d, "관급자재내역서.xlsx"))
+    assert attachments.cost_sheet_snippets(os.path.join(d, "내역서.xlsx")) == ""
+    assert [os.path.basename(f) for f in attachments.find_cost_sheet_files(os.path.join(tmp, "files2"), "C1")] == ["설계내역서.xlsx", "내역서.xlsx"]
+    # ③ .xls 다중 시트(가짜 xlrd book): 집계표 시트의 행이 읽혀야 한다(지연 바인딩 결함)
+    import xlrd
+
+    class _Sh:
+        def __init__(self, name, rows):
+            self.name, self._r, self.nrows = name, rows, len(rows)
+
+        def row_values(self, i):
+            return list(self._r[i])
+    book = NS(sheets=lambda: [_Sh("총괄집계표", [("공종", "금액"), ("건축공사", 20000000.0), ("기계설비공사", 3000000.0), ("총공사비", 27500000.0)]),
+                              _Sh("세부내역", [("품명", "금액")] + [(f"품{i}", 100.0) for i in range(5)])])
+    with mock.patch.object(xlrd, "open_workbook", return_value=book):
+        sx = attachments.cost_sheet_snippets(os.path.join(d, "내역서.xls"))
+        tx = attachments.extract_xls(os.path.join(d, "내역서.xls"))
+    assert sx.startswith("## [내역서.xls] 시트: 총괄집계표") and "건축공사\t20000000" in sx and "총공사비\t27500000" in sx and "품0" not in sx, sx
+    assert "## 총괄집계표" in tx and "품4\t100" in tx
+    # ④ 라벨 매핑(비구조화 폴백 응답) + '기타' 과다 경고
+    assert [_trade_label(x) for x in ("건축공사비", "기계설비(공조)", "전기(가설)", "산재보험료", "토목부문", "승강기설치", "조경")] == \
+        ["건축", "기계설비", "공통가설", "간접비", "토목", "기타", "조경"]
+    t = normalize_trade_doc({"합계_원": "100", "공종별금액": [{"공종": "승강기", "항목명_원문": "a", "금액_원": "90"}, {"공종": "건축", "항목명_원문": "b", "금액_원": "10"}]})
+    assert any(l["항목"] == "공종 라벨 미매핑(문서)" for l in cross_verify_trades("C1", {}, t)), "'기타' 90% → 라벨 미매핑 경고"
+    # ⑤ 본문 단서: 상투어는 대상 아님, 공종별 금액 표 표현만
+    assert not pipeline._TRADE_TEXT_HINT.search("예정가격은 원가계산에 의한 가격으로 결정하며 공종별 분리발주, 총괄 책임자, 집계")
+    assert pipeline._TRADE_TEXT_HINT.search("공종별 금액: 건축 1,234,567,000원") and pipeline._TRADE_TEXT_HINT.search("총괄집계표") \
+        and pipeline._TRADE_TEXT_HINT.search("기계설비공사 2,100,000,000원")
+    # ⑥ 2차 배치: params_builder 로 2차 system·schema, parser 로 2차 해석, 뒤 청크 실패 시 앞 배치 보존(on_submitted + e.submitted)
+    calls = {"n": 0, "kept": []}
+
+    class FakeBatches:
+        def create(self, requests):
+            calls["n"] += 1
+            calls["reqs"] = requests
+            if calls["n"] == 3:                       # 두 번째 제출의 2번째 청크에서 실패
+                raise RuntimeError("overloaded_error 529")
+            return NS(id=f"msgbatch_{calls['n']}", processing_status="in_progress")
+
+        def retrieve(self, bid):
+            return NS(processing_status="ended", request_counts=NS(processing=0, succeeded=1, errored=0, canceled=0, expired=0))
+
+        def results(self, bid):
+            txt = '{"금액기준": "부가세포함", "관급자재_포함여부": "제외", "단위": "원", "합계_원": "27,500,000,000", "공종별금액": [{"공종": "건축", "항목명_원문": "건축공사", "금액_원": "20000000000"}, {"공종": "기계설비공사", "항목명_원문": "기계", "금액_원": "3,000,000,000"}], "출처": "s", "신뢰도": "high", "근거문구": "r"}'
+            return [NS(custom_id="K1", result=NS(type="succeeded", message=NS(content=[NS(type="text", text=txt)], usage=NS(input_tokens=5, output_tokens=6))))]
+    client = NS(messages=NS(batches=FakeBatches()))
+    cfg_llm = {"model": "claude-sonnet-5", "max_tokens": 8000, "structured_output": True}
+    sub = submit_batches(client, [("K1", "발췌", {"공고번호": "K1"})], cfg_llm, params_builder=build_trade_request_params, on_submitted=calls["kept"].append)
+    prm = calls["reqs"][0]["params"]
+    assert prm["system"] == TRADE_SYSTEM and prm["output_config"]["format"]["schema"] == trade_output_schema() and sub[0]["id"] == "msgbatch_1" and calls["kept"] == sub
+    st, got, counts = fetch_batch(client, "msgbatch_1", "claude-sonnet-5", parser=parse_trade_response_text)
+    g = got["K1"]
+    assert g["합계_원"] == 27_500_000_000 and g["공종별금액"][1] == {"공종": "기계설비", "항목명_원문": "기계", "금액_원": 3_000_000_000} and g["_공종합_원"] == 23_000_000_000 and g["_usage_in"] == 5
+    calls["kept"].clear()
+    try:
+        submit_batches(client, [(f"K{i}", "x", {}) for i in range(1100)], cfg_llm, chunk=500, on_submitted=calls["kept"].append)
+        raise AssertionError("예외가 나야 함")
+    except RuntimeError as e:
+        assert len(getattr(e, "submitted", [])) == 1 and calls["kept"] == e.submitted and e.submitted[0]["keys"][0] == "K0", "앞 청크 배치 보존"
+    # ⑦ max_tokens 가 비스트리밍 상한을 넘으면 stream 으로 받는다
+    class _Stream:
+        def __init__(self, kw):
+            self.kw = kw
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_final_message(self):
+            return NS(stop_reason="end_turn", content=[], kw=self.kw)
+    used = {}
+    cl2 = NS(messages=NS(create=lambda **kw: used.setdefault("create", kw) or NS(stop_reason="end_turn", content=[]),
+                         stream=lambda **kw: _Stream(kw)))
+    r1 = _messages_call(cl2, model="m", max_tokens=16000, messages=[])
+    r2 = _messages_call(cl2, model="m", max_tokens=32000, messages=[])
+    assert used["create"]["max_tokens"] == 16000 and r2.kw["max_tokens"] == 32000, "32,000 은 스트리밍"
+
+
+def test_trade_allocation_formulas(tmp):
+    """05 문서배분_* 는 다른 공종 공고 안에 묶인 몫만(자기 공종 공고 제외), 중복경고는 건축 집계표 기준 — formulas 로 실제 계산."""
+    try:
+        import formulas  # type: ignore
+    except ImportError:
+        print("(formulas 없음 → 05 배분 수식 값 검증 생략)")
+        return
+    import logging
+    import warnings
+    from g2b_costdb.build_excel import build_workbook
+    fac = pd.DataFrame([{"프로젝트ID": "P1", "시설ID": "F1", "시설명": "s", "사업유형": "신축", "표2_대분류": "a", "표2_중분류": "b", "수요기관": "d",
+                         "공고건수_최신": 3, "최종공고일": "2025-01-01", "연면적_m2": 1000}])
+    base = {"프로젝트ID": "P1", "시설ID": "F1", "시설명": "s", "사업유형": "신축", "공고명": "n", "공고일시": "2025-01-01", "수요기관": "d", "공고차수": "000"}
+    latest = pd.DataFrame([dict(base, 공고번호="A", 공고키="A-000", 공종="건축", 기초금액=100), dict(base, 공고번호="M", 공고키="M-000", 공종="기계설비", 기초금액=50),
+                           dict(base, 공고번호="E", 공고키="E-000", 공종="전기", 기초금액=110)])
+    trade = pd.DataFrame([dict(base, 공고번호="A", 공고키="A-000", 공종="건축", 기초금액_API=100), dict(base, 공고번호="M", 공고키="M-000", 공종="기계설비", 기초금액_API=50),
+                          dict(base, 공고번호="E", 공고키="E-000", 공종="전기", 기초금액_API=110)])
+    det_rows = [("A", "A-000", "건축", lab, amt) for lab, amt in (("건축", 60), ("기계설비", 30), ("토목", 10), ("기타", 5), ("철거", 5), ("간접비", 20), ("부가세", 12), ("공통가설", 3))]
+    det_rows += [("M", "M-000", "기계설비", "기계설비", 40), ("M", "M-000", "기계설비", "토목", 10), ("E", "E-000", "전기", "전기", 80), ("E", "E-000", "전기", "정보통신", 20)]
+    detail = pd.DataFrame([{"프로젝트ID": "P1", "시설ID": "F1", "시설명": "s", "사업유형": "신축", "상위공종": top, "공고번호": b, "공고차수": "000", "공고키": k,
+                            "세부공종": lab, "항목명_원문": lab, "금액_원_문서": amt, "금액기준": "부가세포함", "관급자재_포함": "제외", "단위": "원",
+                            "집계표합계_원_문서": None, "출처파일": "x.xlsx", "신뢰도": "high", "근거문구": ""} for b, k, top, lab, amt in det_rows])
+    out = os.path.join(tmp, "alloc.xlsx")
+    build_workbook(out, fac, latest, latest, trade, pd.DataFrame(), pd.DataFrame(), meta={"period": "t"}, trade_detail=detail)
+    import openpyxl
+    wb = openpyxl.load_workbook(out)
+    ws5 = wb["05_공사비DB_시설합산"]
+    h5 = [c.value for c in ws5[1]]
+    col = lambda name: openpyxl.utils.get_column_letter(h5.index(name) + 1)
+    warnings.filterwarnings("ignore")
+    logging.disable(logging.CRITICAL)
+    sol = formulas.ExcelModel().loads(out).finish().calculate()
+    logging.disable(logging.NOTSET)
+
+    def val(sheet, coord):
+        for k, v in sol.items():
+            if k.upper().endswith(f"{sheet.upper()}'!{coord}"):
+                x = getattr(v, "value", v)
+                x = x.tolist() if hasattr(x, "tolist") else x
+                while isinstance(x, list) and x:
+                    x = x[0]
+                return x
+    g = lambda name: val("05_공사비DB_시설합산", f"{col(name)}2")
+    assert abs(float(g("기계설비(수식)")) - 50) < 1e-6 and abs(float(g("문서배분_기계설비(수식)")) - 100 * 30 / 110) < 1e-6, "기계설비 공고 자신의 몫(40) 은 제외"
+    assert abs(float(g("문서배분_토목(수식)")) - (100 * 10 / 110 + 50 * 10 / 50)) < 1e-6, "건축 공고의 토목 + 기계설비 공고의 토목"
+    assert float(g("문서배분_전기(수식)")) == 0 and g("문서배분_중복경고(수식)") in ("", None), "전기 공고 자신의 집계표는 중복이 아님"
+    assert abs(float(g("건축_순건축추정(수식)")) - 100 * 60 / 110) < 1e-6
+    assert abs(float(g("총공사비합계(수식)")) - 260) < 1e-6, "총공사비합계는 배분과 무관"
 
 
 def _hwp_record(tag: int, payload: bytes, level: int = 0) -> bytes:
@@ -696,6 +858,8 @@ def run():
         test_handoff_and_batch(tmp)
         test_included_trades()
         test_trade_second_pass(tmp)
+        test_trade_review_fixes(tmp)
+        test_trade_allocation_formulas(tmp)
         test_attachments(tmp)
     print("OK: 회귀 테스트 통과")
 

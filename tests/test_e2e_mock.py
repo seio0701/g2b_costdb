@@ -206,6 +206,39 @@ def run():
         assert t["_공종합_원"] == 26_000_000_000 and t["합계_원"] == 33_000_000_000 and t["_files"] == ["공내역서_가상군문화예술회관.xlsx"], t
         assert sum(1 for k, v in tdocs.items() if "_error" in v and "집계표 없음" in v["_error"]) >= 1, "내역서 없는 건축 공고는 건너뜀 표시"
         assert os.path.exists(data("logs_trades.parquet"))
+        # 2차 배치 경로(가짜 Batches 클라이언트): 1건을 지우고 제출 → 상태 파일에 배치·출처파일 기록 → 수거 → 2차 파서로 해석·출처파일 복원
+        from types import SimpleNamespace as NS
+        tdocs.pop("R24010001-001")
+        json.dump(tdocs, open(data("llm_trades.json"), "w", encoding="utf-8"), ensure_ascii=False)
+        seen = {}
+
+        class FakeBatches:
+            def create(self, requests):
+                seen["reqs"] = requests
+                return NS(id="msgbatch_t1", processing_status="in_progress")
+
+            def retrieve(self, bid):
+                return NS(processing_status="ended", request_counts=NS(processing=0, succeeded=1, errored=0, canceled=0, expired=0))
+
+            def results(self, bid):
+                txt = json.dumps({"금액기준": "부가세포함", "관급자재_포함여부": "제외", "단위": "원", "합계_원": "33000000000",
+                                  "공종별금액": [{"공종": "건축", "항목명_원문": "건축공사", "금액_원": "20000000000"}, {"공종": "기계설비", "항목명_원문": "기계설비공사", "금액_원": "3000000000"}],
+                                  "출처": "총괄집계표", "신뢰도": "high", "근거문구": "r"}, ensure_ascii=False)
+                return [NS(custom_id="R24010001-001", result=NS(type="succeeded", message=NS(content=[NS(type="text", text=txt)], usage=NS(input_tokens=10, output_tokens=5))))]
+        fake_client = NS(messages=NS(batches=FakeBatches()))
+        import anthropic
+        with mock.patch.object(anthropic, "Anthropic", return_value=fake_client):
+            out = _run(["extract-trades", "--batch", "--yes", "--config", cfg_path])
+        assert "2차 배치 1개 제출 (공고 1건)" in out and seen["reqs"][0]["custom_id"] == "R24010001-001" and seen["reqs"][0]["params"]["system"] == extract_llm.TRADE_SYSTEM, out
+        state = json.load(open(data("llm_trades_batch.json"), encoding="utf-8"))
+        assert state["batches"][0]["kind"] == "trades" and state["batches"][0]["files"]["R24010001-001"] == ["공내역서_가상군문화예술회관.xlsx"]
+        with mock.patch.object(anthropic, "Anthropic", return_value=fake_client):
+            out = _run(["extract-trades", "--batch", "--config", cfg_path])
+        assert "2차 배치 msgbatch_t1: 완료" in out and "2차 추출 성공 1건" in out, out
+        tdocs = json.load(open(data("llm_trades.json"), encoding="utf-8"))
+        t = tdocs["R24010001-001"]
+        assert t["_files"] == ["공내역서_가상군문화예술회관.xlsx"] and t["공종별금액"][0]["금액_원"] == 20_000_000_000 and t["_공종합_원"] == 23_000_000_000 and t["_usage_in"] == 10, t
+        assert json.load(open(data("llm_trades_batch.json"), encoding="utf-8"))["batches"][0]["status"] == "ended"
         out = _run(["extract", "--batch", "--config", cfg_path])
         assert "제출할 공고가 없습니다" in out and "Batches 50% 할인" in out, out
         ver = pd.read_parquet(data("logs_verify.parquet"))
@@ -243,7 +276,7 @@ def run():
         wsd = wb["04b_공종세부내역(문서)"]; hd = [c.value for c in wsd[1]]
         drows = [{hd[i]: wsd.cell(r, i + 1).value for i in range(len(hd))} for r in range(2, wsd.max_row + 1) if wsd.cell(r, 1).value]
         labs = sorted(d["세부공종"] for d in drows if d["공고번호"] == "R24010001")
-        assert labs == ["간접비", "간접비", "간접비", "건축", "기계설비", "부가세", "조경", "토목"], labs
+        assert labs == ["건축", "기계설비"], f"배치 수거로 바뀐 2차 결과(건축·기계설비)가 04b 에: {labs}"
         mech = next(d for d in drows if d["공고번호"] == "R24010001" and d["세부공종"] == "기계설비")
         assert mech["금액_원_문서"] == 3_000_000_000 and str(mech["비율(수식)"]).startswith("=IF(OR(") and "SUMIFS" in str(mech["배분금액(수식)"])
         assert "공고키" in h4 and "문서배분_기계설비(수식)" in h5 and "건축_순건축추정(수식)" in h5
@@ -288,7 +321,7 @@ def run():
             rd = next(r for r in range(2, wsd.max_row + 1) if wsd.cell(r, hd.index("공고번호") + 1).value == "R24010001"
                       and wsd.cell(r, hd.index("세부공종") + 1).value == "기계설비")
             ratio = float(val("04b_공종세부내역(문서)", f"{dcol('비율(수식)')}{rd}"))
-            assert abs(ratio - 3 / 26) < 1e-6, ratio
+            assert abs(ratio - 3 / 23) < 1e-6, ratio          # 배치 결과: 건축 200억 + 기계설비 30억 → 기계설비 비율 3/23
             tot04 = float(val("04_공사비DB_공종별", f"{openpyxl.utils.get_column_letter(h4.index('총공사비(수식)') + 1)}{r4}"))
             alloc = float(val("04b_공종세부내역(문서)", f"{dcol('배분금액(수식)')}{rd}"))
             assert abs(alloc - ratio * tot04) < 1, (alloc, ratio, tot04)
@@ -296,7 +329,7 @@ def run():
             assert abs(float(val("05_공사비DB_시설합산", f"{col('문서배분_기계설비(수식)')}{r5a}")) - alloc) < 1
             net = float(val("05_공사비DB_시설합산", f"{col('건축_순건축추정(수식)')}{r5a}"))
             arch = float(val("05_공사비DB_시설합산", f"{col('건축(수식)')}{r5a}"))
-            assert abs(net - (arch - tot04 * (6 / 26))) < 1, (net, arch, tot04)
+            assert abs(net - (arch - tot04 * (3 / 23))) < 1, (net, arch, tot04)
             assert val("05_공사비DB_시설합산", f"{col('문서배분_중복경고(수식)')}{r5a}") in ("", None), "분리발주 중복 없음"
             assert abs(float(rate) - 28500000000 / 33000000000) < 1e-6, ("낙찰률(수식) = 낙찰금액/기초금액", rate)
             assert abs(float(total) - (33000000000 + 2100000000 + 2860000000 + 583000000)) < 1, "낙찰금액은 총공사비에 쓰이지 않음"
