@@ -373,11 +373,10 @@ COST_SHEET_MAX_ROWS = 3000
 _COST_FALLBACK_ROWS = 80                 # 집계표류 시트가 없을 때 각 시트 상단만(갑지·집계표는 보통 시트 상단에 있다)
 
 
-def _panic_exc():
-    """python-calamine(러스트)은 손상 파일에서 PanicException(BaseException 계열)을 던져 except Exception 에 안 잡힌다 → 그 타입을 함께 잡는다."""
-    import sys
-    mod = sys.modules.get("pyo3_runtime")
-    return getattr(mod, "PanicException", None) or type("_NoPanic", (Exception,), {})
+def _catchable(e: BaseException) -> bool:
+    """잡아도 되는 예외인가. python-calamine(러스트)은 손상 파일에서 PanicException(BaseException 계열, 모듈 이름으로는 못 찾는 경우가 있음)을 던지므로
+    이름으로 판별한다. KeyboardInterrupt·SystemExit 같은 제어용 예외는 그대로 올린다."""
+    return isinstance(e, Exception) or type(e).__name__ == "PanicException"
 
 
 def _sniff_excel_ext(path: str, ext: str) -> str:
@@ -421,7 +420,9 @@ def _read_sheets(path: str, cap: int = COST_SHEET_MAX_ROWS) -> List[Tuple[str, l
             return _read_sheets_calamine(path, cap)
         except ImportError:
             pass
-        except (Exception, _panic_exc()) as e:  # noqa: BLE001
+        except BaseException as e:  # noqa: BLE001
+            if not _catchable(e):
+                raise
             errors.append(f"calamine: {str(e)[:80]}")
         import xlrd  # type: ignore
         try:
@@ -448,7 +449,9 @@ def _read_sheets(path: str, cap: int = COST_SHEET_MAX_ROWS) -> List[Tuple[str, l
         return _read_sheets_calamine(path, cap)
     except ImportError:
         raise ValueError("; ".join(errors) + " (python-calamine 을 설치하면 손상된 xlsx 도 읽을 수 있음: pip install python-calamine)")
-    except (Exception, _panic_exc()) as e:  # noqa: BLE001
+    except BaseException as e:  # noqa: BLE001
+        if not _catchable(e):
+            raise
         errors.append(f"calamine: {str(e)[:80]}")
         raise ValueError("; ".join(errors))
 
@@ -467,7 +470,9 @@ def has_cost_sheet(path: str) -> bool:
     """시트명만 보고 집계표류 시트가 있는지(행은 읽지 않음)."""
     try:
         return any(_COST_SHEET_RE.search(str(t)) for t, _ in _iter_sheets(path))
-    except (Exception, _panic_exc()):  # noqa: BLE001
+    except BaseException as e:  # noqa: BLE001
+        if not _catchable(e):
+            raise
         return False
 
 
@@ -533,7 +538,9 @@ def cost_sheet_snippets(path: str, max_chars: int = 12000, max_rows: int = COST_
     LLM 입력을 작게 만들기 위한 전처리이며 금액 해석은 하지 않는다."""
     try:
         sheets = _read_sheets(path, cap=max_rows)
-    except (Exception, _panic_exc()) as e:  # noqa: BLE001
+    except BaseException as e:  # noqa: BLE001
+        if not _catchable(e):
+            raise
         log.info("집계표 읽기 실패 %s: %s", path, e)
         return ""
     picked = [(t, r) for t, r in sheets if _COST_SHEET_RE.search(str(t))]
@@ -678,7 +685,9 @@ def process_notice_attachments(row: Dict, files_dir: str, text_dir: str, attach_
         try:
             text, parser = extract_any(path)
             text = sanitize_text(text)
-        except (Exception, _panic_exc()) as e:  # noqa: BLE001
+        except BaseException as e:  # noqa: BLE001
+            if not _catchable(e):
+                raise
             note["오류"] = str(e)[:200]
             notes.append(note)
             continue

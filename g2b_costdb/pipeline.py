@@ -795,7 +795,13 @@ def _trade_context(cfg, limit: Optional[int] = None):
     for n, k in enumerate(todo, 1):
         if len(todo) > 200 and n % 200 == 0:
             print(f"  집계표 발췌 중 … {n}/{len(todo)}")
-        snip, used = _trade_input(cfg, bid_of.get(k, ""), texts.get(k, ""), max_chars)
+        try:
+            snip, used = _trade_input(cfg, bid_of.get(k, ""), texts.get(k, ""), max_chars)
+        except BaseException as e:  # noqa: BLE001 — 손상 파일(러스트 panic 포함) 하나 때문에 전체가 멈추지 않게
+            if not attachments._catchable(e):
+                raise
+            log.warning("2차 입력 준비 실패 %s: %s", k, str(e)[:120])
+            snip, used = "", []
         if snip:
             inputs[k] = (snip, used)
         else:
