@@ -786,6 +786,25 @@ def test_trade_run_feedback(tmp):
     except ImportError:
         print("(python-calamine 없음 → 폴백 테스트 생략)")
     assert attachments.has_cost_sheet(p)
+    # calamine 의 러스트 panic(BaseException 계열)은 잡아서 '읽기 실패' 로 처리, 확장자와 내용이 다른 파일(.xls 인데 xlsx)은 사본으로 읽음
+    class FakePanic(BaseException):
+        pass
+    bad = os.path.join(d, "bad.xls")
+    open(bad, "wb").write(b"\xd0\xcf\x11\xe0" + b"\x00" * 100)
+    with mock.patch.object(attachments, "_panic_exc", return_value=FakePanic), \
+            mock.patch.object(attachments, "_read_sheets_calamine", side_effect=FakePanic("range end index 3 out of range")):
+        assert attachments.cost_sheet_snippets(bad) == "" and attachments.has_cost_sheet(bad) is False
+        try:
+            attachments.extract_any(bad)
+            raise AssertionError("손상 xls 는 예외")
+        except ValueError as e:
+            assert "calamine" in str(e) and "xlrd" in str(e), e
+    wb2 = Workbook()
+    wb2.active.title = "총괄집계표"
+    wb2.active.append(["건축공사", 1000])
+    px = os.path.join(d, "공내역서.xls")        # xlsx 내용인데 .xls 확장자
+    wb2.save(px)
+    assert attachments._read_sheets(px)[0][0] == "총괄집계표" and "건축공사\t1000" in attachments.cost_sheet_snippets(px) and os.path.exists(px + ".as.xlsx")
 
 
 def _hwp_record(tag: int, payload: bytes, level: int = 0) -> bytes:

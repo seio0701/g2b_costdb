@@ -273,7 +273,9 @@
 - 집계표 읽기 실패 다수: 한글 .xls 의 xlrd 'utf-16-le' 디코딩 오류, openpyxl 의 스타일 손상(_NamedCellStyle.name None)·'Value must be a sequence'
   → `python-calamine`(러스트) 독자를 추가: .xls 는 calamine 우선(없으면 xlrd), .xlsx 는 openpyxl 실패 시 calamine. requirements 에 추가(Windows cp314 휠 확인).
   xlrd 의 'formula/tFunc unknown' 콘솔 잡음도 사라짐. 다음 실행에서 실패했던 파일들이 다시 대상이 됨(건너뜀은 매 실행 재평가).
-- 남은 일: 사용자 PC `git pull` → `pip install -r requirements.txt` → `extract-trades --batch --yes`(미제출 37건 + 새로 읽히는 내역서) → `extract-trades --batch` → `excel`.
+- 2026-11-06 저녁 실행에서 python-calamine 이 손상 .xls 에 러스트 panic(PanicException, BaseException 계열)을 던져 except Exception 을 뚫고 종료 → `_panic_exc()` 로 그 타입도 잡아 '읽기 실패' 처리,
+  xlrd 실패도 ValueError 로 통일. 확장자와 내용이 다른 파일(.xls 인데 xlsx)은 magic bytes 로 판별해 `.as.xlsx` 사본으로 읽음.
+- 남은 일: 사용자 PC `git pull` → `extract-trades --batch --yes`(미제출 37건 + 새로 읽히는 내역서) → `extract-trades --batch` → `excel`.
   1차 실패 1건(32,000 토큰에도 JSON 미검출)은 원문 확인 필요. 04b 출처파일이 빈 241행은 본문(공고문·현장설명서) 입력 → '공고문·현장설명서(본문)' 로 표기.
 
 ## 1. 현재 단계

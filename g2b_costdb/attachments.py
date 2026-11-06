@@ -373,6 +373,27 @@ COST_SHEET_MAX_ROWS = 3000
 _COST_FALLBACK_ROWS = 80                 # 집계표류 시트가 없을 때 각 시트 상단만(갑지·집계표는 보통 시트 상단에 있다)
 
 
+def _panic_exc():
+    """python-calamine(러스트)은 손상 파일에서 PanicException(BaseException 계열)을 던져 except Exception 에 안 잡힌다 → 그 타입을 함께 잡는다."""
+    import sys
+    mod = sys.modules.get("pyo3_runtime")
+    return getattr(mod, "PanicException", None) or type("_NoPanic", (Exception,), {})
+
+
+def _sniff_excel_ext(path: str, ext: str) -> str:
+    """확장자와 실제 내용이 다른 파일(.xls 인데 zip 기반 xlsx, 반대 경우) 보정."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8)
+    except OSError:
+        return ext
+    if head.startswith(b"PK\x03\x04"):
+        return ".xlsx"
+    if head.startswith(b"\xd0\xcf\x11\xe0"):
+        return ".xls"
+    return ext
+
+
 def _read_sheets_calamine(path: str, cap: int) -> List[Tuple[str, list]]:
     """python-calamine(러스트 기반)으로 xls·xlsx 를 읽는다. 한글 .xls 의 인코딩 오류, openpyxl 이 못 여는 스타일 손상 파일에 강하다."""
     from python_calamine import CalamineWorkbook  # type: ignore
@@ -386,18 +407,29 @@ def _read_sheets_calamine(path: str, cap: int) -> List[Tuple[str, list]]:
 
 def _read_sheets(path: str, cap: int = COST_SHEET_MAX_ROWS) -> List[Tuple[str, list]]:
     """[(시트명, 행 목록)] — 시트당 cap 행까지. xlsx/xlsm 은 openpyxl → 실패하면 calamine, xls 는 calamine → 없거나 실패하면 xlrd."""
-    ext = os.path.splitext(path.lower())[1]
+    raw_ext = os.path.splitext(path.lower())[1]
+    ext = _sniff_excel_ext(path, raw_ext)
+    if ext != raw_ext:
+        # 확장자가 내용과 다르면(xlsx 를 .xls 로 올린 경우 등) 올바른 확장자의 사본을 옆에 만들어 읽는다(독자들이 확장자로 형식을 정함)
+        alt = path + ".as" + ext
+        if not os.path.exists(alt):
+            shutil.copyfile(path, alt)
+        path = alt
     errors = []
     if ext == ".xls":
         try:
             return _read_sheets_calamine(path, cap)
         except ImportError:
             pass
-        except Exception as e:  # noqa: BLE001
+        except (Exception, _panic_exc()) as e:  # noqa: BLE001
             errors.append(f"calamine: {str(e)[:80]}")
         import xlrd  # type: ignore
-        book = xlrd.open_workbook(path, on_demand=True, verbosity=0)
-        return [(sh.name, [tuple(sh.row_values(i)) for i in range(min(sh.nrows, cap))]) for sh in book.sheets()]
+        try:
+            book = xlrd.open_workbook(path, on_demand=True, verbosity=0)
+            return [(sh.name, [tuple(sh.row_values(i)) for i in range(min(sh.nrows, cap))]) for sh in book.sheets()]
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"xlrd: {str(e)[:80]}")
+            raise ValueError("; ".join(errors))
     try:
         from openpyxl import load_workbook
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -416,7 +448,7 @@ def _read_sheets(path: str, cap: int = COST_SHEET_MAX_ROWS) -> List[Tuple[str, l
         return _read_sheets_calamine(path, cap)
     except ImportError:
         raise ValueError("; ".join(errors) + " (python-calamine 을 설치하면 손상된 xlsx 도 읽을 수 있음: pip install python-calamine)")
-    except Exception as e:  # noqa: BLE001
+    except (Exception, _panic_exc()) as e:  # noqa: BLE001
         errors.append(f"calamine: {str(e)[:80]}")
         raise ValueError("; ".join(errors))
 
@@ -435,7 +467,7 @@ def has_cost_sheet(path: str) -> bool:
     """시트명만 보고 집계표류 시트가 있는지(행은 읽지 않음)."""
     try:
         return any(_COST_SHEET_RE.search(str(t)) for t, _ in _iter_sheets(path))
-    except Exception:  # noqa: BLE001
+    except (Exception, _panic_exc()):  # noqa: BLE001
         return False
 
 
@@ -501,7 +533,7 @@ def cost_sheet_snippets(path: str, max_chars: int = 12000, max_rows: int = COST_
     LLM 입력을 작게 만들기 위한 전처리이며 금액 해석은 하지 않는다."""
     try:
         sheets = _read_sheets(path, cap=max_rows)
-    except Exception as e:  # noqa: BLE001
+    except (Exception, _panic_exc()) as e:  # noqa: BLE001
         log.info("집계표 읽기 실패 %s: %s", path, e)
         return ""
     picked = [(t, r) for t, r in sheets if _COST_SHEET_RE.search(str(t))]
@@ -646,7 +678,7 @@ def process_notice_attachments(row: Dict, files_dir: str, text_dir: str, attach_
         try:
             text, parser = extract_any(path)
             text = sanitize_text(text)
-        except Exception as e:  # noqa: BLE001
+        except (Exception, _panic_exc()) as e:  # noqa: BLE001
             note["오류"] = str(e)[:200]
             notes.append(note)
             continue
