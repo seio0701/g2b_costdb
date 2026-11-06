@@ -373,19 +373,58 @@ COST_SHEET_MAX_ROWS = 3000
 _COST_FALLBACK_ROWS = 80                 # 집계표류 시트가 없을 때 각 시트 상단만(갑지·집계표는 보통 시트 상단에 있다)
 
 
-def _iter_sheets(path: str):
-    """(시트명, 행 반복자) 를 xlsx/xlsm(openpyxl)·xls(xlrd) 공통으로."""
+def _read_sheets_calamine(path: str, cap: int) -> List[Tuple[str, list]]:
+    """python-calamine(러스트 기반)으로 xls·xlsx 를 읽는다. 한글 .xls 의 인코딩 오류, openpyxl 이 못 여는 스타일 손상 파일에 강하다."""
+    from python_calamine import CalamineWorkbook  # type: ignore
+    book = CalamineWorkbook.from_path(path)
+    out = []
+    for name in book.sheet_names:
+        rows = book.get_sheet_by_name(name).to_python(skip_empty_area=False, nrows=cap)
+        out.append((name, [tuple(r) for r in rows]))
+    return out
+
+
+def _read_sheets(path: str, cap: int = COST_SHEET_MAX_ROWS) -> List[Tuple[str, list]]:
+    """[(시트명, 행 목록)] — 시트당 cap 행까지. xlsx/xlsm 은 openpyxl → 실패하면 calamine, xls 는 calamine → 없거나 실패하면 xlrd."""
     ext = os.path.splitext(path.lower())[1]
+    errors = []
     if ext == ".xls":
+        try:
+            return _read_sheets_calamine(path, cap)
+        except ImportError:
+            pass
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"calamine: {str(e)[:80]}")
         import xlrd  # type: ignore
-        book = xlrd.open_workbook(path, on_demand=True)
-        for sh in book.sheets():
-            yield sh.name, _xls_rows(sh)        # 별도 함수로 sh 를 즉시 바인딩(제너레이터식의 지연 바인딩으로 마지막 시트만 읽히는 문제 방지)
-        return
-    from openpyxl import load_workbook
-    wb = load_workbook(path, read_only=True, data_only=True)
-    for ws in wb.worksheets:
-        yield ws.title, ws.iter_rows(values_only=True)
+        book = xlrd.open_workbook(path, on_demand=True, verbosity=0)
+        return [(sh.name, [tuple(sh.row_values(i)) for i in range(min(sh.nrows, cap))]) for sh in book.sheets()]
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(path, read_only=True, data_only=True)
+        out = []
+        for ws in wb.worksheets:
+            rows = []
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i >= cap:
+                    break
+                rows.append(row)
+            out.append((ws.title, rows))
+        return out
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"openpyxl: {str(e)[:80]}")
+    try:
+        return _read_sheets_calamine(path, cap)
+    except ImportError:
+        raise ValueError("; ".join(errors) + " (python-calamine 을 설치하면 손상된 xlsx 도 읽을 수 있음: pip install python-calamine)")
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"calamine: {str(e)[:80]}")
+        raise ValueError("; ".join(errors))
+
+
+def _iter_sheets(path: str):
+    """(시트명, 행 반복자). 하위 호환용 — 실제 읽기는 _read_sheets(독자 폴백 포함)."""
+    for name, rows in _read_sheets(path):
+        yield name, iter(rows)
 
 
 def _xls_rows(sh):
@@ -411,7 +450,7 @@ def _cell(v) -> str:
 def extract_xlsx(path: str, max_rows: int = 400, cost_rows: int = COST_SHEET_MAX_ROWS) -> str:
     """통합문서 전체 시트를 텍스트로. 집계표류 시트(총괄·집계·갑지·원가…)는 cost_rows 행까지, 나머지는 max_rows 행까지."""
     lines = []
-    for title, rows in _iter_sheets(path):
+    for title, rows in _read_sheets(path, cap=max(max_rows, cost_rows)):
         lines.append(f"## {title}")
         cap = cost_rows if _COST_SHEET_RE.search(str(title)) else max_rows
         for i, row in enumerate(rows):
@@ -423,11 +462,14 @@ def extract_xlsx(path: str, max_rows: int = 400, cost_rows: int = COST_SHEET_MAX
 
 
 def extract_xls(path: str, max_rows: int = 400) -> str:
-    """구형 Excel(.xls). xlrd 가 필요하다(pip install xlrd)."""
+    """구형 Excel(.xls). python-calamine(권장) 또는 xlrd 가 필요하다."""
     try:
-        import xlrd  # noqa: F401
-    except ImportError as e:
-        raise ValueError("xls 해석에 xlrd 가 필요합니다: pip install xlrd") from e
+        import python_calamine  # noqa: F401
+    except ImportError:
+        try:
+            import xlrd  # noqa: F401
+        except ImportError as e:
+            raise ValueError("xls 해석에 python-calamine 또는 xlrd 가 필요합니다: pip install python-calamine") from e
     return extract_xlsx(path, max_rows=max_rows)
 
 
@@ -458,7 +500,7 @@ def cost_sheet_snippets(path: str, max_chars: int = 12000, max_rows: int = COST_
     빈 셀은 탭으로 남겨 열 위치(들여쓰기)를 보존한다. 집계표류 시트가 없으면 각 시트 상단 80행만 보고, 합계류 행이 전혀 없으면 집계표가 아니므로 빈 문자열(→ 건너뜀).
     LLM 입력을 작게 만들기 위한 전처리이며 금액 해석은 하지 않는다."""
     try:
-        sheets = list(_iter_sheets(path))
+        sheets = _read_sheets(path, cap=max_rows)
     except Exception as e:  # noqa: BLE001
         log.info("집계표 읽기 실패 %s: %s", path, e)
         return ""

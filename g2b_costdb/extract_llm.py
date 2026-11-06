@@ -268,7 +268,8 @@ def _structured_create(client, schema: Dict):
 
 
 # ── 2차 추출: 내역서 집계표의 공종별 금액 ──────────────────────────────────
-TRADE_LABELS = ["건축", "전기", "정보통신", "소방", "조경", "기계설비", "토목", "철거", "공통가설", "간접비", "관급자재", "부가세", "기타"]
+TRADE_LABELS = ["건축", "전기", "정보통신", "소방", "조경", "기계설비", "토목", "철거", "공통가설", "간접비", "관급자재", "부가세", "합계", "기타"]
+_AGG_NAME_RE = re.compile(r"도급비|도급\s*금액|총\s*공사비|순\s*공사비|공사비\s*계|총계|합계|총\s*원가|총\s*사업비")
 TRADE_ALLOC_LABELS = ["건축", "전기", "정보통신", "소방", "조경", "기계설비", "토목", "철거", "기타"]   # 비율 배분에 쓰는 라벨(공통가설·간접비·관급·부가세 제외)
 TRADE_SYSTEM = (
     "당신은 한국 공공 건축공사 입찰 내역서(설계내역서·원가계산서·총괄집계표)와 공고문의 공사금액 표를 읽어 공종별 금액 구성을 추출하는 분석가입니다. "
@@ -277,6 +278,7 @@ TRADE_SYSTEM = (
     "세부 공종(철근콘크리트·미장·창호 등)은 넣지 않습니다. 금액은 원 단위 정수 자릿수만 적고 '천원' 단위 표는 ×1000 합니다(단위 표기를 '단위'에 적음). "
     "'합계_원'에는 집계표의 총합계(총공사비·총계) 값을, '금액기준'에는 그 합계가 부가세 포함인지·제외(순공사비)인지·직접공사비인지 적고 모르면 '불명'. "
     "집계표에 합계만 있고 공종별 금액이 없으면 '공종별금액'은 빈 배열로 둡니다. 추정하거나 계산해 만들지 않습니다. "
+    "여러 공종을 합친 금액(예: '도급비(건축, 토목, 기계, 조경)', 총공사비, 순공사비, 총계)은 한 공종의 금액이 아니므로 공종을 '합계'로 적습니다. "
     "발췌는 셀 위치를 탭으로 보존한 것입니다: 첫 열에 있는 행은 대공종(건축공사·기계설비공사 등), 들여쓴 행은 그 대공종의 세부 공종이며 '소계'는 바로 위 대공종의 합입니다. "
     "대공종 소계 안에 이미 든 가설공사·안전관리비 등은 '공통가설'로 따로 적지 말고, 집계표 최상위에 별도 행으로 있는 공통가설(가설전기·가설용수 포함)만 '공통가설'로 적습니다. "
     "각 값의 근거 행을 '근거문구'에 짧게 인용합니다."
@@ -351,9 +353,16 @@ def build_trade_request_params(snippet: str, api_hint: Dict, cfg_llm: Dict, stru
     return params
 
 
-def _trade_label(raw: str) -> str:
-    """모델이 적은 공종명을 13개 라벨로. 구조화 출력이 거부돼 일반 응답으로 폴백한 경우 '건축공사비'·'기계설비(공조)' 같은 원문이 올 수 있다."""
+def _trade_label(raw: str, item_name: str = "") -> str:
+    """모델이 적은 공종명을 라벨로. 구조화 출력이 거부돼 일반 응답으로 폴백한 경우 '건축공사비'·'기계설비(공조)' 같은 원문이 올 수 있다.
+    항목명이 여러 공종을 합친 것('도급비(건축, 토목, 기계, 조경)', 총공사비)이면 어떤 라벨을 적었든 '합계'(비율 배분 제외)."""
+    from . import classify
     lab = raw.strip()
+    name = str(item_name or "")
+    if name:
+        in_name = classify._doc_labels(name)[0]
+        if len(set(in_name)) >= 2 or (lab in ("기타", "합계", "") and _AGG_NAME_RE.search(name)):
+            return "합계"
     if lab in TRADE_LABELS:
         return lab
     if "가설" in lab:
@@ -364,7 +373,8 @@ def _trade_label(raw: str) -> str:
         return "관급자재"
     if any(w in lab for w in ("간접", "일반관리", "이윤", "경비", "보험")):
         return "간접비"
-    from . import classify
+    if _AGG_NAME_RE.search(lab):
+        return "합계"
     labels = [l for l in classify._doc_labels(lab)[0] if l in TRADE_LABELS]
     return labels[0] if len(labels) == 1 else "기타"
 
@@ -381,10 +391,14 @@ def normalize_trade_doc(data: Dict) -> Dict:
         amt = _num(it.get("금액_원"))
         if amt is None:
             continue
-        lab = _trade_label(str(it.get("공종") or ""))
+        lab = _trade_label(str(it.get("공종") or ""), str(it.get("항목명_원문") or ""))
         items.append({"공종": lab, "항목명_원문": str(it.get("항목명_원문") or "")[:80], "금액_원": int(round(amt))})
     out["공종별금액"] = items
     out["_공종합_원"] = sum(i["금액_원"] for i in items if i["공종"] in TRADE_ALLOC_LABELS) or None
+    if out["합계_원"] is None:
+        aggs = [i["금액_원"] for i in items if i["공종"] == "합계"]
+        if aggs:
+            out["합계_원"] = max(aggs)                 # 합계 행만 있고 합계_원이 비었으면 가장 큰 합계 행을 합계로
     for k in ("금액기준", "관급자재_포함여부", "단위", "출처", "신뢰도", "근거문구"):
         out[k] = str(out.get(k) or "")
     return out
@@ -434,19 +448,26 @@ def cross_verify_trades(bid_no: str, api_row: Dict, tdoc: Dict, vat: float = 0.1
                      "비고": "'기타' 금액이 공종 합의 50% 초과 → 공종명을 라벨로 못 바꾼 것(비구조화 응답) 의심, 04b 세부공종 확인"})
     base = total or gross
     api_p, api_b = _num(api_row.get("추정가격")), _num(api_row.get("기초금액"))
+    gov_api = (_num(api_row.get("도급자관급액_API")) or 0) + (_num(api_row.get("관급자관급액_API")) or 0) or (_num(api_row.get("관급자재_API")) or 0)
+    gov_doc = sum(i["금액_원"] for i in items if i["공종"] == "관급자재")
+    vat_doc = sum(i["금액_원"] for i in items if i["공종"] == "부가세")
     if base and (api_p or api_b):
         def near(a, b, tol=0.01):
-            return a and b and abs(a - b) / b <= tol
-        if near(base, api_b):
-            verdict, note = "참고", "집계표 합계 = 기초금액(부가세 포함)"
-        elif near(base, api_p):
-            verdict, note = "참고", "집계표 합계 = 추정가격(부가세 제외)"
+            return bool(a and b and abs(a - b) / b <= tol)
+        # 문서 합계는 관급·부가세를 포함했을 수도, 뺐을 수도 있다 → 보정한 값들과 API 값들을 짝지어 하나라도 맞으면 그 기준을 적는다
+        doc_cands = [(base, "집계표 합계"), (base - gov_doc, "집계표 합계 − 관급자재"), (base - vat_doc, "집계표 합계 − 부가세"),
+                     (base - gov_doc - vat_doc, "집계표 합계 − 관급 − 부가세")]
+        api_cands = [(api_b, "기초금액(부가세 포함)"), (api_p, "추정가격(부가세 제외)"),
+                     ((api_b or 0) + gov_api, "기초금액 + 관급자재(API)"), ((api_p or 0) + gov_api, "추정가격 + 관급자재(API)")]
+        match = next(((dn, an) for dv, dn in doc_cands for av, an in api_cands if dv and av and near(dv, av)), None)
+        if match:
+            verdict, note = "참고", f"{match[0]} = {match[1]}"
         elif api_p and 0.6 <= base / api_p <= 0.95:
             verdict, note = "참고", "집계표 합계가 추정가격의 60~95% → 직접공사비(간접비 제외) 가능성"
         elif near(base * 1000, api_b) or near(base * 1000, api_p):
             verdict, note = "경고", "천원 단위 표를 원으로 읽은 의심(×1000 하면 API 금액과 일치)"
         else:
-            verdict, note = "경고", "집계표 합계가 API 추정가격·기초금액과 불일치(차수·변경 내역서 혼입 또는 다른 공사 집계표 의심)"
+            verdict, note = "경고", "집계표 합계가 API 추정가격·기초금액(관급 보정 포함)과 불일치(차수·변경 내역서 혼입 또는 다른 공사 집계표 의심)"
         logs.append({"공고번호": bid_no, "항목": "집계표합계 기준", "API값": api_b or api_p, "문서값": base,
                      "차이": base - (api_b or api_p), "차이율": round((base - (api_b or api_p)) / (api_b or api_p), 5), "판정": verdict, "비고": note})
     return logs

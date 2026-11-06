@@ -746,6 +746,48 @@ def test_trade_allocation_formulas(tmp):
     assert abs(float(g("총공사비합계(수식)")) - 260) < 1e-6, "총공사비합계는 배분과 무관"
 
 
+def test_trade_run_feedback(tmp):
+    """첫 실제 실행(2026-11-06) 피드백: 합산 행('도급비(건축, 토목, 기계, 조경)')은 '합계'로 배분 제외, 관급·부가세 보정 기준 판별, 손상 Excel 은 calamine 폴백, 저장 결과 재정규화."""
+    from unittest import mock
+    from openpyxl import Workbook
+    from g2b_costdb import attachments, pipeline
+    from g2b_costdb.extract_llm import normalize_trade_doc, cross_verify_trades, _trade_label, TRADE_LABELS
+    assert "합계" in TRADE_LABELS
+    assert _trade_label("기타", "도급비(건축, 토목, 기계, 조경)") == "합계" and _trade_label("건축", "건축공사 소계") == "건축"
+    assert _trade_label("건축", "건축·기계설비 합계") == "합계" and _trade_label("기타", "총공사비") == "합계" and _trade_label("승강기", "승강기설치") == "기타"
+    d = normalize_trade_doc({"합계_원": "9394053000", "금액기준": "부가세포함", "공종별금액": [
+        {"공종": "기타", "항목명_원문": "도급비(건축, 토목, 기계, 조경)", "금액_원": "7893683000"}, {"공종": "관급자재", "항목명_원문": "관급자재비", "금액_원": "1500370000"}]})
+    assert [i["공종"] for i in d["공종별금액"]] == ["합계", "관급자재"] and d["_공종합_원"] is None, d
+    logs = cross_verify_trades("X", {"추정가격": 7645251000, "기초금액": 7893683000, "도급자관급액_API": 751632000, "관급자관급액_API": 0}, d)
+    assert logs[-1]["판정"] == "참고" and logs[-1]["비고"] == "집계표 합계 − 관급자재 = 기초금액(부가세 포함)", logs
+    d2 = normalize_trade_doc({"합계_원": "", "공종별금액": [{"공종": "합계", "항목명_원문": "총공사비", "금액_원": "500"}, {"공종": "건축", "항목명_원문": "건축공사", "금액_원": "400"}]})
+    assert d2["합계_원"] == 500 and d2["_공종합_원"] == 400, "합계_원이 비면 합계 행으로 채움"
+    # 저장된 결과 재정규화: 옛 라벨('기타' 합산 행)이 Excel 단계에서 '합계' 로 바뀌고 _files 등은 유지
+    old = {"K": {"공종별금액": [{"공종": "기타", "항목명_원문": "도급비(건축, 토목)", "금액_원": 100}], "합계_원": 100, "_files": ["a.xlsx"], "_usage_in": 3, "금액기준": "부가세포함"},
+           "E": {"_error": "x"}}
+    rn = pipeline._renormalize_trades(old)
+    assert rn["K"]["공종별금액"][0]["공종"] == "합계" and rn["K"]["_files"] == ["a.xlsx"] and rn["K"]["_usage_in"] == 3 and rn["E"] == {"_error": "x"}
+    # calamine 폴백: openpyxl 이 못 여는 xlsx 도 집계표를 읽는다(python-calamine 설치 시)
+    d = os.path.join(tmp, "files3", "D1")
+    os.makedirs(d)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "총괄집계표"
+    for row in (["(단위: 원)"], ["공종", "합계"], ["건축공사", 1000000], ["총공사비", 1000000]):
+        ws.append(row)
+    p = os.path.join(d, "내역서.xlsx")
+    wb.save(p)
+    try:
+        import python_calamine  # noqa: F401
+        import openpyxl
+        with mock.patch.object(openpyxl, "load_workbook", side_effect=TypeError("_NamedCellStyle.name should be str")):
+            s = attachments.cost_sheet_snippets(p)
+        assert "건축공사\t1000000" in s and "총공사비\t1000000" in s, s
+    except ImportError:
+        print("(python-calamine 없음 → 폴백 테스트 생략)")
+    assert attachments.has_cost_sheet(p)
+
+
 def _hwp_record(tag: int, payload: bytes, level: int = 0) -> bytes:
     size = len(payload)
     if size < 0xFFF:
@@ -860,6 +902,7 @@ def run():
         test_trade_second_pass(tmp)
         test_trade_review_fixes(tmp)
         test_trade_allocation_formulas(tmp)
+        test_trade_run_feedback(tmp)
         test_attachments(tmp)
     print("OK: 회귀 테스트 통과")
 

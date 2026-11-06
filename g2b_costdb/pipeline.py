@@ -834,6 +834,7 @@ def _trade_dup_logs(latest: pd.DataFrame, tdocs: dict) -> List[Dict]:
 def _verify_trades_and_report(cfg, latest, tdocs, n_ok=None, n_err=None):
     logs: List[Dict] = []
     seen = set()
+    tdocs = _renormalize_trades(tdocs)
     for _, row in latest.iterrows():
         t = tdocs.get(row["공고키"])
         if not t or "_error" in t or row["공고키"] in seen:
@@ -991,9 +992,22 @@ def stage_extract_trades(cfg, yes: bool = False, batch: bool = False, limit: Opt
     _verify_trades_and_report(cfg, latest, tdocs, n_ok, n_err)
 
 
+def _renormalize_trades(tdocs: dict) -> dict:
+    """저장된 2차 결과에 현재 라벨 규칙을 다시 적용(재과금 없음): '도급비(건축, 토목, 기계)' 같은 합산 행은 '합계' 로, 라벨 밖 공종명은 매핑."""
+    out = {}
+    for k, t in tdocs.items():
+        if isinstance(t, dict) and "_error" not in t:
+            keep = {kk: vv for kk, vv in t.items() if kk.startswith("_")}
+            t = extract_llm.normalize_trade_doc(t)
+            t.update({kk: vv for kk, vv in keep.items() if kk != "_공종합_원"})
+        out[k] = t
+    return out
+
+
 def assemble_trade_detail_table(latest: pd.DataFrame, tdocs: dict) -> pd.DataFrame:
     """04b 행: 대표 공고 × 집계표 항목(공종별 금액). 복수 시설 배정 공고는 04 와 같이 프로젝트마다 나타난다."""
     rows = []
+    tdocs = _renormalize_trades(tdocs)
     for _, r in latest.iterrows():
         t = tdocs.get(r["공고키"])
         if not t or "_error" in t:
@@ -1003,7 +1017,7 @@ def assemble_trade_detail_table(latest: pd.DataFrame, tdocs: dict) -> pd.DataFra
                          "상위공종": r["공종"], "공고번호": r["공고번호"], "공고차수": r["공고차수"], "공고키": r["공고키"],
                          "세부공종": it.get("공종"), "항목명_원문": it.get("항목명_원문"), "금액_원_문서": it.get("금액_원"),
                          "금액기준": t.get("금액기준"), "관급자재_포함": t.get("관급자재_포함여부"), "단위": t.get("단위"),
-                         "집계표합계_원_문서": t.get("합계_원"), "출처파일": ", ".join(t.get("_files") or []),
+                         "집계표합계_원_문서": t.get("합계_원"), "출처파일": ", ".join(t.get("_files") or []) or "공고문·현장설명서(본문)",
                          "신뢰도": t.get("신뢰도"), "근거문구": t.get("근거문구")})
     return pd.DataFrame(rows, columns=DETAIL_COLS)
 
