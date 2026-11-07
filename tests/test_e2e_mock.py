@@ -244,8 +244,12 @@ def run():
         ver = pd.read_parquet(data("logs_verify.parquet"))
         assert ((ver["공고번호"] == "R24010001") & (ver["항목"] == "추정가격") & (ver["판정"] == "정상")).any(), ver
         assert set(ver["판정"]) <= {"정상", "경고", "오류", "참고", "미확인"}
-        # 8) excel — 생성 + 수식 오류 0
+        # 8) excel — 생성 + 수식 오류 0. 2차 검증로그는 excel 이 저장된 결과에 현재 규칙을 다시 적용해 새로 만든다(수거 때 로그가 옛 규칙이어도)
+        stale = pd.DataFrame([{"공고번호": "STALE", "항목": "집계표합계 기준", "판정": "경고", "비고": "옛 규칙"}])
+        stale.to_parquet(data("logs_trades.parquet"), index=False)
         out = _run(["excel", "--config", cfg_path])
+        tl = pd.read_parquet(data("logs_trades.parquet"))
+        assert "STALE" not in set(tl["공고번호"]) and not tl.empty, "excel 단계가 2차 검증로그를 다시 만들어야 한다"
         xlsx = os.path.join(tmp, "output", "공사비DB.xlsx")
         assert os.path.exists(xlsx)
         import openpyxl

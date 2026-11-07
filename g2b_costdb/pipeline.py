@@ -837,7 +837,9 @@ def _trade_dup_logs(latest: pd.DataFrame, tdocs: dict) -> List[Dict]:
     return logs
 
 
-def _verify_trades_and_report(cfg, latest, tdocs, n_ok=None, n_err=None):
+def _trade_logs(cfg, latest, tdocs) -> List[Dict]:
+    """2차 결과의 검증로그를 현재 규칙으로 다시 만들어 logs_trades.parquet 에 저장(재과금 없음). 수거 직후와 excel 단계 양쪽에서 부른다 —
+    excel 이 옛 수거 때 저장한 로그를 그대로 싣지 않도록."""
     logs: List[Dict] = []
     seen = set()
     tdocs = _renormalize_trades(tdocs)
@@ -849,6 +851,11 @@ def _verify_trades_and_report(cfg, latest, tdocs, n_ok=None, n_err=None):
         logs.extend(extract_llm.cross_verify_trades(row["공고번호"], row.to_dict(), t, cfg["verify"].get("vat_ratio", 0.10)))
     logs.extend(_trade_dup_logs(latest, tdocs))
     _logs_frame(logs).to_parquet(_p(cfg, "logs_trades.parquet"), index=False)
+    return logs
+
+
+def _verify_trades_and_report(cfg, latest, tdocs, n_ok=None, n_err=None):
+    logs = _trade_logs(cfg, latest, tdocs)
     done = len({k for k in latest["공고키"] if k in tdocs and "_error" not in tdocs[k]})
     with_items = len({k for k in latest["공고키"] if k in tdocs and "_error" not in tdocs[k] and (tdocs[k].get("공종별금액") or [])})
     usage_in = sum((d.get("_usage_in") or 0) for d in tdocs.values() if isinstance(d, dict))
@@ -1086,6 +1093,10 @@ def stage_excel(cfg):
     hist, latest = _read(cfg, "notices_hist.parquet"), _read(cfg, "notices_latest.parquet")
     docs_path = _p(cfg, "llm_docs.json")
     docs = json.load(open(docs_path, encoding="utf-8")) if os.path.exists(docs_path) else {}
+    tpath = _p(cfg, "llm_trades.json")
+    tdocs = json.load(open(tpath, encoding="utf-8")) if os.path.exists(tpath) else {}
+    if tdocs:
+        _trade_logs(cfg, latest, tdocs)        # 2차 검증로그는 저장된 결과에 현재 규칙을 다시 적용해 새로 만든다(수거 때 로그가 옛 규칙일 수 있음)
     frames = [pd.read_parquet(_p(cfg, n)) for n in ("logs_dedup.parquet", "logs_verify.parquet", "logs_trades.parquet") if os.path.exists(_p(cfg, n))]
     frames = [f for f in frames if not f.empty]
     logs = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -1094,8 +1105,6 @@ def stage_excel(cfg):
     texts_path = _p(cfg, "texts.json")
     texts = json.load(open(texts_path, encoding="utf-8")) if os.path.exists(texts_path) else {}
     trade = assemble_trade_table(latest, docs, texts)
-    tpath = _p(cfg, "llm_trades.json")
-    tdocs = json.load(open(tpath, encoding="utf-8")) if os.path.exists(tpath) else {}
     detail = assemble_trade_detail_table(latest, tdocs)
     os.makedirs(cfg["paths"]["out_dir"], exist_ok=True)
     out = os.path.join(cfg["paths"]["out_dir"], cfg["paths"]["excel_name"])

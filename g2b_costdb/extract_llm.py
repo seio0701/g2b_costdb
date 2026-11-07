@@ -268,8 +268,21 @@ def _structured_create(client, schema: Dict):
 
 
 # ── 2차 추출: 내역서 집계표의 공종별 금액 ──────────────────────────────────
-TRADE_LABELS = ["건축", "전기", "정보통신", "소방", "조경", "기계설비", "토목", "철거", "공통가설", "간접비", "관급자재", "부가세", "합계", "기타"]
-_AGG_NAME_RE = re.compile(r"도급비|도급\s*금액|총\s*공사비|순\s*공사비|공사비\s*계|총계|합계|총\s*원가|총\s*사업비")
+TRADE_LABELS = ["건축", "전기", "정보통신", "소방", "조경", "기계설비", "토목", "철거", "공통가설", "간접비", "관급자재", "부가세", "합계", "배분제외", "기타"]
+_AGG_NAME_RE = re.compile(r"도급비|도급\s*금액|총\s*공사비|순\s*공사비|직접\s*공사비|공사비\s*계|총계|합계|총\s*원가|총\s*사업비|추정가격|기초금액|공사금액|총액")
+# 항목명만으로 '계약 전체 금액' 이 분명한 말(공종어가 없으면 모델이 건축·소방 등 공종을 적었어도 '합계'). 순공사비·직접공사비는 공종별 원가계산서의 소계일 수 있어 넣지 않는다
+_TOTAL_NAME_RE = re.compile(r"추정가격|기초금액|총\s*공사비|총\s*사업비|총\s*원가|도급비|도급\s*금액|공사금액|총액")
+# '부가세 제외'·'관급자재 포함'·'(도급비 미포함)'·'소방 별도'·'추정가격+부가가치세' 처럼 뒤따르는 조건·부정어는 라벨 판별에서 지운다
+_NEG_NAME_RE = re.compile(r"(부\s*가\s*가\s*치\s*세|부\s*가\s*세|VAT|관급\s*자재|관급|지급\s*자재|도급비|도급\s*금액|간접비|이윤|관리비)\s*(제외|별도|미포함|불포함|포함)"
+                          r"|(전기|소방|정보통신|통신|기계설비|기계|토목|조경|건축|철거)\s*(제외|별도|미포함|불포함|분리\s*발주)"
+                          r"|[+＋및]\s*(부\s*가\s*가\s*치\s*세|부\s*가\s*세|VAT)", re.I)
+_LICENSE_NAMES = (("토목건축공사업", "건축공사업"), ("토목건축", "건축"))   # 면허명 '토목건축공사업' 은 건축 면허 → 토목+건축 두 공종으로 세지 않는다
+_GOV_NAME_RE = re.compile(r"관급|지급\s*자재|도급자\s*(설치|시공)")
+_VAT_NAME_RE = re.compile(r"부\s*가\s*가\s*치\s*세|부\s*가\s*세|VAT", re.I)
+_TEMP_NAME_RE = re.compile(r"가설")
+_INDIRECT_NAME_RE = re.compile(r"간접|일반관리|이윤|경비|보험|공제|안전관리|품질관리|환경보전|관리비|조달\s*수수료|보증|폐기물")
+_EXCL_NAME_RE = re.compile(r"이설비|이전비|분담금|부담금|용역비|감리|설계비|미술\s*장식|인증\s*수수료|보상비|예비비")        # 도급 공사비 밖 → '배분제외'
+_PAREN_RE = re.compile(r"\([^()]*\)|\[[^\[\]]*\]")
 TRADE_ALLOC_LABELS = ["건축", "전기", "정보통신", "소방", "조경", "기계설비", "토목", "철거", "기타"]   # 비율 배분에 쓰는 라벨(공통가설·간접비·관급·부가세 제외)
 TRADE_SYSTEM = (
     "당신은 한국 공공 건축공사 입찰 내역서(설계내역서·원가계산서·총괄집계표)와 공고문의 공사금액 표를 읽어 공종별 금액 구성을 추출하는 분석가입니다. "
@@ -279,6 +292,7 @@ TRADE_SYSTEM = (
     "'합계_원'에는 집계표의 총합계(총공사비·총계) 값을, '금액기준'에는 그 합계가 부가세 포함인지·제외(순공사비)인지·직접공사비인지 적고 모르면 '불명'. "
     "집계표에 합계만 있고 공종별 금액이 없으면 '공종별금액'은 빈 배열로 둡니다. 추정하거나 계산해 만들지 않습니다. "
     "여러 공종을 합친 금액(예: '도급비(건축, 토목, 기계, 조경)', 총공사비, 순공사비, 총계)은 한 공종의 금액이 아니므로 공종을 '합계'로 적습니다. "
+    "도급 공사비 밖의 항목(이설비·이전비, 각종 분담금, 설계·감리 용역비, 미술장식품, 인증수수료 등 '도급비 미포함'·별도 비용)은 '배분제외'로 적습니다. "
     "발췌는 셀 위치를 탭으로 보존한 것입니다: 첫 열에 있는 행은 대공종(건축공사·기계설비공사 등), 들여쓴 행은 그 대공종의 세부 공종이며 '소계'는 바로 위 대공종의 합입니다. "
     "대공종 소계 안에 이미 든 가설공사·안전관리비 등은 '공통가설'로 따로 적지 말고, 집계표 최상위에 별도 행으로 있는 공통가설(가설전기·가설용수 포함)만 '공통가설'로 적습니다. "
     "각 값의 근거 행을 '근거문구'에 짧게 인용합니다."
@@ -353,15 +367,53 @@ def build_trade_request_params(snippet: str, api_hint: Dict, cfg_llm: Dict, stru
     return params
 
 
+def _name_label(core: str) -> Tuple[Optional[str], Optional[str]]:
+    """항목명(괄호 안을 뺀 핵심부)에서 분명한 비공종 라벨을 찾는다. hard(가설·관급·부가세)는 모델 라벨과 무관하게, soft(배분제외·간접비)는 모델이
+    특정 공종을 적지 않았을 때(또는 공종이 여럿 섞인 행)만 쓴다."""
+    if _TEMP_NAME_RE.search(core):
+        return "공통가설", None
+    if _GOV_NAME_RE.search(core):
+        return "관급자재", None
+    if _VAT_NAME_RE.search(core):
+        return "부가세", None
+    if _INDIRECT_NAME_RE.search(core):          # '…석면분담금+임금채권부담금+일반관리비+이윤' 같은 간접비 나열이 분담금 때문에 배분제외로 가지 않도록 간접비 먼저
+        return None, "간접비"
+    if _EXCL_NAME_RE.search(core):
+        return None, "배분제외"
+    return None, None
+
+
 def _trade_label(raw: str, item_name: str = "") -> str:
     """모델이 적은 공종명을 라벨로. 구조화 출력이 거부돼 일반 응답으로 폴백한 경우 '건축공사비'·'기계설비(공조)' 같은 원문이 올 수 있다.
-    항목명이 여러 공종을 합친 것('도급비(건축, 토목, 기계, 조경)', 총공사비)이면 어떤 라벨을 적었든 '합계'(비율 배분 제외)."""
+    항목명 규칙(우선순위): ① '부가세 제외'·'(도급비 미포함)'·'소방 별도'·'추정가격+부가가치세' 같은 조건어는 지우고 면허명 '토목건축공사업' 은 건축으로 본다
+    ② 가설·관급·부가세 가 항목명 핵심부(괄호 밖)에 있으면 그 라벨 ③ 보험·공제·안전관리비·폐기물 등은 '간접비', 이설비·분담금·용역비 등은 '배분제외'
+    (모델이 기타·합계로 적었거나 공종이 여럿 섞인 행만) ④ 공종이 2개 이상 섞인 행('도급비(건축, 토목, 기계, 조경)', '전기소방공사')은 '합계'(비율 배분 제외)
+    ⑤ 공종어 없이 도급비·총공사비·추정가격·기초금액이면 모델이 공종을 적었어도 '합계'(간접비·관급·부가세 라벨은 유지)
+    ⑥ 모델이 '기타'로 적었는데 항목명에 공종이 하나면 그 공종('건축공사 합계' → 건축)."""
     from . import classify
     lab = raw.strip()
     name = str(item_name or "")
     if name:
-        in_name = classify._doc_labels(name)[0]
-        if len(set(in_name)) >= 2 or (lab in ("기타", "합계", "") and _AGG_NAME_RE.search(name)):
+        n = _NEG_NAME_RE.sub(" ", name)
+        for a, b in _LICENSE_NAMES:
+            n = n.replace(a, b)
+        core = _PAREN_RE.sub(" ", n)
+        if not re.search(r"[가-힣A-Za-z]", core):
+            core = n
+        trades = [l for l in classify._doc_labels(n)[0] if l in TRADE_ALLOC_LABELS]      # 가스·승강기·창호 같은 비공종 라벨은 세지 않는다
+        multi = len(set(trades)) >= 2
+        hard, soft = _name_label(core)
+        if hard:
+            return hard
+        if soft and (multi or lab in ("기타", "합계", "")):
+            return soft
+        if multi:
+            return "합계"
+        if not trades and _TOTAL_NAME_RE.search(n) and lab not in ("공통가설", "간접비", "관급자재", "부가세", "배분제외"):
+            return "합계"
+        if lab in ("기타", "") and len(set(trades)) == 1:
+            return trades[0]
+        if lab in ("기타", "합계", "") and _AGG_NAME_RE.search(n):
             return "합계"
     if lab in TRADE_LABELS:
         return lab
@@ -460,8 +512,11 @@ def cross_verify_trades(bid_no: str, api_row: Dict, tdoc: Dict, vat: float = 0.1
         api_cands = [(api_b, "기초금액(부가세 포함)"), (api_p, "추정가격(부가세 제외)"),
                      ((api_b or 0) + gov_api, "기초금액 + 관급자재(API)"), ((api_p or 0) + gov_api, "추정가격 + 관급자재(API)")]
         match = next(((dn, an) for dv, dn in doc_cands for av, an in api_cands if dv and av and near(dv, av)), None)
+        close = match or next(((dn, an) for dv, dn in doc_cands for av, an in api_cands if dv and av and near(dv, av, 0.03)), None)
         if match:
             verdict, note = "참고", f"{match[0]} = {match[1]}"
+        elif close:
+            verdict, note = "참고", f"{close[0]} ≈ {close[1]} (3% 이내, 조달수수료·관급 금액 차이 가능)"
         elif api_p and 0.6 <= base / api_p <= 0.95:
             verdict, note = "참고", "집계표 합계가 추정가격의 60~95% → 직접공사비(간접비 제외) 가능성"
         elif near(base * 1000, api_b) or near(base * 1000, api_p):
