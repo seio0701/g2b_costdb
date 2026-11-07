@@ -1029,10 +1029,11 @@ def _alloc_decision(api_row: Dict, t: Dict) -> str:
     if asum <= 0:
         return "N(공종 행 금액 0)"
     total = extract_llm._num(t.get("합계_원"))
+    # 집계표 합계(없으면 읽은 행들의 합)가 API 추정가격·기초금액(관급·부가세 보정 포함)과 맞지 않으면 차수·다른 공사 집계표 또는 일부 행만 읽은 문서 → 배분하지 않음
+    basis = next((l for l in extract_llm.cross_verify_trades(str(api_row.get("공고번호", "")), api_row, t) if l["항목"] == "집계표합계 기준"), None)
+    if basis and basis["판정"] == "경고":
+        return "N(집계표 합계가 API 금액과 불일치)" if total else "N(읽은 행의 합이 API 금액과 불일치)"
     if total:
-        basis = next((l for l in extract_llm.cross_verify_trades(str(api_row.get("공고번호", "")), api_row, t) if l["항목"] == "집계표합계 기준"), None)
-        if basis and basis["판정"] == "경고":
-            return "N(집계표 합계가 API 금액과 불일치)"
         ref = total - sum(i["금액_원"] for i in items if i["공종"] in ("공통가설", "간접비", "관급자재", "부가세", "배분제외"))
         if ref <= 0:
             ref = total

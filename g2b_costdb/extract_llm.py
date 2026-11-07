@@ -541,6 +541,12 @@ def cross_verify_trades(bid_no: str, api_row: Dict, tdoc: Dict, vat: float = 0.1
         logs.append({"공고번호": bid_no, "항목": "공종합=집계표합계", "API값": total, "문서값": gross, "차이": gross - total, "차이율": round(r, 5),
                      "판정": "정상" if abs(r) <= 0.01 else ("경고" if abs(r) <= 0.05 else "경고"),
                      "비고": "" if abs(r) <= 0.01 else "공종 행 합과 합계 행 불일치(간접비·관급·부가세 행 누락 또는 세부 공종 중복 의심)"})
+    alloc = [i for i in items if i["공종"] in TRADE_ALLOC_LABELS]
+    api_trade = str(api_row.get("공종") or "")
+    if alloc and api_trade and all(_is_total_name(i["항목명_원문"]) for i in alloc) and {i["공종"] for i in alloc} - {"기타", api_trade}:
+        labs = "·".join(sorted({i["공종"] for i in alloc}))
+        logs.append({"공고번호": bid_no, "항목": "공종 라벨 의심(문서)", "문서값": sum(i["금액_원"] for i in alloc), "판정": "참고",
+                     "비고": f"전체 금액 행('{alloc[0]['항목명_원문'][:20]}')을 {labs} 로 읽음 — 공고 공종({api_trade})과 다름(공종 오분류 또는 모델 라벨 오류) → 04b 확인"})
     etc = sum(i["금액_원"] for i in items if i["공종"] == "기타")
     if tsum and etc / tsum > 0.5:
         logs.append({"공고번호": bid_no, "항목": "공종 라벨 미매핑(문서)", "문서값": etc, "판정": "경고",
