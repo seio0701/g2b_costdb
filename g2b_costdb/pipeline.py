@@ -734,7 +734,7 @@ def _non_excel_text(text: str) -> str:
             out.append(body)
     return "\n".join(out)
 DETAIL_COLS = ["프로젝트ID", "시설ID", "시설명", "사업유형", "상위공종", "공고번호", "공고차수", "공고키", "세부공종", "항목명_원문",
-               "금액_원_문서", "금액기준", "관급자재_포함", "단위", "집계표합계_원_문서", "출처파일", "신뢰도", "근거문구"]
+               "금액_원_문서", "배분적용", "금액기준", "관급자재_포함", "단위", "집계표합계_원_문서", "출처파일", "신뢰도", "근거문구"]
 
 
 def _trade_targets(latest: pd.DataFrame, docs: dict, texts: dict) -> List[str]:
@@ -1017,18 +1017,54 @@ def _renormalize_trades(tdocs: dict) -> dict:
     return out
 
 
+def _alloc_decision(api_row: Dict, t: Dict) -> str:
+    """04b 비율 배분을 적용할지('Y' / 'N(사유)'). 공종 행 합이 집계표(합계 − 간접비·관급·부가세·배분제외)의 30~125%(집계표 합계가 없으면 API 기초금액의 30~160%)여야 한다.
+    모델이 일부 행만 읽은 문서(건축 행 누락, 기타 행만 남음)는 작은 행 하나가 100% 가 되어 05 문서배분을 왜곡하므로 막고,
+    집계표 합계가 API 금액과 맞지 않는 문서(차수·다른 공사 집계표 의심)도 배분하지 않는다."""
+    items = t.get("공종별금액") or []
+    alloc = [i["금액_원"] for i in items if i["공종"] in extract_llm.TRADE_ALLOC_LABELS]
+    if not alloc:
+        return "N(공종 행 없음)"
+    asum = sum(alloc)
+    if asum <= 0:
+        return "N(공종 행 금액 0)"
+    total = extract_llm._num(t.get("합계_원"))
+    if total:
+        basis = next((l for l in extract_llm.cross_verify_trades(str(api_row.get("공고번호", "")), api_row, t) if l["항목"] == "집계표합계 기준"), None)
+        if basis and basis["판정"] == "경고":
+            return "N(집계표 합계가 API 금액과 불일치)"
+        ref = total - sum(i["금액_원"] for i in items if i["공종"] in ("공통가설", "간접비", "관급자재", "부가세", "배분제외"))
+        if ref <= 0:
+            ref = total
+        src, hi = "집계표 공종분", 1.25
+    else:
+        ref = extract_llm._num(api_row.get("기초금액")) or (extract_llm._num(api_row.get("추정가격")) or 0) * 1.1
+        if not ref:
+            return "Y"
+        src, hi = "API 기초금액", 1.6
+    cov = asum / ref
+    if cov < 0.3:
+        return f"N(공종 행 합이 {src}의 {cov:.0%} — 일부 행만 읽힘)"
+    if cov > hi:
+        return f"N(공종 행 합이 {src}의 {cov:.0%} — 중복·다른 집계표 의심)"
+    return "Y"
+
+
 def assemble_trade_detail_table(latest: pd.DataFrame, tdocs: dict) -> pd.DataFrame:
     """04b 행: 대표 공고 × 집계표 항목(공종별 금액). 복수 시설 배정 공고는 04 와 같이 프로젝트마다 나타난다."""
     rows = []
     tdocs = _renormalize_trades(tdocs)
+    decisions: Dict[str, str] = {}
     for _, r in latest.iterrows():
         t = tdocs.get(r["공고키"])
         if not t or "_error" in t:
             continue
+        if r["공고키"] not in decisions:
+            decisions[r["공고키"]] = _alloc_decision(r.to_dict(), t)
         for it in t.get("공종별금액") or []:
             rows.append({"프로젝트ID": r["프로젝트ID"], "시설ID": r["시설ID"], "시설명": r["시설명"], "사업유형": r["사업유형"],
                          "상위공종": r["공종"], "공고번호": r["공고번호"], "공고차수": r["공고차수"], "공고키": r["공고키"],
-                         "세부공종": it.get("공종"), "항목명_원문": it.get("항목명_원문"), "금액_원_문서": it.get("금액_원"),
+                         "세부공종": it.get("공종"), "항목명_원문": it.get("항목명_원문"), "금액_원_문서": it.get("금액_원"), "배분적용": decisions[r["공고키"]],
                          "금액기준": t.get("금액기준"), "관급자재_포함": t.get("관급자재_포함여부"), "단위": t.get("단위"),
                          "집계표합계_원_문서": t.get("합계_원"), "출처파일": ", ".join(t.get("_files") or []) or "공고문·현장설명서(본문)",
                          "신뢰도": t.get("신뢰도"), "근거문구": t.get("근거문구")})

@@ -281,6 +281,8 @@ def run():
         drows = [{hd[i]: wsd.cell(r, i + 1).value for i in range(len(hd))} for r in range(2, wsd.max_row + 1) if wsd.cell(r, 1).value]
         labs = sorted(d["세부공종"] for d in drows if d["공고번호"] == "R24010001")
         assert labs == ["건축", "기계설비"], f"배치 수거로 바뀐 2차 결과(건축·기계설비)가 04b 에: {labs}"
+        flags = {wsd.cell(r, hd.index("배분적용") + 1).value for r in range(2, wsd.max_row + 1) if wsd.cell(r, hd.index("공고키") + 1).value == "R24010001-001"}
+        assert flags == {"Y"}, f"공종 행이 집계표를 설명하는 문서는 배분적용 Y: {flags}"
         mech = next(d for d in drows if d["공고번호"] == "R24010001" and d["세부공종"] == "기계설비")
         assert mech["금액_원_문서"] == 3_000_000_000 and str(mech["비율(수식)"]).startswith("=IF(OR(") and "SUMIFS" in str(mech["배분금액(수식)"])
         assert "공고키" in h4 and "문서배분_기계설비(수식)" in h5 and "건축_순건축추정(수식)" in h5
