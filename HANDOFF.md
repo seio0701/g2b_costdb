@@ -299,7 +299,11 @@
   배분 행이 있을 때만 합계 — 공사금액 표의 공종별 '추정가격(공급가액)' 행이나 단일 공종 공고의 추정가격은 모델 라벨 유지). 합계_원 폴백에서 직접공사비·순공사비 소계 제외.
   cross_verify_trades: 배분제외 행은 집계표 총합에 든 쪽/안 든 쪽 중 가까운 쪽으로 비교, API 후보는 값이 있을 때만(없는 기초금액+관급 가짜 후보 제거), ×1000 의심을 3% 근사보다 먼저.
   stage_excel: cfg 에 verify 절이 없어도 동작, llm_trades.json 이 없으면 옛 2차 로그를 싣지 않음. 자유 서술 라벨 '전기공사금액' 은 전기(합산어보다 공종 먼저).
-- 다음: 사용자 PC `git pull` → (배치 끝난 뒤) `extract-trades --batch` → `excel` → Excel 확인(04b 세부공종 분포, 06 '집계표합계 기준' 경고 감소, 05 문서배분_기타 축소).
+- 2026-11-07 PC 실행: `git pull` 이 `sample_output/공사비DB_샘플.xlsx` 로컬 변경(테스트가 저장 시각이 다른 파일을 덮어씀) 때문에 중단 → PC 는 25effa5 그대로였고 그 코드로 54건 수거(성공 53·실패 1,
+  stop=max_tokens)·excel(04b 1,213행, 06 2차 '집계표합계 기준' 경고 51·참고 277 — 25effa5 의 관급 보정이 반영된 수치). 해결: `git checkout -- sample_output/공사비DB_샘플.xlsx` 뒤 pull.
+  재발 방지: `tests/test_dedup_and_excel.py` 는 기본으로 `output/`(미추적)에 쓰고 `--sample` 을 줬을 때만 저장소 사본을 갱신.
+- 다음: 사용자 PC `git checkout -- sample_output/공사비DB_샘플.xlsx` → `git pull` → `excel`(재수거 없이 새 라벨·로그 적용) → Excel 확인(04b 배분제외·합계, 06 2차 경고).
+  2차 실패 1건(32k 에서 잘림 가능)은 `extract-trades --batch --yes` 로 재제출 가능(수 센트).
 
 ## 1. 현재 단계
 - **세션 0(코드 정비) 완료 / 세션 1(환경 점검 + probe)의 사용자 PC 실행 대기**

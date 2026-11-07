@@ -115,6 +115,9 @@ def run(out_path: str):
 
 
 if __name__ == "__main__":
-    run(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sample_output", "공사비DB_샘플.xlsx"))
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # 기본은 output/(git 미추적)에 쓴다. 저장소에 든 sample_output/공사비DB_샘플.xlsx 는 --sample 을 줬을 때만 갱신
+    # (openpyxl 이 저장 시각을 넣어 실행마다 파일이 바뀌므로, 추적 파일을 매번 덮어쓰면 사용자 PC 의 git pull 이 막힌다)
+    run(os.path.join(root, "sample_output" if "--sample" in sys.argv else "output", "공사비DB_샘플.xlsx"))
     from tests.test_regressions import run as run_regressions  # noqa: E402
     run_regressions()

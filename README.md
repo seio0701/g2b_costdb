@@ -46,7 +46,7 @@ python -m g2b_costdb.pipeline doctor       # 파이썬·패키지·키 존재 �
 
 ## 3. 검증(합성 데이터, 네트워크·키 불필요)
 ```powershell
-python -m tests.test_dedup_and_excel     # 분류·중복정리·Excel 수식 점검 → sample_output/공사비DB_샘플.xlsx, 이어서 회귀 테스트 실행
+python -m tests.test_dedup_and_excel     # 분류·중복정리·Excel 수식 점검 → output/공사비DB_샘플.xlsx(저장소의 sample_output 사본은 --sample 을 줬을 때만 갱신), 이어서 회귀 테스트 실행
 python -m tests.test_regressions         # 회귀 테스트만
 python -m tests.test_e2e_mock            # 가짜 나라장터 서버로 probe→collect→discover→research→dedup→attach→extract→excel 전 단계 통합 실행(약 20초)
 python -m tests.check_excel output/공사비DB.xlsx   # 생성된 Excel 의 수식 오류 점검(LibreOffice 또는 formulas 패키지)
