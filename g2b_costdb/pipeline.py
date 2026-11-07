@@ -848,7 +848,7 @@ def _trade_logs(cfg, latest, tdocs) -> List[Dict]:
         if not t or "_error" in t or row["공고키"] in seen:
             continue
         seen.add(row["공고키"])
-        logs.extend(extract_llm.cross_verify_trades(row["공고번호"], row.to_dict(), t, cfg["verify"].get("vat_ratio", 0.10)))
+        logs.extend(extract_llm.cross_verify_trades(row["공고번호"], row.to_dict(), t, cfg.get("verify", {}).get("vat_ratio", 0.10)))
     logs.extend(_trade_dup_logs(latest, tdocs))
     _logs_frame(logs).to_parquet(_p(cfg, "logs_trades.parquet"), index=False)
     return logs
@@ -1097,7 +1097,8 @@ def stage_excel(cfg):
     tdocs = json.load(open(tpath, encoding="utf-8")) if os.path.exists(tpath) else {}
     if tdocs:
         _trade_logs(cfg, latest, tdocs)        # 2차 검증로그는 저장된 결과에 현재 규칙을 다시 적용해 새로 만든다(수거 때 로그가 옛 규칙일 수 있음)
-    frames = [pd.read_parquet(_p(cfg, n)) for n in ("logs_dedup.parquet", "logs_verify.parquet", "logs_trades.parquet") if os.path.exists(_p(cfg, n))]
+    log_names = ("logs_dedup.parquet", "logs_verify.parquet") + (("logs_trades.parquet",) if tdocs else ())   # 2차 결과가 없으면 남아 있는 옛 2차 로그도 싣지 않는다
+    frames = [pd.read_parquet(_p(cfg, n)) for n in log_names if os.path.exists(_p(cfg, n))]
     frames = [f for f in frames if not f.empty]
     logs = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     notes = pd.read_parquet(_p(cfg, "notes_attach.parquet")) if os.path.exists(_p(cfg, "notes_attach.parquet")) else pd.DataFrame()
