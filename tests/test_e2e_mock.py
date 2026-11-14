@@ -276,7 +276,8 @@ def run():
         assert b5 == "건축(+토목·조경)", f"05 프로젝트 단위 통합발주 표기(API+문서 합집합): {b5!r}"
         assert "부공종명" in [c.value for c in wb["03_공고목록_최신"][1]]
         h1 = [c.value for c in wb["01_시설마스터"][1]]
-        assert h1.index("대지면적_m2") == h1.index("건축면적_m2") + 1, "01 시트에 대지면적 열(건축면적 뒤)"
+        assert h1.index("대지면적_m2") == h1.index("연면적_m2") + 1 and h1.index("건축면적_m2") == h1.index("대지면적_m2") + 1, "01 공사개요는 공사비 정보광장 순서(연면적·대지면적·건축면적)"
+        assert h1.index("공사명") < h1.index("공사규모(수식)") < h1.index("연면적_m2") < h1.index("현장위치") < h1.index("발주년월") < h1.index("설계특이사항")
         wsd = wb["04b_공종세부내역(문서)"]; hd = [c.value for c in wsd[1]]
         drows = [{hd[i]: wsd.cell(r, i + 1).value for i in range(len(hd))} for r in range(2, wsd.max_row + 1) if wsd.cell(r, 1).value]
         labs = sorted(d["세부공종"] for d in drows if d["공고번호"] == "R24010001")
@@ -315,12 +316,19 @@ def run():
             col = lambda name: openpyxl.utils.get_column_letter(h5.index(name) + 1)
             rows = {ws5.cell(r, 1).value: r for r in range(2, ws5.max_row + 1)}
             r = rows[f"{gid}-N"]
-            area, total, per = val("05_공사비DB_시설합산", f"{col('연면적_m2')}{r}"), val("05_공사비DB_시설합산", f"{col('총공사비합계(수식)')}{r}"), val("05_공사비DB_시설합산", f"{col('㎡당공사비_원(수식)')}{r}")
+            area, total, per = val("05_공사비DB_시설합산", f"{col('연면적_m2')}{r}"), val("05_공사비DB_시설합산", f"{col('총공사비합계_기초금액기준(수식)')}{r}"), val("05_공사비DB_시설합산", f"{col('㎡당공사비_기초금액기준_원(수식)')}{r}")
             assert float(area) == 15200.0, area
             assert abs(float(total) - (33000000000 + 2100000000 + 2860000000 + 583000000)) < 1, total   # 건축(기초+관급)+전기+소방
             assert abs(float(per) - float(total) / 15200) < 1, per
+            total_p = val("05_공사비DB_시설합산", f"{col('총공사비합계_추정가격기준(수식)')}{r}")
+            assert abs(float(total_p) - float(total)) < 1, ("과세 공사는 추정가격+부가세 기준과 기초금액 기준이 같다", total_p, total)
+            c4 = lambda name: openpyxl.utils.get_column_letter(h4.index(name) + 1)
+            v4 = lambda name, rr: val("04_공사비DB_공종별", f"{c4(name)}{rr}")
+            assert v4("부가세_출처(수식)", r4) == "API" and float(v4("부가세(수식)", r4)) == 3000000000 and v4("과세구분(수식)", r4) == "과세"
+            assert float(v4("추정금액_계ⓐ(수식)", r4)) == 33000000000 and float(v4("관급자관급비ⓑ(수식)", r4)) == 2100000000
+            assert float(v4("금액합계_추정가격기준(수식)", r4)) == 35100000000 == float(v4("금액합계_기초금액기준(수식)", r4)), "요청 양식의 금액 합계 = 예산금액(API)"
             r3 = rows[ids_before["다른군"] + "-N"]
-            assert abs(float(val("05_공사비DB_시설합산", f"{col('건축(수식)')}{r3}")) - 25000000000 * 1.1) < 1, "기초금액 없으면 추정가격×1.1"
+            assert abs(float(val("05_공사비DB_시설합산", f"{col('건축(수식)')}{r3}")) - 25000000000 * 1.1) < 1, "기초금액·부가세가 없으면 추정가격 + 10% 가정"
             rate = val("04_공사비DB_공종별", f"{openpyxl.utils.get_column_letter(h4.index('낙찰률(수식)') + 1)}{r4}")
             # 04b 비율·배분과 05 문서배분: 기계설비 3/26, 배분 = 비율 × 04 총공사비(R24010001), 05 건축_순건축추정 = 건축(수식) − 비건축 배분
             dcol = lambda name: openpyxl.utils.get_column_letter(hd.index(name) + 1)
@@ -328,7 +336,7 @@ def run():
                       and wsd.cell(r, hd.index("세부공종") + 1).value == "기계설비")
             ratio = float(val("04b_공종세부내역(문서)", f"{dcol('비율(수식)')}{rd}"))
             assert abs(ratio - 3 / 23) < 1e-6, ratio          # 배치 결과: 건축 200억 + 기계설비 30억 → 기계설비 비율 3/23
-            tot04 = float(val("04_공사비DB_공종별", f"{openpyxl.utils.get_column_letter(h4.index('총공사비(수식)') + 1)}{r4}"))
+            tot04 = float(val("04_공사비DB_공종별", f"{openpyxl.utils.get_column_letter(h4.index('금액합계_기초금액기준(수식)') + 1)}{r4}"))
             alloc = float(val("04b_공종세부내역(문서)", f"{dcol('배분금액(수식)')}{rd}"))
             assert abs(alloc - ratio * tot04) < 1, (alloc, ratio, tot04)
             r5a = next(r for r in range(2, ws5.max_row + 1) if ws5.cell(r, h5.index("프로젝트ID") + 1).value == pid4)

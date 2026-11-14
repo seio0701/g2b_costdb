@@ -743,7 +743,147 @@ def test_trade_allocation_formulas(tmp):
     assert abs(float(g("문서배분_토목(수식)")) - (100 * 10 / 110 + 50 * 10 / 50)) < 1e-6, "건축 공고의 토목 + 기계설비 공고의 토목"
     assert float(g("문서배분_전기(수식)")) == 0 and g("문서배분_중복경고(수식)") in ("", None), "전기 공고 자신의 집계표는 중복이 아님"
     assert abs(float(g("건축_순건축추정(수식)")) - 100 * 60 / 110) < 1e-6
-    assert abs(float(g("총공사비합계(수식)")) - 260) < 1e-6, "총공사비합계는 배분과 무관"
+    assert abs(float(g("총공사비합계_기초금액기준(수식)")) - 260) < 1e-6, "총공사비합계는 배분과 무관"
+    assert abs(float(g("총공사비합계_추정가격기준(수식)")) - 260) < 1e-6, "추정가격이 없으면 추정가격 기준도 기초금액으로 대신"
+    assert abs(float(g("건축공종계(수식)")) - 150) < 1e-6, "건축공종계 = 건축 100 + 기계설비 50 (+토목·조경 0)"
+
+
+def test_amount_structure(tmp):
+    """요청 양식(2026-11-14): 04 금액 구성(추정가격|부가세|도급자관급비|계ⓐ|관급자관급비ⓑ|기타금액ⓒ|합계 2종), 부가세 출처·과세구분, 기타금액 가산 판정,
+    공고명 꼬리표 공종 분류, 기타 공종 비고, 01 공사비 정보광장 틀."""
+    from g2b_costdb import classify, pipeline
+    from g2b_costdb.build_excel import build_workbook, FAC_OVERVIEW_COLS
+    # 공고명 꼬리표: 주공종명이 비면 '(전기)'·'(통신)'·'(소방)'·'(기계)' 가 공종. 주공종명이 있으면 그쪽이 우선, 서로 다른 꼬리표 둘이면 판단 안 함
+    ct = lambda n, m="": classify.classify_trade(n, m, "")
+    assert ct("KAIST미술관 신축공사(3단계)(전기)") == ("전기", "공고명(꼬리표)") and ct("○○호텔 리모델링 공사(통신)")[0] == "정보통신"
+    assert ct("○○ 소공연장 조성공사(소방)")[0] == "소방" and ct("○○ 신축공사(기계)")[0] == "기계설비" and ct("○○ 건립공사[토목]")[0] == "토목"
+    assert ct("○○ 주차장 건립공사(건축)", "건축공사업") == ("건축", "주공종명") and ct("○○ 공사(전기)", "일반소방시설공사업(전기)")[0] == "소방"
+    assert ct("○○ 신축공사(건축)(전기)")[0] == "건축" and ct("소방서 신축공사")[0] == "건축" and ct("○○ 리모델링 기계공사")[0] == "기계설비"
+    assert ct("감포 축구장 개보수 공사") == ("기타", "미분류")
+    note = classify.trade_note("기타", "미분류", "감포 축구장 개보수 공사")
+    assert "미분류 사유" in note and "리모델링·개보수" in note and classify.trade_note("건축", "공고명", "○○ 신축공사") == ""
+    assert "석면해체.제거업" in classify.trade_note("기타", "미분류", "○○ 철거공사", "석면해체.제거업") and "철거·해체" in classify.trade_note("기타", "미분류", "○○ 철거공사")
+    # 기타금액 가산 판정: 문서 '별도' → 가산, 관급 칸과 같은 값·문서가 관급/추정가격에 포함이라 적음 → 제외
+    ed = pipeline._etc_decision
+    assert ed(5600000, "별도", {}, {}).startswith("가산") and ed(5600000, "", {}, {}).startswith("가산(위치 불명")
+    assert ed(24379000, "별도", {"관급자관급액_API": 24379000}, {}).startswith("제외(관급 금액과 같은 값")
+    assert ed(100, "관급에포함", {}, {}).startswith("제외") and ed(100, "추정가격에 포함", {}, {}).startswith("제외") and ed(None, "별도", {}, {}) == "" and ed(0, "별도", {}, {}) == ""
+    # 검증로그 '기초금액≈추정가격×1.1': 면세·부분면세(공고 부가세와 일치)·조달청 공고·공동주택은 경고가 아니라 참고
+    from g2b_costdb.extract_llm import cross_verify
+    vat_log = lambda api, doc: next(l for l in cross_verify("X", api, doc) if l["항목"] == "기초금액≈추정가격×1.1")
+    assert vat_log({"추정가격": 1000, "기초금액": 1100}, {})["판정"] == "정상"
+    lg = vat_log({"추정가격": 1000, "기초금액": 1027, "부가세_API": 27}, {})
+    assert lg["판정"] == "참고" and "면세" in lg["비고"], lg
+    assert vat_log({"추정가격": 1000, "기초금액": 1000}, {"부가가치세_원": 0})["판정"] == "참고", "문서 부가세 0 = 면세"
+    lg = vat_log({"추정가격": 1000, "기초금액": 1075, "부가세_API": 100, "공고기관": "조달청 충북지방조달청"}, {})
+    assert lg["판정"] == "참고" and "조달청" in lg["비고"], lg
+    assert vat_log({"추정가격": 1000, "기초금액": 1030, "표2_대분류": "공동주택"}, {})["판정"] == "참고"
+    assert vat_log({"추정가격": 1000, "기초금액": 1030, "표2_대분류": "운동시설"}, {})["판정"] == "경고", "근거 없는 불일치는 경고 유지"
+    assert vat_log({"추정가격": 1000, "기초금액": 1300, "표2_대분류": "공동주택"}, {})["판정"] == "경고"
+    try:
+        import formulas  # type: ignore
+    except ImportError:
+        print("(formulas 없음 → 04 금액 구성 수식 값 검증 생략)")
+        return
+    import logging
+    import warnings
+    import openpyxl
+    base = {"프로젝트ID": "P1", "시설ID": "F1", "시설명": "s", "사업유형": "신축", "공고명": "n", "공고일시": "2025-03-02 10:00", "수요기관": "d", "공고차수": "000"}
+    rows = [  # A 과세(API 부가세), 관급 도급자 20·관급자 30
+        dict(공고번호="A", 공종="건축", 추정가격_API=1000, 기초금액_API=1100, 부가세_API=100, 도급자관급액_API=20, 관급자관급액_API=30),
+        # B 면세(기초금액=추정가격, 부가세 원천 없음)
+        dict(공고번호="B", 공종="전기", 추정가격_API=500, 기초금액_API=500),
+        # C 부분면세(문서 부가세 13), 기타금액 7 가산
+        dict(공고번호="C", 공종="정보통신", 추정가격_API=400, 기초금액_API=413, 부가세_문서=13, 기타금액_문서=7, 기타금액_판정="가산(문서: 별도 금액)"),
+        # D 조달청형: 기초금액(조사금액)이 추정가격×1.1 보다 낮음, API 부가세는 10% → 두 기준이 다름. 기타금액은 관급과 같은 값이라 제외
+        dict(공고번호="D", 공종="소방", 추정가격_API=2000, 기초금액_API=2150, 부가세_API=200, 관급자재_API=50, 기타금액_문서=50, 기타금액_판정="제외(관급 금액과 같은 값 — 이중계산 방지)"),
+        # E 기초금액·부가세 없음 → 10% 가정 / F 추정가격 없음(문서 기초금액만) / G 부가세 원천 없고 기초금액이 7.5% 높음 → 확인필요
+        dict(공고번호="E", 공종="조경", 추정가격_API=300),
+        dict(공고번호="F", 공종="토목", 기초금액_문서=660),
+        dict(공고번호="G", 공종="기계설비", 추정가격_API=1000, 기초금액_API=1075),
+        dict(공고번호="H", 공종="기타", 공종_비고="미분류 사유: x", 추정가격_문서=200, 기초금액_문서=220, 도급자관급액_문서=5, 관급자관급액_문서=6)]
+    trade = pd.DataFrame([dict(base, 공고키=r["공고번호"] + "-000", **r) for r in rows])
+    fac = pd.DataFrame([{"프로젝트ID": "P1", "시설ID": "F1", "시설명": "s", "사업유형": "신축", "표2_대분류": "문화 및 집회시설", "표2_중분류": "공연장", "수요기관": "d",
+                         "공고건수_최신": 8, "최종공고일": "2025-03-02", "연면적_m2": 100, "구조": "철근콘크리트조", "지하층수": 1, "지상층수": 4,
+                         "대지면적_m2": 400, "건축면적_m2": 50}])
+    latest = trade.rename(columns={"추정가격_API": "추정가격", "기초금액_API": "기초금액"})
+    out = os.path.join(tmp, "amount.xlsx")
+    build_workbook(out, fac, latest, latest, trade, pd.DataFrame(), pd.DataFrame(), meta={"period": "t"})
+    wb = openpyxl.load_workbook(out)
+    ws4, ws5, ws1 = wb["04_공사비DB_공종별"], wb["05_공사비DB_시설합산"], wb["01_시설마스터"]
+    h4, h5, h1 = [c.value for c in ws4[1]], [c.value for c in ws5[1]], [c.value for c in ws1[1]]
+    order = ["추정가격(수식)", "부가세(수식)", "도급자관급비(수식)", "추정금액_계ⓐ(수식)", "관급자관급비ⓑ(수식)", "기타금액ⓒ(수식)", "금액합계_추정가격기준(수식)", "금액합계_기초금액기준(수식)"]
+    assert [h for h in h4 if h in order] == order and h4.index("금액합계_기초금액기준(수식)") - h4.index("추정가격(수식)") == 7, "요청 양식 순서로 연속 배치"
+    assert h4.index("공종_비고") == h4.index("공종") + 1
+    assert [h for h in h1 if h in FAC_OVERVIEW_COLS] == FAC_OVERVIEW_COLS, "01 공사개요는 공사비 정보광장 항목 순서"
+    assert h1.index("대지면적_m2") == h1.index("연면적_m2") + 1 and "설계특이사항" in h1 and "주차대수" in h1
+    warnings.filterwarnings("ignore")
+    logging.disable(logging.CRITICAL)
+    sol = formulas.ExcelModel().loads(out).finish().calculate()
+    logging.disable(logging.NOTSET)
+
+    def val(sheet, coord):
+        for k, v in sol.items():
+            if k.upper().endswith(f"{sheet.upper()}'!{coord}"):
+                x = getattr(v, "value", v)
+                x = x.tolist() if hasattr(x, "tolist") else x
+                while isinstance(x, list) and x:
+                    x = x[0]
+                return x
+    L4 = lambda name: openpyxl.utils.get_column_letter(h4.index(name) + 1)
+    row = {ws4.cell(r, h4.index("공고번호") + 1).value: r for r in range(2, ws4.max_row + 1)}
+    v4 = lambda bid, name: val("04_공사비DB_공종별", f"{L4(name)}{row[bid]}")
+    num = lambda x: float(x) if x not in ("", None) else None
+    # A 과세
+    assert v4("A", "부가세_출처(수식)") == "API" and num(v4("A", "부가세(수식)")) == 100 and v4("A", "과세구분(수식)") == "과세"
+    assert num(v4("A", "추정금액_계ⓐ(수식)")) == 1120 and num(v4("A", "관급자관급비ⓑ(수식)")) == 30
+    assert num(v4("A", "금액합계_추정가격기준(수식)")) == 1150 and num(v4("A", "금액합계_기초금액기준(수식)")) == 1150
+    # B 면세: 기초금액 = 추정가격 → 부가세 0
+    assert v4("B", "부가세_출처(수식)") == "기초금액-추정가격" and num(v4("B", "부가세(수식)")) == 0 and v4("B", "과세구분(수식)") == "면세"
+    assert num(v4("B", "금액합계_추정가격기준(수식)")) == 500 == num(v4("B", "금액합계_기초금액기준(수식)"))
+    # C 부분면세 + 기타금액 가산
+    assert v4("C", "부가세_출처(수식)") == "문서" and v4("C", "과세구분(수식)") == "부분면세" and num(v4("C", "기타금액ⓒ(수식)")) == 7
+    assert num(v4("C", "금액합계_추정가격기준(수식)")) == 420 and num(v4("C", "금액합계_기초금액기준(수식)")) == 420
+    # D 조달청형: 추정가격 기준 2000+200+50, 기초금액 기준 2150+50. API 합계만 있는 관급은 관급자 쪽으로, 기타금액은 제외
+    assert num(v4("D", "도급자관급비(수식)")) == 0 and num(v4("D", "관급자관급비ⓑ(수식)")) == 50 and num(v4("D", "기타금액ⓒ(수식)")) == 0
+    assert num(v4("D", "금액합계_추정가격기준(수식)")) == 2250 and num(v4("D", "금액합계_기초금액기준(수식)")) == 2200 and v4("D", "과세구분(수식)") == "과세"
+    # E 10% 가정 / F 추정가격 없음 → 두 기준 모두 문서 기초금액 / G 확인필요
+    assert v4("E", "부가세_출처(수식)") == "10% 가정" and v4("E", "과세구분(수식)") == "미확인(10% 가정)" and num(v4("E", "금액합계_기초금액기준(수식)")) == 330
+    assert v4("F", "추정가격(수식)") in ("", None) and num(v4("F", "금액합계_추정가격기준(수식)")) == 660 == num(v4("F", "금액합계_기초금액기준(수식)"))
+    assert v4("G", "부가세_출처(수식)") == "기초금액-추정가격" and str(v4("G", "과세구분(수식)")).startswith("확인필요") and abs(num(v4("G", "부가세율(수식)")) - 0.075) < 1e-9
+    # H 문서값만: 추정가격·기초금액·관급 모두 문서에서
+    assert num(v4("H", "추정가격(수식)")) == 200 and v4("H", "부가세_출처(수식)") == "기초금액(문서)-추정가격" and num(v4("H", "추정금액_계ⓐ(수식)")) == 225
+    assert num(v4("H", "금액합계_추정가격기준(수식)")) == 231 == num(v4("H", "금액합계_기초금액기준(수식)"))
+    # 05 대표값 2종과 ㎡당, 건축공종계
+    L5 = lambda name: openpyxl.utils.get_column_letter(h5.index(name) + 1)
+    v5 = lambda name: num(val("05_공사비DB_시설합산", f"{L5(name)}2"))
+    tot_b = 1150 + 500 + 420 + 2200 + 330 + 660 + 1075 + 231
+    tot_p = 1150 + 500 + 420 + 2250 + 330 + 660 + 1075 + 231       # G 는 부가세 원천이 '기초금액-추정가격'(75)이라 두 기준이 같다
+    assert v5("총공사비합계_기초금액기준(수식)") == tot_b and v5("총공사비합계_추정가격기준(수식)") == tot_p, (v5("총공사비합계_기초금액기준(수식)"), v5("총공사비합계_추정가격기준(수식)"))
+    assert abs(v5("㎡당공사비_기초금액기준_원(수식)") - tot_b / 100) < 1e-6 and abs(v5("㎡당공사비_추정가격기준_원(수식)") - tot_p / 100) < 1e-6
+    assert v5("건축공종계(수식)") == 1150 + 330 + 660 + 1075 and v5("기타(수식)") == 231
+    # 01 수식: 공사규모·건폐율 계산·건축법상용도
+    L1 = lambda name: openpyxl.utils.get_column_letter(h1.index(name) + 1)
+    assert val("01_시설마스터", f"{L1('공사규모(수식)')}2") == "철근콘크리트조 지하 1층~지상 4층"
+    assert abs(float(val("01_시설마스터", f"{L1('건폐율_계산(수식)')}2")) - 0.125) < 1e-9
+    assert val("01_시설마스터", f"{L1('건축법상용도(수식)')}2") == "문화 및 집회시설(공연장)"
+    # enrich_facility: 건축 문서 우선, 없으면 다른 공종 + 보강 추출, 출처·발주년월·공사명
+    lt = pd.DataFrame([dict(프로젝트ID="P1", 공고키="A-000", 공고번호="A", 공종="건축", 공고명="○○ 신축공사", 추정가격=1000, 공고일시="2025-03-02 10:00"),
+                       dict(프로젝트ID="P1", 공고키="B-000", 공고번호="B", 공종="전기", 공고명="○○ 신축공사(전기)", 추정가격=500, 공고일시="2025-01-15 10:00"),
+                       dict(프로젝트ID="P2", 공고키="C-000", 공고번호="C", 공종="전기", 공고명="△△ 전기공사", 추정가격=300, 공고일시="2024-11-20 10:00")])
+    fc = pd.DataFrame([{"프로젝트ID": "P1", "공사현장지역": "충청북도 증평군"}, {"프로젝트ID": "P2", "공사현장지역": "서울특별시"}])
+    docs = {"A-000": {"연면적_m2": 7281.94, "구조": "철근콘크리트조", "공사위치": "충북 증평군 증평읍 1"}, "B-000": {"연면적_m2": 9999, "대지면적_m2": 14717, "지상층수": 4},
+            "C-000": {"_error": "x"}}
+    extra = {"A-000": {"건폐율_pct": 12.35, "주차대수": 125, "건축법상용도": "업무시설"}, "B-000": {"주차대수": 1, "용적률_pct": 37.13}, "C-000": {"대지면적_m2": 55, "설계특이사항": "3개동"}}
+    ef = pipeline.enrich_facility(fc, lt, docs, extra).set_index("프로젝트ID")
+    p1 = ef.loc["P1"]
+    assert p1["연면적_m2"] == 7281.94 and p1["대지면적_m2"] == 14717 and p1["지상층수"] == 4, "건축 우선, 빈 항목만 다른 공종에서"
+    assert p1["건폐율_pct"] == 12.35 and p1["주차대수"] == 125 and p1["용적률_pct"] == 37.13 and p1["건축법상용도_문서"] == "업무시설"
+    assert p1["공사명"] == "○○ 신축공사" and p1["현장위치"] == "충북 증평군 증평읍 1" and p1["발주년월"] == "2025-03" and p1["발주년월_기준"] == "건축 공고"
+    assert p1["개요_출처"] == "건축·전기"
+    p2 = ef.loc["P2"]
+    assert p2["대지면적_m2"] == 55 and p2["설계특이사항"] == "3개동" and p2["현장위치"] == "서울특별시" and p2["발주년월"] == "2024-11"
+    assert p2["발주년월_기준"] == "전기 공고(건축 공고 없음)" and p2["개요_출처"] == "전기 (건축 공고 없음)"
 
 
 def test_trade_run_feedback(tmp):
@@ -1018,6 +1158,7 @@ def run():
         test_trade_second_pass(tmp)
         test_trade_review_fixes(tmp)
         test_trade_allocation_formulas(tmp)
+        test_amount_structure(tmp)
         test_trade_run_feedback(tmp)
         test_attachments(tmp)
     print("OK: 회귀 테스트 통과")

@@ -647,9 +647,21 @@ def cross_verify(bid_no: str, api_row: Dict, doc: Dict, warn_ratio: float = 0.00
     if p and b:
         exp = p * (1 + vat)
         r = (b - exp) / exp
+        verdict, note = ("정상", "") if abs(r) <= 0.01 else ("경고", "부가세 비율 불일치(면세·관급 포함 여부 확인)")
+        if verdict == "경고":
+            # 10% 가 아닌 이유가 설명되면 경고 대신 참고: ① 공고의 부가세(API·문서)가 기초금액−추정가격과 맞는 면세·부분면세 ② 조달청 공고(기초금액 = 조사금액 기준) ③ 공동주택(국민주택 면세 가능)
+            rate = (b - p) / p
+            v_api, v_doc = _num(api_row.get("부가세_API")), _num(doc.get("부가가치세_원"))
+            v = v_api if v_api is not None else v_doc
+            low = -0.001 <= rate < (vat - 0.001)
+            if low and v is not None and abs((p + v) - b) <= b * 0.01:
+                verdict, note = "참고", f"부가세율 {max(rate, 0):.1%} — 공고에 적힌 부가세와 일치(면세·부분면세 공사, 조세특례제한법 제106조 등)"
+            elif "조달청" in str(api_row.get("공고기관") or "") and 0.9 <= b / exp < 1.0:
+                verdict, note = "참고", "조달청 공고: 기초금액이 조사금액 기준이라 추정가격×1.1 보다 낮음(면세 아님일 수 있음) → 04 의 추정가격 기준 합계 참조"
+            elif low and str(api_row.get("표2_대분류") or "") == "공동주택":
+                verdict, note = "참고", f"부가세율 {max(rate, 0):.1%} — 공동주택: 국민주택규모 이하 면세·부분면세(조세특례제한법 제106조) 가능"
         logs.append({"공고번호": bid_no, "항목": "기초금액≈추정가격×1.1", "API값": round(exp), "문서값": b, "차이": round(b - exp),
-                     "차이율": round(r, 5), "판정": "정상" if abs(r) <= 0.01 else "경고",
-                     "비고": "" if abs(r) <= 0.01 else "부가세 비율 불일치(면세·관급 포함 여부 확인)"})
+                     "차이율": round(r, 5), "판정": verdict, "비고": note})
     rt, dt_ = api_row.get("사업유형"), doc.get("사업유형")
     if rt and dt_ and dt_ not in ("기타",) and rt != dt_:
         logs.append({"공고번호": bid_no, "항목": "사업유형 일치", "API값": rt, "문서값": dt_, "판정": "경고",

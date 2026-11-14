@@ -279,15 +279,51 @@ def match_trade_label(text: str, rules: Dict[str, List[str]]) -> Optional[str]:
     return "건축" if "건축" in hits else None
 
 
+# 공고명 꼬리표: '○○ 신축공사(전기)'·'…리모델링 공사(통신)'·'[소방]' 처럼 분리발주 공종을 괄호로만 적은 공고.
+# 주공종명이 비어 있으면 앞의 '신축공사'에 걸려 건축이 되거나 미분류(기타)가 되던 것을 바로잡는다.
+_TAG_LABEL = {"정보통신": "정보통신", "통신": "정보통신", "전기": "전기", "소방": "소방", "기계설비": "기계설비", "기계": "기계설비",
+              "토목": "토목", "조경": "조경", "건축": "건축"}
+_TAG_RE = re.compile(r"[\(（\[]\s*(정보통신|통신|전기|소방|기계설비|기계|토목|조경|건축)\s*(?:공사|분야|부문|공종)?\s*[\)）\]]")
+
+
+def trade_tag(notice_name: str) -> Optional[str]:
+    """공고명 꼬리표의 공종. 서로 다른 공종 꼬리표가 둘 이상이면(예: '(건축)(전기)') 판단하지 않는다."""
+    labs = {_TAG_LABEL[m] for m in _TAG_RE.findall(notice_name or "")}
+    return labs.pop() if len(labs) == 1 else None
+
+
 def classify_trade(notice_name: str = "", main_cnstty: str = "", license_names: str = "",
                    rules: Optional[Dict[str, List[str]]] = None) -> Tuple[str, str]:
-    """공종 분류. 우선순위: 면허제한 업종명 → 주공종명 → 공고명. 반환 (공종, 근거)."""
+    """공종 분류. 우선순위: 면허제한 업종명 → 주공종명 → 공고명 꼬리표('(전기)') → 공고명. 반환 (공종, 근거)."""
     rules = rules or load_keywords()["trade_rules"]
-    for src, text in (("면허제한", license_names), ("주공종명", main_cnstty), ("공고명", notice_name)):
+    for src, text in (("면허제한", license_names), ("주공종명", main_cnstty)):
         lab = match_trade_label(text, rules)
         if lab:
             return lab, src
+    tag = trade_tag(notice_name)
+    if tag:
+        return tag, "공고명(꼬리표)"
+    lab = match_trade_label(notice_name, rules)
+    if lab:
+        return lab, "공고명"
     return "기타", "미분류"
+
+
+# '기타'(미분류) 공고의 비고: 왜 분류되지 않았는지와 공고명으로 본 공사 성격. 공종은 '기타' 그대로 둔다(사용자 결정 2026-11-14)
+_ETC_KINDS = [("철거·해체 공사", r"철거|해체|석면"), ("전시·인테리어 공사", r"전시|인테리어|실내"),
+              ("시설물·설비 설치·제작", r"설치|제작|구매|납품"), ("리모델링·개보수 공사(공종 미표기)", r"리모델링|개보수|보수|수선|개선|정비|교체|방수|도장|보강"),
+              ("조성·확충 공사(공종 미표기)", r"조성|확충|확장|건설|건립|신축|증축")]
+
+
+def trade_note(trade: str, basis: str = "", notice_name: str = "", main_cnstty: str = "", sub_cnstty: str = "") -> str:
+    """04 시트 '공종_비고'. 기타 공고에만 설명을 적는다."""
+    if str(trade) != "기타":
+        return ""
+    lic = " / ".join(x for x in (str(main_cnstty or "").strip(), str(sub_cnstty or "").strip()) if x and x.lower() not in ("nan", "none"))
+    why = f"주공종명 '{lic}' 이 8개 공종 규칙에 없음" if lic else "주공종명·면허 정보 없음, 공고명에 공종어 없음"
+    name = str(notice_name or "")
+    kind = next((k for k, rx in _ETC_KINDS if re.search(rx, name)), "공고명만으로 공사 성격 판별 불가")
+    return f"미분류 사유: {why} / 공사 성격(공고명 기준): {kind}"
 
 
 # 문서(공고문·현장설명서)의 공종 표기 → 8개 공종 라벨. 긴 단어가 먼저 와야 '기계설비' 가 '기계' 로, '정보통신' 이 '통신' 으로 깨지지 않는다

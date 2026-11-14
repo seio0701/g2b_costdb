@@ -1072,15 +1072,40 @@ def assemble_trade_detail_table(latest: pd.DataFrame, tdocs: dict) -> pd.DataFra
     return pd.DataFrame(rows, columns=DETAIL_COLS)
 
 
-def assemble_trade_table(latest: pd.DataFrame, docs: dict, texts: Optional[dict] = None) -> pd.DataFrame:
-    """04 시트 행. 포함공종: API(주공종명·부공종명) / 문서(LLM 필드 '포함공종_문서', 없으면 텍스트 규칙) / 종합(합집합)."""
+def _etc_decision(etc, where: str, api_row: Dict, doc: Dict) -> str:
+    """기타금액(한전불입금·분담금 등)을 금액 합계에 더할지. 문서가 도급·관급과 '별도' 로 적었으면 가산, 관급·추정가격에 포함이라 적었거나
+    관급 금액과 같은 값이면(발주기관이 한전불입금을 관급 칸에 넣은 사례) 제외 — 이중계산 방지."""
+    v = extract_llm._num(etc)
+    if not v:
+        return ""
+    gov = [extract_llm._num(api_row.get(k)) for k in ("도급자관급액_API", "관급자관급액_API", "관급자재_API")] + \
+          [extract_llm._num(doc.get(k)) for k in ("도급자관급액_원", "관급자관급액_원")]
+    if any(g and abs(g - v) <= max(1.0, v * 0.001) for g in gov):
+        return "제외(관급 금액과 같은 값 — 이중계산 방지)"
+    w = str(where or "").replace(" ", "")
+    if "관급" in w:
+        return "제외(문서: 관급에 포함)"
+    if "추정가격" in w or "도급" in w:
+        return "제외(문서: 추정가격에 포함)"
+    if "별도" in w:
+        return "가산(문서: 별도 금액)"
+    return "가산(위치 불명 — 확인 필요)"
+
+
+def assemble_trade_table(latest: pd.DataFrame, docs: dict, texts: Optional[dict] = None, extra: Optional[dict] = None) -> pd.DataFrame:
+    """04 시트 행. 포함공종: API(주공종명·부공종명) / 문서(LLM 필드 '포함공종_문서', 없으면 텍스트 규칙) / 종합(합집합).
+    extra = 보강 추출(llm_extra.json): 기타금액·면세 문구."""
     rows = []
-    texts = texts or {}
+    texts, extra = texts or {}, extra or {}
     for _, r in latest.iterrows():
         d = docs.get(r["공고키"], {}) or {}
         if "_error" in d:
             d = {}
-        ev = d.get("근거문구") or {}
+        x = extra.get(r["공고키"], {}) or {}
+        if "_error" in x:
+            x = {}
+        ev = dict(d.get("근거문구") or {})
+        ev.update({f"[보강]{k}": v for k, v in (x.get("근거문구") or {}).items()})
         inc_api = classify.included_trades(r.get("주공종명"), r.get("부공종명"), r["공종"])
         inc_doc, inc_src = classify.normalize_trade_list(d.get("포함공종_문서") or ""), "LLM"
         if not inc_doc:
@@ -1089,16 +1114,22 @@ def assemble_trade_table(latest: pd.DataFrame, docs: dict, texts: Optional[dict]
             inc_src = ""
         rows.append({
             "프로젝트ID": r["프로젝트ID"], "시설ID": r["시설ID"], "시설명": r["시설명"], "사업유형": r["사업유형"],
-            "공종": r["공종"], "포함공종_API": inc_api, "포함공종_문서": inc_doc, "포함공종_출처": inc_src,
+            "공종": r["공종"],
+            "공종_비고": classify.trade_note(r["공종"], r.get("공종근거"), r["공고명"], r.get("주공종명"), r.get("부공종명")),
+            "포함공종_API": inc_api, "포함공종_문서": inc_doc, "포함공종_출처": inc_src,
             "포함공종(종합)": classify.merge_trade_lists(inc_api, inc_doc, assigned=str(r["공종"])),
             "분리발주_언급공종_문서": d.get("분리발주_언급공종") or "",
             "공고번호": r["공고번호"], "공고차수": r["공고차수"], "공고키": r["공고키"],
             "공고명": r["공고명"], "공고일시": r["공고일시"], "수요기관": r["수요기관"],
-            "추정가격_API": r.get("추정가격"), "기초금액_API": r.get("기초금액"),
+            "추정가격_API": r.get("추정가격"), "기초금액_API": r.get("기초금액"), "부가세_API": r.get("부가세_API"),
             "관급자재_API": r.get("관급자재_API"), "도급자관급액_API": r.get("도급자관급액_API"), "관급자관급액_API": r.get("관급자관급액_API"),
             "예산금액_API": r.get("예산금액"),
             "낙찰금액_API": r.get("낙찰금액_API"), "낙찰률_API": r.get("낙찰률_API"), "낙찰자": r.get("낙찰자"), "낙찰하한율": r.get("낙찰하한율"),
+            "부가세_문서": d.get("부가가치세_원"),
             "도급자관급액_문서": d.get("도급자관급액_원"), "관급자관급액_문서": d.get("관급자관급액_원"),
+            "기타금액_문서": x.get("기타금액_원"), "기타금액_항목_문서": x.get("기타금액_항목") or "",
+            "기타금액_판정": _etc_decision(x.get("기타금액_원"), x.get("기타금액_위치"), r.to_dict(), d),
+            "면세_문구_문서": x.get("면세_문구") or "",
             "공사기간_일_문서": d.get("공사기간_일"), "추정가격_문서": d.get("추정가격_원"), "기초금액_문서": d.get("기초금액_원"),
             "신뢰도": d.get("신뢰도"), "근거문구": json.dumps(ev, ensure_ascii=False) if ev else "",
             "출처파일": d.get("_source_files", ""), "상세URL": r.get("상세URL"),
@@ -1106,23 +1137,65 @@ def assemble_trade_table(latest: pd.DataFrame, docs: dict, texts: Optional[dict]
     return pd.DataFrame(rows)
 
 
-def enrich_facility(fac: pd.DataFrame, latest: pd.DataFrame, docs: dict) -> pd.DataFrame:
-    """프로젝트(시설×사업유형) 개요(연면적·층수·구조·용도·공사기간)는 건축 공종 문서 → 없으면 다른 공종 문서 순으로 채움."""
+FAC_BASE_COLS = ["연면적_m2", "건축면적_m2", "대지면적_m2", "지하층수", "지상층수", "구조", "용도", "공사기간_일"]
+# 보강 추출(llm_extra.json)로 채우는 공사비 정보광장 공사개요 항목: 01 열 이름 → 보강 추출 필드 이름
+FAC_EXTRA_COLS = {"조경면적_m2": "조경면적_m2", "건폐율_pct": "건폐율_pct", "용적률_pct": "용적률_pct", "기준층층고_m": "기준층층고_m",
+                  "최고높이_m": "최고높이_m", "주차대수": "주차대수", "세대수": "세대수", "건축법상용도_문서": "건축법상용도", "설계특이사항": "설계특이사항"}
+
+
+def _empty(v) -> bool:
+    return v is None or v == "" or (isinstance(v, float) and v != v)
+
+
+def enrich_facility(fac: pd.DataFrame, latest: pd.DataFrame, docs: dict, extra: Optional[dict] = None) -> pd.DataFrame:
+    """프로젝트(시설×사업유형) 공사개요를 조달청 '공사비 정보광장' 항목 틀로 채운다. 값은 건축 공종 문서 → 없으면 다른 공종 문서 순,
+    같은 공고 안에서는 1차 추출(llm_docs) → 보강 추출(llm_extra) 순. 어느 공종 공고에서 왔는지 '개요_출처' 에 적는다.
+    공사명 = 건축 대표 공고명(추정가격 최대), 현장위치 = 문서의 공사위치(없으면 API 공사현장지역), 발주년월 = 건축 대표 공고의 최초 공고월."""
     fac = fac.copy()
-    cols = ["연면적_m2", "건축면적_m2", "대지면적_m2", "지하층수", "지상층수", "구조", "용도", "공사기간_일"]
-    for c in cols:
+    extra = extra or {}
+    cols = FAC_BASE_COLS + list(FAC_EXTRA_COLS)
+    for c in cols + ["공사명", "현장위치", "발주년월", "발주년월_기준", "개요_출처"]:
         fac[c] = None
+    by_pid = {pid: g for pid, g in latest.groupby("프로젝트ID")} if len(latest) else {}
     for i, f in fac.iterrows():
-        g = latest[latest["프로젝트ID"] == f["프로젝트ID"]].copy()
-        g["_pri"] = g["공종"].map(lambda t: 0 if t == "건축" else 1)
-        for _, r in g.sort_values("_pri").iterrows():
+        g = by_pid.get(f["프로젝트ID"])
+        if g is None or g.empty:
+            continue
+        g = g.assign(_pri=g["공종"].map(lambda t: 0 if t == "건축" else 1), _amt=pd.to_numeric(g["추정가격"], errors="coerce").fillna(0))
+        g = g.sort_values(["_pri", "_amt"], ascending=[True, False])
+        has_arch = bool((g["공종"] == "건축").any())
+        sources: List[str] = []
+        for _, r in g.iterrows():
             d = docs.get(r["공고키"], {}) or {}
-            if "_error" in d:
-                continue
+            x = extra.get(r["공고키"], {}) or {}
+            d = {} if "_error" in d else d
+            x = {} if "_error" in x else x
+            used = False
             for c in cols:
-                cur = fac.at[i, c]
-                if (cur is None or cur == "" or (isinstance(cur, float) and cur != cur)) and d.get(c) not in (None, ""):
-                    fac.at[i, c] = d.get(c)
+                if not _empty(fac.at[i, c]):
+                    continue
+                v = d.get(c) if c in FAC_BASE_COLS else None
+                if _empty(v):
+                    v = x.get(FAC_EXTRA_COLS.get(c, c))
+                if not _empty(v):
+                    fac.at[i, c] = v
+                    used = True
+            if _empty(fac.at[i, "현장위치"]) and not _empty(d.get("공사위치")):
+                fac.at[i, "현장위치"] = d.get("공사위치")
+                used = True
+            if used and str(r["공종"]) not in sources:
+                sources.append(str(r["공종"]))
+        top = g.iloc[0]
+        fac.at[i, "공사명"] = top["공고명"]
+        if _empty(fac.at[i, "현장위치"]):
+            fac.at[i, "현장위치"] = f.get("공사현장지역") if "공사현장지역" in fac.columns else None
+        base = g[g["공종"] == "건축"] if has_arch else g
+        dts = sorted(str(v)[:7] for v in base["공고일시"] if str(v)[:4].isdigit())
+        if dts:
+            fac.at[i, "발주년월"] = dts[0]
+            fac.at[i, "발주년월_기준"] = "건축 공고" if has_arch else f"{top['공종']} 공고(건축 공고 없음)"
+        if sources:
+            fac.at[i, "개요_출처"] = "·".join(sources) + ("" if has_arch else " (건축 공고 없음)")
     return fac
 
 
@@ -1139,10 +1212,12 @@ def stage_excel(cfg):
     frames = [f for f in frames if not f.empty]
     logs = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     notes = pd.read_parquet(_p(cfg, "notes_attach.parquet")) if os.path.exists(_p(cfg, "notes_attach.parquet")) else pd.DataFrame()
-    fac = enrich_facility(dedup.facility_summary(latest, hist), latest, docs)
+    xpath = _p(cfg, "llm_extra.json")
+    extra = json.load(open(xpath, encoding="utf-8")) if os.path.exists(xpath) else {}
+    fac = enrich_facility(dedup.facility_summary(latest, hist), latest, docs, extra)
     texts_path = _p(cfg, "texts.json")
     texts = json.load(open(texts_path, encoding="utf-8")) if os.path.exists(texts_path) else {}
-    trade = assemble_trade_table(latest, docs, texts)
+    trade = assemble_trade_table(latest, docs, texts, extra)
     detail = assemble_trade_detail_table(latest, tdocs)
     os.makedirs(cfg["paths"]["out_dir"], exist_ok=True)
     out = os.path.join(cfg["paths"]["out_dir"], cfg["paths"]["excel_name"])
