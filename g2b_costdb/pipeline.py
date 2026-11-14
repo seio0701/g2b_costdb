@@ -1005,6 +1005,159 @@ def stage_extract_trades(cfg, yes: bool = False, batch: bool = False, limit: Opt
     _verify_trades_and_report(cfg, latest, tdocs, n_ok, n_err)
 
 
+# ── 보강 추출(3차): 기타금액·면세 문구·공사비 정보광장 공사개요 항목 → data/llm_extra.json (1차 결과는 건드리지 않음) ─────────────────
+def _extra_logs(cfg, latest, docs: dict, xdocs: dict) -> List[Dict]:
+    """보강 추출 검증로그를 현재 규칙으로 만들어 logs_extra.parquet 에 저장(수거 직후와 excel 단계 양쪽에서 호출, 재과금 없음)."""
+    logs: List[Dict] = []
+    seen = set()
+    for _, row in latest.iterrows():
+        k = row["공고키"]
+        x = xdocs.get(k)
+        if not isinstance(x, dict) or "_error" in x or k in seen:
+            continue
+        seen.add(k)
+        d = docs.get(k) or {}
+        logs.extend(extract_llm.cross_verify_extra(row["공고번호"], row.to_dict(), {} if "_error" in d else d, x))
+    _logs_frame(logs).to_parquet(_p(cfg, "logs_extra.parquet"), index=False)
+    return logs
+
+
+def _extra_report(cfg, latest, docs, xdocs, n_ok=None, n_err=None):
+    logs = _extra_logs(cfg, latest, docs, xdocs)
+    ok = {k: x for k, x in xdocs.items() if isinstance(x, dict) and "_error" not in x and k in set(latest["공고키"])}
+    cnt = lambda f: sum(1 for x in ok.values() if x.get(f) not in (None, ""))
+    es = _error_summary(xdocs)
+    if es:
+        print(es)
+    head = f"보강 추출 성공 {n_ok}건 / 실패 {n_err}건, " if n_ok is not None else ""
+    print(f"{head}완료 {len(ok)}건 — 대지면적 {cnt('대지면적_m2')}, 건폐율 {cnt('건폐율_pct')}, 용적률 {cnt('용적률_pct')}, 최고높이 {cnt('최고높이_m')}, "
+          f"주차대수 {cnt('주차대수')}, 설계특이사항 {cnt('설계특이사항')}, 기타금액 {cnt('기타금액_원')}, 면세 문구 {cnt('면세_문구')} (검증로그 {len(logs)}건)")
+
+
+def stage_extract_extra(cfg, yes: bool = False, batch: bool = False, limit: Optional[int] = None, refetch: bool = False,
+                        only: Optional[str] = None):
+    """보강 추출: 대표 공고의 공고문에서 1차 추출에 없는 항목(기타금액[한전불입금 등]·면세 문구·조경면적·건폐율·용적률·기준층층고·최고높이·주차대수·세대수·
+    건축법상용도·설계특이사항, 그리고 1차에서 빈 대지면적·건축면적)을 읽어 data/llm_extra.json 에 저장 → excel 의 01·04 시트.
+    실행 방식은 extract 와 같다(견적 → --yes 즉시 / --batch --yes 제출 → --batch 수거 / --refetch). --only 전기,건축 처럼 공종을 한정할 수 있다."""
+    latest = _read(cfg, "notices_latest.parquet")
+    texts_path = _p(cfg, "texts.json")
+    if not os.path.exists(texts_path):
+        raise SystemExit("texts.json 이 없습니다 (attach 를 먼저 실행)")
+    texts = json.load(open(texts_path, encoding="utf-8"))
+    docs_path, cache_path = _p(cfg, "llm_docs.json"), _p(cfg, "llm_extra.json")
+    docs = json.load(open(docs_path, encoding="utf-8")) if os.path.exists(docs_path) else {}
+    xdocs = json.load(open(cache_path, encoding="utf-8")) if os.path.exists(cache_path) else {}
+    env, model = cfg["llm"].get("api_key_env", "ANTHROPIC_API_KEY"), cfg["llm"].get("model", "")
+    max_chars = int(cfg["llm"].get("extra_max_input_chars", extract_llm.EXTRA_INPUT_CHARS))
+    trades = [t.strip() for t in str(only or "").split(",") if t.strip()]
+    pool = latest[latest["공종"].astype(str).isin(trades)] if trades else latest
+    # 건축 공종을 먼저, 그 안에서 추정가격 큰 순(--limit 시범 추출이 공사개요가 있는 본공사부터 되도록)
+    order = pool.assign(_amt=pd.to_numeric(pool["추정가격"], errors="coerce").fillna(0), _arch=(pool["공종"].astype(str) == "건축").astype(int))
+    keys = list(dict.fromkeys(order.sort_values(["_arch", "_amt"], ascending=[False, False])["공고키"]))
+    todo = [k for k in keys if texts.get(k) and not (k in xdocs and "_error" not in xdocs[k])]
+    if limit:
+        todo = todo[:int(limit)]
+    hints = {r["공고키"]: {"공고번호": r["공고번호"], "공고명": r["공고명"], "수요기관": r["수요기관"], "공종": r["공종"]} for _, r in latest.iterrows()}
+    done = len([k for k in keys if k in xdocs and "_error" not in xdocs[k]])
+    print(f"보강 추출 대상 {len(keys)}건({'공종 ' + '·'.join(trades) if trades else '대표 공고 전체'}, 고유 공고키) 중 완료 {done}건, 이번 대상 {len(todo)}건"
+          f"{f' (--limit {limit})' if limit else ''}, 텍스트 없음 {len([k for k in keys if not texts.get(k)])}건")
+
+    def _estimate(is_batch):
+        est = extract_llm.estimate_cost(texts, todo, cfg["llm"], float(cfg["llm"].get("usd_krw", 1400)), max_chars=max_chars, out_per_doc=1800)
+        if is_batch:
+            est["usd"], est["krw"] = round(est["usd"] / 2, 2), est["krw"] // 2
+        print(f"보강 추출 예상 입력 {est['input_tokens']:,} 토큰 / 출력 {est['output_tokens']:,} 토큰, 모델 {est['model']}"
+              f"{' (Batches 50% 할인 적용)' if is_batch else ''} → 약 ${est['usd']} (≈{est['krw']:,}원)")
+
+    def _client():
+        if not os.environ.get(env, "").strip():
+            raise SystemExit(f"환경변수 {env} 가 없습니다. PowerShell 에서 setx {env} \"키\" 로 설정한 뒤 새 터미널에서 다시 실행하세요.")
+        import anthropic  # type: ignore
+        return anthropic.Anthropic(api_key=os.environ.get(env) or None)
+
+    parser = extract_llm.parse_extra_response_text
+    if batch:
+        state_path = _p(cfg, "llm_extra_batch.json")
+        state = json.load(open(state_path, encoding="utf-8")) if os.path.exists(state_path) else {"batches": []}
+        pending = [b for b in state["batches"] if b.get("status") != "ended"]
+        if refetch or pending:
+            client = _client()
+            n_ok = n_err = 0
+            for b in (state["batches"] if refetch else pending):
+                status, got, counts = extract_llm.fetch_batch(client, b["id"], model, parser=parser)
+                if status != "ended":
+                    print(f"보강 배치 {b['id']}: {status} (처리중 {counts.get('processing', 0)}, 성공 {counts.get('succeeded', 0)}, "
+                          f"오류 {counts.get('errored', 0)}) — 나중에 같은 명령으로 다시 확인")
+                    continue
+                for k in b["keys"]:
+                    if k in xdocs and "_error" not in xdocs[k]:
+                        continue                              # 이미 성공한 결과는 덮어쓰지 않는다(--refetch 는 실패 건만 다시 해석)
+                    d = got.get(k, {"_error": "배치 결과에 없음"})
+                    xdocs[k] = d
+                    n_ok += 0 if "_error" in d else 1
+                    n_err += 1 if "_error" in d else 0
+                if not refetch:
+                    b["status"] = "ended"
+                    print(f"보강 배치 {b['id']}: 완료 (성공 {counts.get('succeeded', 0)}, 오류 {counts.get('errored', 0)}, 만료 {counts.get('expired', 0)})")
+            _save_docs(cache_path, xdocs)
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=1)
+            if not refetch and any(b.get("status") != "ended" for b in state["batches"]):
+                return
+            _extra_report(cfg, latest, docs, xdocs, n_ok, n_err)
+            return
+        _estimate(True)
+        if not todo:
+            print("보강 추출: 제출할 공고가 없습니다.")
+            return
+        if not yes:
+            print("보강 배치 제출을 실행하려면:  python -m g2b_costdb.pipeline extract-extra --batch --yes   (수거도 같은 명령 extract-extra --batch)")
+            return
+        client = _client()
+        retry_mt = _truncated_retry_tokens(cfg, xdocs, todo)
+
+        def _keep(b):                                    # 청크마다 바로 기록 → 뒤 청크가 실패해도 앞 배치를 잃지 않는다(이중 과금 방지)
+            b["kind"] = "extra"
+            state["batches"].append(b)
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=1)
+        try:
+            submitted = extract_llm.submit_batches(client, [(k, texts[k], hints.get(k, {})) for k in todo], cfg["llm"], max_tokens_by_key=retry_mt,
+                                                   params_builder=extract_llm.build_extra_request_params, on_submitted=_keep)
+        except Exception as e:  # noqa: BLE001
+            kept = getattr(e, "submitted", None) or []
+            raise SystemExit(f"[중단] 보강 배치 제출 실패: {e}. 이미 제출된 배치 {len(kept)}개는 기록했으니 extract-extra --batch 로 수거한 뒤 다시 --yes 하세요.")
+        print(f"보강 배치 {len(submitted)}개 제출 (공고 {len(todo)}건). 결과 수거:  python -m g2b_costdb.pipeline extract-extra --batch")
+        return
+
+    _estimate(False)
+    if not todo:
+        print("보강 추출: 대상이 없습니다.")
+        return
+    if not yes:
+        print("보강 추출을 실행하려면:  python -m g2b_costdb.pipeline extract-extra --yes   (50% 저렴한 배치: extract-extra --batch --yes, 시범: --limit 30)")
+        return
+    _client()
+    import anthropic  # type: ignore
+    n_ok = n_err = 0
+    retry_mt = _truncated_retry_tokens(cfg, xdocs, todo)
+    for k in todo:
+        try:
+            xdocs[k] = extract_llm.extract_extra_with_claude(texts[k], hints.get(k, {}), cfg["llm"], max_tokens=retry_mt.get(k))
+            n_ok += 1
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
+            raise SystemExit(f"[중단] Claude API 인증 실패: {e}. {env} 값을 확인하세요.")
+        except anthropic.RateLimitError as e:
+            log.warning("속도 제한(429)으로 중단 — 잠시 후 다시 실행하면 이어서 진행: %s", e)
+            break
+        except Exception as e:  # noqa: BLE001
+            log.warning("보강 추출 실패 %s: %s", k, e)
+            xdocs[k] = {"_error": str(e)[:300]}
+            n_err += 1
+        _save_docs(cache_path, xdocs)
+    _extra_report(cfg, latest, docs, xdocs, n_ok, n_err)
+
+
 def _renormalize_trades(tdocs: dict) -> dict:
     """저장된 2차 결과에 현재 라벨 규칙을 다시 적용(재과금 없음): '도급비(건축, 토목, 기계)' 같은 합산 행은 '합계' 로, 라벨 밖 공종명은 매핑."""
     out = {}
@@ -1207,13 +1360,16 @@ def stage_excel(cfg):
     tdocs = json.load(open(tpath, encoding="utf-8")) if os.path.exists(tpath) else {}
     if tdocs:
         _trade_logs(cfg, latest, tdocs)        # 2차 검증로그는 저장된 결과에 현재 규칙을 다시 적용해 새로 만든다(수거 때 로그가 옛 규칙일 수 있음)
-    log_names = ("logs_dedup.parquet", "logs_verify.parquet") + (("logs_trades.parquet",) if tdocs else ())   # 2차 결과가 없으면 남아 있는 옛 2차 로그도 싣지 않는다
+    xpath = _p(cfg, "llm_extra.json")
+    extra = json.load(open(xpath, encoding="utf-8")) if os.path.exists(xpath) else {}
+    if extra:
+        _extra_logs(cfg, latest, docs, extra)  # 보강 추출 검증로그도 현재 규칙으로 다시 만든다
+    log_names = ("logs_dedup.parquet", "logs_verify.parquet") + (("logs_trades.parquet",) if tdocs else ()) \
+        + (("logs_extra.parquet",) if extra else ())   # 결과 파일이 없으면 남아 있는 옛 로그도 싣지 않는다
     frames = [pd.read_parquet(_p(cfg, n)) for n in log_names if os.path.exists(_p(cfg, n))]
     frames = [f for f in frames if not f.empty]
     logs = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     notes = pd.read_parquet(_p(cfg, "notes_attach.parquet")) if os.path.exists(_p(cfg, "notes_attach.parquet")) else pd.DataFrame()
-    xpath = _p(cfg, "llm_extra.json")
-    extra = json.load(open(xpath, encoding="utf-8")) if os.path.exists(xpath) else {}
     fac = enrich_facility(dedup.facility_summary(latest, hist), latest, docs, extra)
     texts_path = _p(cfg, "texts.json")
     texts = json.load(open(texts_path, encoding="utf-8")) if os.path.exists(texts_path) else {}
@@ -1239,7 +1395,7 @@ def main(argv=None):
         except (AttributeError, ValueError):
             pass
     ap = argparse.ArgumentParser(description="나라장터 공사비 DB 파이프라인 (g2b_costdb 폴더에서 실행)")
-    ap.add_argument("stage", choices=["doctor", "probe", "collect", "discover", "research", "dedup", "attach", "extract", "extract-trades", "excel"])
+    ap.add_argument("stage", choices=["doctor", "probe", "collect", "discover", "research", "dedup", "attach", "extract", "extract-trades", "extract-extra", "excel"])
     ap.add_argument("--config", default=None)
     ap.add_argument("--ym", default="2026-08", help="probe 대상 월(YYYY-MM)")
     ap.add_argument("--fresh", action="store_true", help="discover: 이전 검수 파일의 시설ID 만 이어받고 검수 칸은 새 기본값으로(검수 시작 전 규칙이 바뀌었을 때)")
@@ -1252,6 +1408,7 @@ def main(argv=None):
     ap.add_argument("--batch", action="store_true", help="extract: Message Batches 로 제출/수거 (50%% 할인, 최대 24시간)")
     ap.add_argument("--export", action="store_true", help="extract: 공고별 작업지시 txt 를 data/llm_in 에 내보내기 (Cowork·사람이 채움)")
     ap.add_argument("--import", dest="import_", action="store_true", help="extract: data/llm_out 의 JSON 을 가져와 반영")
+    ap.add_argument("--only", default=None, help="extract-extra: 공종을 한정(쉼표 구분, 예: 전기,건축). 생략하면 대표 공고 전체")
     ap.add_argument("--trades", action="store_true", help="extract 와 함께 2차 추출(내역서 집계표의 공종별 금액)도 같은 방식(--yes/--batch/--limit)으로 실행")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -1269,6 +1426,8 @@ def main(argv=None):
             stage_extract_trades(cfg, yes=a.yes, batch=a.batch, limit=a.limit, refetch=a.refetch)
     elif a.stage == "extract-trades":
         stage_extract_trades(cfg, yes=a.yes, batch=a.batch, limit=a.limit, refetch=a.refetch)
+    elif a.stage == "extract-extra":
+        stage_extract_extra(cfg, yes=a.yes, batch=a.batch, limit=a.limit, refetch=a.refetch, only=a.only)
     elif a.stage == "discover":
         stage_discover(cfg, fresh=a.fresh)
     elif a.stage == "attach":

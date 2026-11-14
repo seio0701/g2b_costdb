@@ -74,13 +74,13 @@ PRICE_USD_PER_M = {
 }
 
 
-def focus_text(text: str, max_chars: int, window: int = 1200) -> str:
-    """앞부분 + 키워드 주변 창을 우선 결합하여 길이 제한 내로 축약."""
+def focus_text(text: str, max_chars: int, window: int = 1200, keys: Optional[List[str]] = None) -> str:
+    """앞부분 + 키워드 주변 창을 우선 결합하여 길이 제한 내로 축약. keys: 발췌 키워드(기본 1차 추출용 _KEYS)."""
     if len(text) <= max_chars:
         return text
     head = text[: int(max_chars * 0.35)]
     spans = []
-    for k in _KEYS:
+    for k in (keys or _KEYS):
         for m in re.finditer(re.escape(k), text):
             spans.append((max(0, m.start() - window // 3), min(len(text), m.end() + window)))
     spans.sort()
@@ -689,6 +689,167 @@ def cross_verify(bid_no: str, api_row: Dict, doc: Dict, warn_ratio: float = 0.00
         r = (tot - comp) / comp if comp else 0
         logs.append({"공고번호": bid_no, "항목": "총공사금액=기초금액+관급", "API값": comp, "문서값": tot, "차이": tot - comp,
                      "차이율": round(r, 5), "판정": "정상" if abs(r) <= 0.01 else "경고", "비고": "금액 구성 정합성"})
+    return logs
+
+
+# ── 보강 추출(3차): 기타금액(한전불입금 등)·면세 문구·조달청 '공사비 정보광장' 공사개요 항목 ─────────────────────
+# 1차 추출 결과(llm_docs.json)는 건드리지 않고 data/llm_extra.json 에 따로 저장한다. 1차에 없는 항목만 묻고, 대지면적·건축면적은 1차에서 비었을 때 채우는 용도.
+EXTRA_FIELDS = {
+    "대지면적_m2": "number|null", "건축면적_m2": "number|null", "조경면적_m2": "number|null",
+    "건폐율_pct": "number|null(%)", "용적률_pct": "number|null(%)", "기준층층고_m": "number|null", "최고높이_m": "number|null",
+    "주차대수": "integer|null", "세대수": "integer|null", "건축법상용도": "string", "설계특이사항": "string",
+    "기타금액_원": "integer|null", "기타금액_항목": "string", "기타금액_위치": "별도|관급에포함|추정가격에포함|불명",
+    "면세_문구": "string", "근거문구": "object(항목명→원문 인용 30자 이내)", "신뢰도": "high|medium|low",
+}
+_EXTRA_FLOAT = ["대지면적_m2", "건축면적_m2", "조경면적_m2", "건폐율_pct", "용적률_pct", "기준층층고_m", "최고높이_m"]
+_EXTRA_INT = ["주차대수", "세대수", "기타금액_원"]
+_EXTRA_STR = ["건축법상용도", "설계특이사항", "기타금액_항목", "면세_문구"]
+EXTRA_SYSTEM = (
+    "당신은 한국 공공건축 공사 입찰공고문·현장설명서·과업지시서에서 공사개요의 세부 항목과 공사금액의 부대 항목을 정확히 추출하는 분석가입니다. "
+    "반드시 JSON 객체 하나만 출력합니다(마크다운 코드블록·설명 금지). 문서에 없는 값은 빈 문자열로 둡니다 — 추정하거나 계산해 만들지 않습니다. "
+    "숫자 항목은 쉼표·단위 없이 자릿수만 적습니다. 면적은 ㎡(평→×3.3058), 건폐율·용적률은 % 숫자(예: 12.35), 높이·층고는 m, 주차대수는 대(면) 수, 금액은 원 단위 정수. "
+    "건폐율·용적률은 이 공사의 설계값만 적고, '60% 이하' 같은 법정 한도·허용 기준은 적지 않습니다. 주차대수도 '법정 주차대수 이상' 같은 기준이면 비웁니다. "
+    "'기준층층고_m' 은 기준층의 층고, '최고높이_m' 은 건축물 최고높이입니다. '건축법상용도' 는 문서에 적힌 건축물 용도(예: 업무시설(공공업무시설), 문화 및 집회시설)를 그대로 적습니다. "
+    "'설계특이사항' 은 문서에 적힌 범위에서 동 수·주요 구조형식·특수 공법·인증·지반·토공 특이점을 80자 이내로 요약하고, 없으면 비웁니다. "
+    "'기타금액_원' 은 추정가격·부가가치세·관급자재비와 별도로 문서에 적힌 부대 금액의 합입니다: 한전불입금·한전수탁비·표준시설부담금·시설분담금·상수도 원인자부담금·가스 시설분담금·통신 가입비·이설비 등. "
+    "'기타금액_항목' 에는 항목명과 금액을 '한전불입금 5,600,000; 상수도분담금 1,200,000' 처럼 적습니다. "
+    "'기타금액_위치' 는 그 금액이 문서에서 어디에 속하는지입니다: 도급·관급 금액 밖의 별도 금액이면 '별도', 관급자재비 안에 포함된 것으로 적혀 있으면 '관급에포함', "
+    "추정가격(도급액) 안에 포함된 것으로 적혀 있으면 '추정가격에포함', 알 수 없으면 '불명'. 기타 금액이 없으면 세 항목 모두 비웁니다. 관급자재비·부가가치세 자체는 기타금액이 아닙니다. "
+    "'면세_문구' 에는 부가가치세 면제·면세 사업임을 밝힌 문구(예: '조세특례제한법 제106조에 의한 부가가치세 면제 대상')를 60자 이내로 인용하고, 없으면 비웁니다. "
+    "각 값의 근거가 된 원문 문구를 '근거문구'에 항목명별로 짧게 인용합니다(근거문구는 [{\"항목\": …, \"원문\": …}] 배열)."
+)
+_EXTRA_KEYS = ["공사개요", "공사 개요", "건축개요", "건축 개요", "설계개요", "사업개요", "대지면적", "대지 면적", "부지면적", "건축면적", "조경면적", "건폐율", "용적률",
+               "층고", "최고높이", "건물높이", "높이", "주차", "세대", "용도", "구조", "한전", "불입금", "분담금", "부담금", "수탁비", "납입금", "시설부담금",
+               "표준공사비", "기타금액", "기타 금액", "이설비", "별도", "면세", "면제", "조세특례", "부가가치세", "부가세", "추정금액", "총공사", "관급"]
+EXTRA_INPUT_CHARS = 40000
+
+
+def extra_output_schema() -> Dict:
+    """보강 추출 구조화 출력 스키마. 1차와 같은 제약(모두 string/enum·required, union 0)."""
+    props: Dict[str, Dict] = {k: {"type": "string"} for k in _EXTRA_FLOAT + _EXTRA_INT + _EXTRA_STR}
+    props["기타금액_위치"] = {"type": "string", "enum": ["별도", "관급에포함", "추정가격에포함", "불명", ""]}
+    props["신뢰도"] = {"type": "string", "enum": ["high", "medium", "low"]}
+    props["근거문구"] = {"type": "array", "items": {"type": "object", "properties": {"항목": {"type": "string"}, "원문": {"type": "string"}},
+                                                "required": ["항목", "원문"], "additionalProperties": False}}
+    return {"type": "object", "properties": props, "required": list(props.keys()), "additionalProperties": False}
+
+
+def build_extra_prompt(text: str, api_hint: Dict, cfg_llm: Dict) -> str:
+    hint = {k: jsonable(v) for k, v in (api_hint or {}).items()}
+    limit = int(cfg_llm.get("extra_max_input_chars", EXTRA_INPUT_CHARS))
+    return (f"[공고 메타데이터(API)]\n{json.dumps(hint, ensure_ascii=False)}\n\n"
+            f"[출력 스키마]\n{json.dumps(EXTRA_FIELDS, ensure_ascii=False, indent=1)}\n\n"
+            f"[공고문 텍스트]\n{focus_text(text, limit, keys=_EXTRA_KEYS)}")
+
+
+def build_extra_request_params(text: str, api_hint: Dict, cfg_llm: Dict, structured: Optional[bool] = None,
+                               max_tokens: Optional[int] = None) -> Dict:
+    if structured is None:
+        structured = bool(cfg_llm.get("structured_output", True))
+    params = dict(model=cfg_llm.get("model", "claude-sonnet-5"),
+                  max_tokens=int(max_tokens or cfg_llm.get("max_tokens", DEFAULT_MAX_TOKENS)),
+                  system=EXTRA_SYSTEM, messages=[{"role": "user", "content": build_extra_prompt(text, api_hint, cfg_llm)}])
+    if structured:
+        params["output_config"] = {"format": {"type": "json_schema", "schema": extra_output_schema()}}
+    return params
+
+
+def normalize_extra_doc(data: Dict) -> Dict:
+    """보강 추출 출력 정규화: 숫자 필드 → 숫자(0 이하·비현실 값은 비움), 근거문구 배열 → dict, 기타금액이 없으면 항목·위치도 비움."""
+    out = dict(data)
+    for k in _EXTRA_FLOAT:
+        x = _num(out.get(k))
+        out[k] = x if (x is not None and x > 0) else None
+    for k in _EXTRA_INT:
+        x = _num(out.get(k))
+        out[k] = int(round(x)) if (x is not None and x > 0) else None
+    for k in ("건폐율_pct", "용적률_pct"):               # 0.1235 처럼 비율로 적은 값은 % 로
+        if out[k] is not None and out[k] < 1:
+            out[k] = round(out[k] * 100, 4)
+    if out.get("건폐율_pct") is not None and out["건폐율_pct"] > 100:
+        out["건폐율_pct"] = None
+    for k in _EXTRA_STR:
+        v = str(out.get(k) or "").strip()
+        out[k] = "" if v.lower() in ("null", "none", "nan", "없음", "-") else v
+    w = str(out.get("기타금액_위치") or "").replace(" ", "")
+    out["기타금액_위치"] = w if w in ("별도", "관급에포함", "추정가격에포함", "불명") else ("불명" if out.get("기타금액_원") else "")
+    if not out.get("기타금액_원"):
+        out["기타금액_위치"] = ""
+    ev = out.get("근거문구")
+    if isinstance(ev, list):
+        out["근거문구"] = {str(e.get("항목", "")): str(e.get("원문", "")) for e in ev if isinstance(e, dict)}
+    elif not isinstance(ev, dict):
+        out["근거문구"] = {}
+    out["신뢰도"] = str(out.get("신뢰도") or "")
+    return out
+
+
+def parse_extra_response_text(out: str, model: str = "") -> Dict:
+    data = normalize_extra_doc(_parse_json(out))
+    data["_model"] = model
+    return data
+
+
+def extract_extra_with_claude(text: str, api_hint: Dict, cfg_llm: Dict, max_tokens: Optional[int] = None) -> Dict:
+    """공고문 텍스트 → 보강 추출 dict(즉시 호출)."""
+    import anthropic  # type: ignore
+    client = anthropic.Anthropic(api_key=os.environ.get(cfg_llm.get("api_key_env", "ANTHROPIC_API_KEY")) or None)
+    kwargs = dict(model=cfg_llm.get("model", "claude-sonnet-5"),
+                  max_tokens=int(max_tokens or cfg_llm.get("max_tokens", DEFAULT_MAX_TOKENS)),
+                  system=EXTRA_SYSTEM, messages=[{"role": "user", "content": build_extra_prompt(text, api_hint, cfg_llm)}])
+    create = _structured_create(client, extra_output_schema()) if bool(cfg_llm.get("structured_output", True)) else (lambda **kw: _messages_call(client, **kw))
+    resp = _finish_call(create, kwargs)
+    out = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
+    data = parse_extra_response_text(out, kwargs["model"])
+    data["_usage_in"] = getattr(getattr(resp, "usage", None), "input_tokens", None)
+    data["_usage_out"] = getattr(getattr(resp, "usage", None), "output_tokens", None)
+    return data
+
+
+def cross_verify_extra(bid_no: str, api_row: Dict, doc: Dict, xdoc: Dict) -> List[Dict]:
+    """보강 추출 정합성: 건폐율 = 건축면적/대지면적, 대지면적 ≥ 건축면적, 1차 추출과 면적 일치, 기타금액과 예산금액 잔차 대조, 면세 문구와 부가세율."""
+    logs: List[Dict] = []
+    doc = doc or {}
+    site = _num(xdoc.get("대지면적_m2")) or _num(doc.get("대지면적_m2"))
+    bld = _num(xdoc.get("건축면적_m2")) or _num(doc.get("건축면적_m2"))
+    for k in ("대지면적_m2", "건축면적_m2"):
+        a, b = _num(doc.get(k)), _num(xdoc.get(k))
+        if a and b and abs(a - b) / a > 0.01:
+            logs.append({"공고번호": bid_no, "항목": f"{k} 1차·보강 불일치", "API값": a, "문서값": b, "차이": b - a, "차이율": round((b - a) / a, 5),
+                         "판정": "경고", "비고": "1차 추출값과 보강 추출값이 다름 → 01 시트는 1차 값을 사용, 원문 확인"})
+    if site and bld and bld > site * 1.001:
+        logs.append({"공고번호": bid_no, "항목": "대지면적≥건축면적", "API값": site, "문서값": bld, "판정": "경고", "비고": "건축면적이 대지면적보다 큼 → 단위·오독 의심"})
+    bc = _num(xdoc.get("건폐율_pct"))
+    if bc and site and bld:
+        calc = bld / site * 100
+        r = (bc - calc) / calc
+        logs.append({"공고번호": bid_no, "항목": "건폐율=건축면적/대지면적", "API값": round(calc, 2), "문서값": bc, "차이": round(bc - calc, 2), "차이율": round(r, 5),
+                     "판정": "정상" if abs(r) <= 0.02 else "경고", "비고": "" if abs(r) <= 0.02 else "문서 건폐율과 면적으로 계산한 값이 다름(법정 한도 표기 또는 면적 오독 의심)"})
+    vl = _num(xdoc.get("용적률_pct"))
+    if vl and vl > 1500:
+        logs.append({"공고번호": bid_no, "항목": "용적률 범위", "문서값": vl, "판정": "경고", "비고": "용적률 1,500% 초과 → 오독 의심"})
+    etc = _num(xdoc.get("기타금액_원"))
+    if etc:
+        b, p = _num(api_row.get("기초금액")), _num(api_row.get("추정가격"))
+        gov = (_num(api_row.get("도급자관급액_API")) or 0) + (_num(api_row.get("관급자관급액_API")) or 0) or (_num(api_row.get("관급자재_API")) or 0)
+        budget = _num(api_row.get("예산금액"))
+        base = b or (p * 1.1 if p else None)
+        note, verdict = f"{xdoc.get('기타금액_항목') or ''} (위치: {xdoc.get('기타금액_위치') or '불명'})".strip(), "참고"
+        if budget and base:
+            resid = budget - base - gov
+            if abs(resid - etc) <= max(1.0, etc * 0.01):
+                note += " — 예산금액(API) − 기초금액 − 관급 잔차와 일치"
+            elif base and etc > base * 0.3:
+                verdict, note = "경고", note + " — 기타금액이 기초금액의 30% 초과 → 관급자재·도급액을 기타금액으로 읽었는지 확인"
+        logs.append({"공고번호": bid_no, "항목": "기타금액(문서)", "문서값": etc, "판정": verdict, "비고": note})
+    ex = str(xdoc.get("면세_문구") or "").strip()
+    if ex:
+        p, b = _num(api_row.get("추정가격")), _num(api_row.get("기초금액"))
+        rate = (b - p) / p if (p and b) else None
+        ok = rate is not None and rate < 0.099
+        logs.append({"공고번호": bid_no, "항목": "면세 문구(문서)", "API값": p, "문서값": b, "차이율": round(rate, 5) if rate is not None else None,
+                     "판정": "참고" if (ok or rate is None) else "경고",
+                     "비고": f"'{ex[:60]}'" + ("" if (ok or rate is None) else " — 면세 문구가 있는데 기초금액이 추정가격×1.1 수준(부가세 10%) → 확인")})
     return logs
 
 

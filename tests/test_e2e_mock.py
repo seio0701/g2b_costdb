@@ -32,6 +32,22 @@ def _run(argv):
     return out
 
 
+def _fake_extra(text: str, api_hint: dict, cfg_llm: dict, max_tokens=None) -> dict:
+    """보강 추출 가짜 모델: 건축 공고에는 공사비 정보광장 항목, 전기 공고에는 기타금액(한전불입금)."""
+    bid = str(api_hint.get("공고번호"))
+    if bid == "R24010001":
+        raw = {"대지면적_m2": "30000", "건축면적_m2": "4500", "건폐율_pct": "15", "용적률_pct": "45.5", "최고높이_m": "24.5", "주차대수": "210",
+               "건축법상용도": "문화 및 집회시설(공연장)", "설계특이사항": "본동 1개동, 무대기계 포함", "신뢰도": "high",
+               "근거문구": [{"항목": "대지면적", "원문": "대지면적 30,000㎡"}]}
+    elif bid == "R24010002":
+        raw = {"기타금액_원": "38000000", "기타금액_항목": "한전불입금 38,000,000", "기타금액_위치": "별도", "신뢰도": "high", "근거문구": []}
+    else:
+        raw = {"신뢰도": "low", "근거문구": []}
+    d = extract_llm.normalize_extra_doc(raw)
+    d["_model"], d["_usage_in"], d["_usage_out"] = "fake", 100, 30
+    return d
+
+
 def _fake_trades(snippet: str, api_hint: dict, cfg_llm: dict, max_tokens=None) -> dict:
     """2차 추출 가짜 모델: 집계표 발췌에서 '공종행<TAB>…<TAB>금액' 을 읽어 공종별 금액 JSON 을 만든다(모델이 할 일을 규칙으로 흉내)."""
     assert "총괄집계표" in snippet and "기계설비공사" in snippet and "세부항목" not in snippet, snippet[:300]
@@ -244,6 +260,43 @@ def run():
         ver = pd.read_parquet(data("logs_verify.parquet"))
         assert ((ver["공고번호"] == "R24010001") & (ver["항목"] == "추정가격") & (ver["판정"] == "정상")).any(), ver
         assert set(ver["판정"]) <= {"정상", "경고", "오류", "참고", "미확인"}
+        # 보강 추출(extract-extra): 견적 → 즉시 실행(가짜 모델) → 1건을 지우고 배치 제출·수거. 1차 결과(llm_docs.json)는 그대로
+        out = _run(["extract-extra", "--config", cfg_path])
+        assert "보강 추출 대상" in out and "extract-extra --yes" in out and not os.path.exists(data("llm_extra.json")), out
+        docs_before = open(data("llm_docs.json"), encoding="utf-8").read()
+        with mock.patch.object(extract_llm, "extract_extra_with_claude", side_effect=_fake_extra):
+            out = _run(["extract-extra", "--yes", "--config", cfg_path])
+        assert "보강 추출 성공 3건 / 실패 0건" in out and "주차대수 1" in out and "기타금액 1" in out, out
+        xdocs = json.load(open(data("llm_extra.json"), encoding="utf-8"))
+        assert xdocs["R24010001-001"]["주차대수"] == 210 and xdocs["R24010002-000"]["기타금액_원"] == 38000000 and xdocs["R24010002-000"]["기타금액_위치"] == "별도"
+        assert open(data("llm_docs.json"), encoding="utf-8").read() == docs_before, "보강 추출은 1차 결과를 건드리지 않는다"
+        out = _run(["extract-extra", "--only", "전기", "--config", cfg_path])
+        assert "공종 전기" in out and "이번 대상 0건" in out, out
+        xdocs.pop("R24010002-000")
+        json.dump(xdocs, open(data("llm_extra.json"), "w", encoding="utf-8"), ensure_ascii=False)
+
+        class FakeExtraBatches:
+            def create(self, requests):
+                seen["xreqs"] = requests
+                return NS(id="msgbatch_x1", processing_status="in_progress")
+
+            def retrieve(self, bid):
+                return NS(processing_status="ended", request_counts=NS(processing=0, succeeded=1, errored=0, canceled=0, expired=0))
+
+            def results(self, bid):
+                txt = json.dumps({"기타금액_원": "38000000", "기타금액_항목": "한전불입금 38,000,000", "기타금액_위치": "별도", "신뢰도": "high",
+                                  "근거문구": [{"항목": "기타금액", "원문": "한전불입금 38,000,000원(별도)"}]}, ensure_ascii=False)
+                return [NS(custom_id="R24010002-000", result=NS(type="succeeded", message=NS(content=[NS(type="text", text=txt)], usage=NS(input_tokens=7, output_tokens=3))))]
+        fake_x = NS(messages=NS(batches=FakeExtraBatches()))
+        with mock.patch.object(anthropic, "Anthropic", return_value=fake_x):
+            out = _run(["extract-extra", "--batch", "--yes", "--config", cfg_path])
+            assert "보강 배치 1개 제출 (공고 1건)" in out and seen["xreqs"][0]["params"]["system"] == extract_llm.EXTRA_SYSTEM, out
+            assert "[공고문 텍스트]" in seen["xreqs"][0]["params"]["messages"][0]["content"]
+            out = _run(["extract-extra", "--batch", "--config", cfg_path])
+        assert "보강 배치 msgbatch_x1: 완료" in out and "보강 추출 성공 1건" in out, out
+        xdocs = json.load(open(data("llm_extra.json"), encoding="utf-8"))
+        assert xdocs["R24010002-000"]["기타금액_원"] == 38000000 and xdocs["R24010002-000"]["_usage_in"] == 7
+        assert json.load(open(data("llm_extra_batch.json"), encoding="utf-8"))["batches"][0]["kind"] == "extra"
         # 8) excel — 생성 + 수식 오류 0. 2차 검증로그는 excel 이 저장된 결과에 현재 규칙을 다시 적용해 새로 만든다(수거 때 로그가 옛 규칙이어도)
         stale = pd.DataFrame([{"공고번호": "STALE", "항목": "집계표합계 기준", "판정": "경고", "비고": "옛 규칙"}])
         stale.to_parquet(data("logs_trades.parquet"), index=False)
@@ -276,6 +329,15 @@ def run():
         assert b5 == "건축(+토목·조경)", f"05 프로젝트 단위 통합발주 표기(API+문서 합집합): {b5!r}"
         assert "부공종명" in [c.value for c in wb["03_공고목록_최신"][1]]
         h1 = [c.value for c in wb["01_시설마스터"][1]]
+        ws1 = wb["01_시설마스터"]
+        r1 = next(r for r in range(2, ws1.max_row + 1) if ws1.cell(r, h1.index("프로젝트ID") + 1).value == pid4)
+        g1 = lambda name: ws1.cell(r1, h1.index(name) + 1).value
+        assert g1("주차대수") == 210 and g1("건폐율_pct") == 15 and g1("용적률_pct") == 45.5 and g1("최고높이_m") == 24.5, "보강 추출 값이 01 공사개요에"
+        assert g1("대지면적_m2") == 30000 and g1("설계특이사항") == "본동 1개동, 무대기계 포함" and g1("건축법상용도_문서") == "문화 및 집회시설(공연장)"
+        assert g1("공사명") and str(g1("발주년월")) == "2024-01" and g1("발주년월_기준") == "건축 공고" and "건축" in str(g1("개요_출처")), (g1("공사명"), g1("발주년월"), g1("개요_출처"))
+        assert ws4.cell(r4e, h4.index("기타금액_문서") + 1).value == 38000000 and str(ws4.cell(r4e, h4.index("기타금액_판정") + 1).value).startswith("가산")
+        lg6 = pd.read_parquet(data("logs_extra.parquet"))
+        assert ((lg6["항목"] == "기타금액(문서)") & (lg6["공고번호"] == "R24010002")).any() and (lg6["항목"] == "건폐율=건축면적/대지면적").any(), lg6
         assert h1.index("대지면적_m2") == h1.index("연면적_m2") + 1 and h1.index("건축면적_m2") == h1.index("대지면적_m2") + 1, "01 공사개요는 공사비 정보광장 순서(연면적·대지면적·건축면적)"
         assert h1.index("공사명") < h1.index("공사규모(수식)") < h1.index("연면적_m2") < h1.index("현장위치") < h1.index("발주년월") < h1.index("설계특이사항")
         wsd = wb["04b_공종세부내역(문서)"]; hd = [c.value for c in wsd[1]]
@@ -318,7 +380,7 @@ def run():
             r = rows[f"{gid}-N"]
             area, total, per = val("05_공사비DB_시설합산", f"{col('연면적_m2')}{r}"), val("05_공사비DB_시설합산", f"{col('총공사비합계_기초금액기준(수식)')}{r}"), val("05_공사비DB_시설합산", f"{col('㎡당공사비_기초금액기준_원(수식)')}{r}")
             assert float(area) == 15200.0, area
-            assert abs(float(total) - (33000000000 + 2100000000 + 2860000000 + 583000000)) < 1, total   # 건축(기초+관급)+전기+소방
+            assert abs(float(total) - (33000000000 + 2100000000 + 2860000000 + 583000000 + 38000000)) < 1, total   # 건축(기초+관급)+전기(+한전불입금)+소방
             assert abs(float(per) - float(total) / 15200) < 1, per
             total_p = val("05_공사비DB_시설합산", f"{col('총공사비합계_추정가격기준(수식)')}{r}")
             assert abs(float(total_p) - float(total)) < 1, ("과세 공사는 추정가격+부가세 기준과 기초금액 기준이 같다", total_p, total)
@@ -346,7 +408,8 @@ def run():
             assert abs(net - (arch - tot04 * (3 / 23))) < 1, (net, arch, tot04)
             assert val("05_공사비DB_시설합산", f"{col('문서배분_중복경고(수식)')}{r5a}") in ("", None), "분리발주 중복 없음"
             assert abs(float(rate) - 28500000000 / 33000000000) < 1e-6, ("낙찰률(수식) = 낙찰금액/기초금액", rate)
-            assert abs(float(total) - (33000000000 + 2100000000 + 2860000000 + 583000000)) < 1, "낙찰금액은 총공사비에 쓰이지 않음"
+            assert abs(float(total) - (33000000000 + 2100000000 + 2860000000 + 583000000 + 38000000)) < 1, "낙찰금액은 총공사비에 쓰이지 않음"
+            assert float(v4("기타금액ⓒ(수식)", r4e)) == 38000000 and float(v4("금액합계_기초금액기준(수식)", r4e)) == 2860000000 + 38000000, "전기 공고의 한전불입금이 금액 합계에 가산"
             print("05 시설합산 값 검증 OK")
         except ImportError:
             print("(formulas 패키지 없음 → 05 값 검증 생략)")
