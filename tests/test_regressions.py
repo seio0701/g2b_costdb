@@ -886,6 +886,170 @@ def test_amount_structure(tmp):
     assert p2["발주년월_기준"] == "전기 공고(건축 공고 없음)" and p2["개요_출처"] == "전기 (건축 공고 없음)"
 
 
+def test_request_review_fixes(tmp):
+    """요청 양식 반영분 검토(2026-11-14) 지적 수정: 공종 분류 보강, 대표 교체 경고, 04 금액 수식의 0·오독 방어, 보강 추출 정규화·발췌·판정,
+    대기 배치 이중 호출 방지, 인증키 가림, 용역 캐시·보존 규칙."""
+    from g2b_costdb import classify, pipeline, dedup, collect
+    from g2b_costdb.build_excel import build_workbook
+    ct = lambda n, m="": classify.classify_trade(n, m, "")
+    # '건축 기계 공사'·'토목,건축,기계공사' 는 건축 통합 계약, '소방기계'·'무대기계' 는 '기계공사' 규칙에 걸리지 않음
+    assert ct("광주 이스포츠 상설경기장 리모델링 건축 기계 공사")[0] == "건축" and ct("스마트팜 온실신축사업 토목,건축,기계공사(긴급)")[0] == "건축"
+    assert ct("동춘인라인롤러경기장 개보수 소방기계공사")[0] != "기계설비" and ct("○○ 무대기계공사")[0] != "기계설비" and ct("○○ 리모델링 기계공사")[0] == "기계설비"
+    # 괄호 앞이 '소방'·'건축' 이면 괄호는 분야 표기 → 앞 공종
+    assert ct("노후공공임대주택 리모델링 소방(전기)공사") == ("소방", "공고명(꼬리표)") and ct("공연장 외 조성 건축(기계)공사")[0] == "건축"
+    # 꼬리표 변형: (통신설비)·(전기/2차분)·(증축공사, 전기)·【소방】. '(소방전기)' 는 다루지 않음
+    assert ct("주차타워 건립사업(통신설비)")[0] == "정보통신" and ct("첨단온실 신축공사(전기/2차분)")[0] == "전기"
+    assert ct("미술관 조성사업(증축공사, 전기)")[0] == "전기" and ct("○○ 신축공사【소방】")[0] == "소방" and ct("주차타워 조성공사(소방전기)")[0] == "건축"
+    # 기타 비고: '안전시설'·'대전시립' 의 '전시' 는 전시 공사가 아님
+    assert "전시·인테리어" not in classify.trade_note("기타", "미분류", "설악야구장 안전시설 리모델링 공사")
+    assert "전시·인테리어" in classify.trade_note("기타", "미분류", "○○미술관 전시실 인테리어 공사")
+    # 대표 교체(공고명 상이) 경고: 같은 시설·공종의 이름이 다른 이후 공고가 앞 공고를 대체하면 06 에 남긴다. 같은 이름의 재공고는 남기지 않음
+    mk = lambda no, name, dt, price: dict(시설ID="F1", 시설명="s", 공고번호=no, 공고차수="000", 공고키=no + "-000", 공고명=name, 공고일시=dt, 사업유형="신축",
+                                          공종="전기", 공종근거="공고명(꼬리표)", 추정가격=price, 공고종류="일반", 이전공고번호="")
+    _, lt, lg = dedup.dedup_latest(pd.DataFrame([mk("A", "○○회관 건립 전기공사", "2024-01-10 10:00:00", 178_500_000),
+                                                  mk("B", "○○회관 건립공사(전기)", "2024-06-10 10:00:00", 86_500_000)]))
+    assert list(lt["공고번호"]) == ["B"] and any(l["항목"] == "대표 교체(공고명 상이)" and l["공고번호"] == "A" and l["판정"] == "경고" for l in lg), lg
+    _, _, lg = dedup.dedup_latest(pd.DataFrame([mk("A", "○○회관 건립 전기공사", "2024-01-10 10:00:00", 178_500_000),
+                                                 mk("B", "[긴급] ○○회관 건립 전기공사(재공고)", "2024-06-10 10:00:00", 178_500_000)]))
+    assert not any(l["항목"] == "대표 교체(공고명 상이)" for l in lg), lg
+
+    # ── 보강 추출 정규화: 단위가 붙은 숫자, 원문 보존(_raw), 멱등, ×100 없음, 위치 표기 변형 ──
+    nx = extract_llm.normalize_extra_doc
+    x = nx({"건폐율_pct": "12.35%", "주차대수": "약 125대", "최고높이_m": "24.5m", "대지면적_m2": "1,817.93㎡", "기타금액_원": "5,600천원",
+            "기타금액_항목": "한전불입금 5,600천원", "기타금액_위치": "별도", "용적률_pct": "60% 이하", "근거문구": "원문 한 줄"})
+    assert (x["건폐율_pct"], x["주차대수"], x["최고높이_m"], x["대지면적_m2"], x["기타금액_원"], x["기타금액_위치"]) == (12.35, 125, 24.5, 1817.93, 5600000, "별도"), x
+    assert x["용적률_pct"] is None and x["_raw"] == {"용적률_pct": "60% 이하"} and x["근거문구"] == {"원문": "원문 한 줄"} and nx(x) == x
+    y = nx({"건폐율_pct": "0.9", "용적률_pct": "0.95", "대지면적_m2": "89000", "건축면적_m2": "801"})
+    assert (y["건폐율_pct"], y["용적률_pct"]) == (0.9, 0.95), "1% 미만 건폐율·용적률은 실제 값일 수 있어 ×100 하지 않는다"
+    assert nx({"건폐율_pct": "0.1235", "대지면적_m2": "10000", "건축면적_m2": "1235"})["건폐율_pct"] == 12.35, "면적과 맞을 때만 비율 → %"
+    assert [nx({"기타금액_원": "5600000", "기타금액_위치": w})["기타금액_위치"]
+            for w in ("관급 포함", "도급액에 포함", "도급·관급 외 별도", "모름", "도급액 별도", "관급자재와 별도", "관급 미포함(별도)", "추정가격 포함")] == \
+        ["관급에포함", "추정가격에포함", "별도", "불명", "별도", "별도", "별도", "추정가격에포함"]
+    z = nx({"기타금액_원": "5억6천만원", "기타금액_위치": "관급 포함"})
+    assert z["기타금액_원"] is None and z["기타금액_위치"] == "" and z["_raw"] == {"기타금액_원": "5억6천만원", "기타금액_위치": "관급에포함"} and nx(z) == z
+    cv = extract_llm.cross_verify_extra
+    assert any(l["항목"] == "숫자 해석 실패(용적률_pct)" and l["판정"] == "경고" for l in cv("X", {}, {}, x))
+    assert not any(l["판정"] == "경고" for l in cv("X", {}, {}, y)), cv("X", {}, {}, y)
+    # 기타금액이 기초금액의 30% 초과: 예산금액이 없어도 경고, 합계에는 더하지 않음. 추정가격·기초금액·부가세·예산과 같은 값도 제외
+    big = nx({"기타금액_원": "5000000000", "기타금액_항목": "총공사비", "기타금액_위치": "불명"})
+    api = {"추정가격": 909090909, "기초금액": 1e9, "예산금액": None}
+    assert [l["판정"] for l in cv("X", api, {}, big) if l["항목"] == "기타금액(문서)"] == ["경고"]
+    ed = pipeline._etc_decision
+    assert ed(5e9, "불명", api, {}).startswith("제외(확인 필요: 기초금액의 30% 초과") and ed(1e9, "별도", api, {}).startswith("제외(확인 필요: 기초금액과 같은 값")
+    assert ed(90909091, "별도", dict(api, 부가세_API=90909091), {}).startswith("제외(확인 필요: 부가세") and ed(38e6, "별도", api, {}).startswith("가산")
+    assert ed(38e6, "관급자재비에 포함", api, {}).startswith("제외(문서: 관급") and ed(38e6, "도급·관급 외 별도", api, {}).startswith("가산")
+    # 발췌 2단: 흔한 낱말(용도·구조·관급…)이 앞에서 예산을 다 쓰지 않고, 뒤쪽의 건폐율·한전불입금 구간이 들어간다
+    g = ["입찰보증금은 면제한다.", "부가가치세 포함 금액으로 투찰한다.", "기타 사항은 별도 통보한다.", "구조물 시공 시 유의한다.", "건물의 용도에 맞게 시공한다.", "관급자재는 발주처가 지급한다."]
+    t = "".join("가나다라마바사아자차카타파하 " * 80 + g[i % 6] + "\n" for i in range(82))
+    t = t[:70000] + "\n대지면적 30,000㎡, 건폐율 15.2%\n" + t[70000:85000] + "\n한전불입금 38,000,000원(별도)\n" + t[85000:]
+    prompt = extract_llm.build_extra_prompt(t, {}, {"extra_max_input_chars": 40000})
+    assert "건폐율 15.2" in prompt and "한전불입금 38,000,000" in prompt and len(prompt) < 43000
+    assert "건폐율 15.2" not in extract_llm.focus_text(t, 40000, keys=extract_llm._EXTRA_KEYS), "한 단으로 섞으면 빠지던 구간(회귀 기준)"
+
+    # ── 같은 프로젝트의 두 공고가 같은 기타금액을 읽으면 하나만 가산, 옛 형식 근거문구(문자열)도 허용, 0 면적은 보강 값으로 채움 ──
+    b = dict(공고차수="000", 프로젝트ID="P1", 시설ID="F1", 시설명="s", 사업유형="신축", 수요기관="가상시", 공고일시="2024-03-10 10:00")
+    lt = pd.DataFrame([dict(b, 공고키="A-000", 공고번호="A", 공고명="가상 문화회관 건립공사", 공종="건축", 추정가격=3e10, 기초금액=3.3e10),
+                       dict(b, 공고키="E-000", 공고번호="E", 공고명="가상 문화회관 건립공사(전기)", 공종="전기", 추정가격=2e9, 기초금액=2.2e9)])
+    xd = {k: nx({"기타금액_원": "38000000", "기타금액_항목": "한전불입금 38,000,000", "기타금액_위치": "별도", "대지면적_m2": "14717", "건축면적_m2": "2100"}) for k in ("A-000", "E-000")}
+    docs = {"A-000": {"근거문구": "추정가격 30,000,000,000원", "대지면적_m2": 0, "건축면적_m2": 0, "지하층수": 0, "연면적_m2": 7000}, "E-000": {"근거문구": ["a", "b"]}}
+    assert pipeline._etc_duplicates(lt, docs, xd) == {("P1", "A-000"): "E-000"}, "항목에 '한전' 이 있으면 전기 공고 쪽을 남긴다"
+    tt = pipeline.assemble_trade_table(lt, docs, {}, xd).set_index("공고번호")
+    assert tt.loc["E", "기타금액_판정"].startswith("가산") and tt.loc["A", "기타금액_판정"].startswith("제외(같은 프로젝트의 공고 E-000"), tt["기타금액_판정"].tolist()
+    assert '"원문": "추정가격 30,000,000,000원"' in tt.loc["A", "근거문구"]
+    ef = pipeline.enrich_facility(pd.DataFrame([{"프로젝트ID": "P1"}]), lt, docs, xd).iloc[0]
+    assert ef["대지면적_m2"] == 14717 and ef["건축면적_m2"] == 2100 and ef["지하층수"] == 0 and ef["연면적_m2"] == 7000, ef.to_dict()
+    cfg = {"paths": {"data_dir": tmp}, "verify": {"price_diff_warn_ratio": 0.005, "vat_ratio": 0.10}}
+    assert any(l["항목"] == "기타금액 중복 가능" and l["공고번호"] == "A" for l in pipeline._extra_logs(cfg, lt, docs, xd))
+    # 1차 검증로그를 excel 때 다시 만든다(_verify_logs): 저장된 옛 로그가 아니라 현재 대표 공고·현재 규칙 기준
+    pd.DataFrame([{"공고번호": "OLD", "항목": "옛 로그", "판정": "경고"}]).to_parquet(os.path.join(tmp, "logs_verify.parquet"), index=False)
+    lv = pipeline._verify_logs(cfg, lt, {"A-000": {"추정가격_원": 3e10}, "E-000": {"_error": "x"}})
+    saved = pd.read_parquet(os.path.join(tmp, "logs_verify.parquet"))
+    assert lv and set(saved["공고번호"]) == {"A"}, saved
+    # 대기 중 배치에 든 공고는 즉시 호출 대상에서 제외(이중 과금 방지)
+    json.dump({"batches": [{"id": "b1", "keys": ["A-000"], "status": "submitted"}, {"id": "b0", "keys": ["E-000"], "status": "ended"}]},
+              open(os.path.join(tmp, "llm_extra_batch.json"), "w", encoding="utf-8"))
+    assert pipeline._skip_pending(cfg, ["A-000", "E-000", "Z-000"], "llm_extra_batch.json", "extract-extra") == ["E-000", "Z-000"]
+    assert pipeline._skip_pending(cfg, ["A-000"], "없는파일.json", "extract") == ["A-000"]
+
+    # ── 인증키 가림·캐시 정리·용역 보존 규칙 ──
+    c = _client(tmp)
+    key = c.cfg.service_key
+    msg = c._scrub(f"HTTPSConnectionPool(host='apis.data.go.kr'): Max retries exceeded with url: /x?serviceKey={key}&type=json (Caused by ...)")
+    assert key not in msg and "serviceKey=***" in msg and "type=json" in msg
+    for fetched, k in (("2024-03-10T09:00:00", "k1"), ("2024-03-11T09:00:00", "k2")):
+        c.conn.execute("INSERT OR REPLACE INTO cache VALUES(?,?,?,?,?)", (k, "opS", '{"inqryBgnDt": "202403010000"}', "{}", fetched))
+    c.conn.commit()
+    assert c.purge_cache("opS", '"inqryBgnDt": "202403010000"', before="2024-03-11") == 1
+    assert [r[0] for r in c.conn.execute("SELECT k FROM cache WHERE op='opS'")] == ["k2"], "오늘 받은 페이지는 남긴다(이어받기)"
+    import re as _re
+    rx = _re.compile(collect.SERVC_KEEP_NAME)
+    assert all(rx.search(n) for n in ("OO 건축설계 제안공모", "OO 건립사업 설계 경기", "OO 미술관 건립 건축 설계", "OO 건립사업 기획설계", "OO 건립 설계안 공모", "OO 건립사업 건축설계(제안공모)", "OO 주민센터 신축 설계제안공모", "OO 건설폐기물 처리용역"))
+    assert not rx.search("청사 청소 용역") and classify.load_config()["servc"]["keep_name_regex"] == collect.SERVC_KEEP_NAME, "config.yaml 과 코드 기본값이 같아야 한다"
+
+    # ── 04 금액 수식: 문서의 0·단위 오독이 합계를 지우거나 '면세' 를 만들지 않는다 ──
+    try:
+        import formulas  # type: ignore
+    except ImportError:
+        print("(formulas 없음 → 04 금액 수식 방어 검증 생략)")
+        return
+    import logging
+    import warnings
+    import openpyxl
+    base = {"프로젝트ID": "P1", "시설ID": "F1", "시설명": "s", "사업유형": "신축", "공고명": "n", "공고일시": "2025-03-02 10:00", "수요기관": "d", "공고차수": "000", "공종": "건축"}
+    rows = [dict(공고번호="R2", 추정가격_API=5_000_000_000, 기초금액_문서=0),                              # 문서 기초금액 0
+            dict(공고번호="R3", 추정가격_API=5_000_000_000, 기초금액_문서=3_300_000),                      # 문서 기초금액 단위 오독
+            dict(공고번호="R4", 추정가격_API=5_000_000_000, 기초금액_API=5_500_000_000, 부가세_문서=0),     # 문서 부가세 0 인데 기초금액은 10%
+            dict(공고번호="R5", 추정가격_API=5_000_000_000, 기초금액_API=5_500_000_000, 부가세_문서=500_000),  # 문서 부가세 천원 오독
+            dict(공고번호="R6", 추정가격_문서=0, 기초금액_API=1_100_000_000),                              # 문서 추정가격 0
+            dict(공고번호="R8", 추정가격_API=1_000_000_000, 기초금액_API=1_100_000_000, 부가세_API=0),      # API 부가세 0 인데 기초금액은 10%
+            dict(공고번호="R9", 추정가격_API=1_000_000_000, 기초금액_API=1_000_000_000, 부가세_문서=0),     # 진짜 면세(기초금액 = 추정가격)
+            dict(공고번호="RA", 추정가격_API=1000, 부가세_문서=30),                                        # 기초금액 없음 + 문서 부가세 3% → 문서 채택
+            dict(공고번호="RB", 추정가격_API=1000, 부가세_문서=0),                                         # 기초금액 없음 + 문서 부가세 0 → 문서대로 면세
+            dict(공고번호="RC", 추정가격_API=2000, 기초금액_API=2100, 부가세_문서=150),                    # 조달청형(기초금액이 ×1.1 이 아님) + 문서 부가세 → 문서 채택
+            dict(공고번호="RD", 추정가격_API=10_000, 기초금액_API=11_000, 부가세_문서=300)]                # 기초금액은 10% 인데 문서 부가세 3%(다른 범위) → 기초금액 쪽
+    trade = pd.DataFrame([dict(base, 공고키=r["공고번호"] + "-000", **r) for r in rows])
+    fac = pd.DataFrame([{"프로젝트ID": "P1", "시설ID": "F1", "시설명": "s", "사업유형": "신축", "표2_대분류": "문화 및 집회시설", "표2_중분류": "공연장", "수요기관": "d",
+                         "공고건수_최신": 11, "최종공고일": "2025-03-02", "연면적_m2": 100}])
+    latest = trade.rename(columns={"추정가격_API": "추정가격", "기초금액_API": "기초금액"})
+    out = os.path.join(tmp, "amount_guard.xlsx")
+    # 02 이력: R2·R3 은 이름이 다른 공고에 밀려 빠진 공고(별개 공사 가능), R4 는 재공고로 대체 → 05 에 건수·추정가격 합
+    hist = latest.assign(대표선정사유=[dedup.REPLACED_OTHER, dedup.REPLACED_OTHER, "대체됨(이후 재공고/재발주)"] + ["단독 공고"] * (len(latest) - 3))
+    build_workbook(out, fac, hist, latest, trade, pd.DataFrame(), pd.DataFrame(), meta={"period": "t"})
+    wbk = openpyxl.load_workbook(out)
+    ws4, ws5 = wbk["04_공사비DB_공종별"], wbk["05_공사비DB_시설합산"]
+    h4, h5 = [c.value for c in ws4[1]], [c.value for c in ws5[1]]
+    warnings.filterwarnings("ignore")
+    logging.disable(logging.CRITICAL)
+    sol = formulas.ExcelModel().loads(out).finish().calculate()
+    logging.disable(logging.NOTSET)
+
+    def val(coord, sheet="04_공사비DB_공종별"):
+        for k, v in sol.items():
+            if k.upper().endswith(f"{sheet}'!{coord}".upper()):
+                x = getattr(v, "value", v)
+                x = x.tolist() if hasattr(x, "tolist") else x
+                while isinstance(x, list) and x:
+                    x = x[0]
+                return x
+    row = {ws4.cell(r, h4.index("공고번호") + 1).value: r for r in range(2, ws4.max_row + 1)}
+    v4 = lambda bid, name: val(f"{openpyxl.utils.get_column_letter(h4.index(name) + 1)}{row[bid]}")
+    num = lambda x: float(x) if x not in ("", None) else None
+    tp, tb, src, tax = "금액합계_추정가격기준(수식)", "금액합계_기초금액기준(수식)", "부가세_출처(수식)", "과세구분(수식)"
+    for bid in ("R2", "R3"):
+        assert num(v4(bid, tb)) == 5_500_000_000 == num(v4(bid, tp)) and v4(bid, src) == "10% 가정", (bid, v4(bid, tb), v4(bid, src))
+    for bid in ("R4", "R5"):
+        assert v4(bid, src) == "기초금액-추정가격" and v4(bid, tax) == "과세" and num(v4(bid, tp)) == 5_500_000_000 == num(v4(bid, tb)), (bid, v4(bid, src), v4(bid, tax))
+    assert v4("R6", "추정가격(수식)") in ("", None) and num(v4("R6", tp)) == 1_100_000_000 == num(v4("R6", tb))
+    assert v4("R8", src) == "기초금액-추정가격" and v4("R8", tax) == "과세" and num(v4("R8", tp)) == 1_100_000_000
+    assert v4("R9", src) == "문서" and v4("R9", tax) == "면세" and num(v4("R9", tp)) == 1_000_000_000 == num(v4("R9", tb))
+    assert v4("RA", src) == "문서" and v4("RA", tax) == "부분면세" and num(v4("RA", tp)) == 1030 == num(v4("RA", tb))
+    assert v4("RB", src) == "문서" and v4("RB", tax) == "면세" and num(v4("RB", tp)) == 1000 == num(v4("RB", tb))
+    assert v4("RC", src) == "문서" and v4("RC", tax) == "부분면세" and num(v4("RC", tp)) == 2150 and num(v4("RC", tb)) == 2100
+    assert v4("RD", src) == "기초금액-추정가격" and v4("RD", tax) == "과세" and num(v4("RD", tp)) == 11_000 == num(v4("RD", tb))
+    v5 = lambda name: num(val(f"{openpyxl.utils.get_column_letter(h5.index(name) + 1)}2", "05_공사비DB_시설합산"))
+    assert v5("대체된_다른이름_공고수(수식)") == 2 and v5("대체된_다른이름_추정가격합(수식)") == 10_000_000_000, (v5("대체된_다른이름_공고수(수식)"), v5("대체된_다른이름_추정가격합(수식)"))
+
+
 def test_trade_run_feedback(tmp):
     """첫 실제 실행(2026-11-06) 피드백: 합산 행('도급비(건축, 토목, 기계, 조경)')은 '합계'로 배분 제외, 관급·부가세 보정 기준 판별, 손상 Excel 은 calamine 폴백, 저장 결과 재정규화."""
     from unittest import mock
@@ -1159,6 +1323,7 @@ def run():
         test_trade_review_fixes(tmp)
         test_trade_allocation_formulas(tmp)
         test_amount_structure(tmp)
+        test_request_review_fixes(tmp)
         test_trade_run_feedback(tmp)
         test_attachments(tmp)
     print("OK: 회귀 테스트 통과")

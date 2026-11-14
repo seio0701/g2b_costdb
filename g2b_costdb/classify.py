@@ -281,14 +281,26 @@ def match_trade_label(text: str, rules: Dict[str, List[str]]) -> Optional[str]:
 
 # 공고명 꼬리표: '○○ 신축공사(전기)'·'…리모델링 공사(통신)'·'[소방]' 처럼 분리발주 공종을 괄호로만 적은 공고.
 # 주공종명이 비어 있으면 앞의 '신축공사'에 걸려 건축이 되거나 미분류(기타)가 되던 것을 바로잡는다.
-_TAG_LABEL = {"정보통신": "정보통신", "통신": "정보통신", "전기": "전기", "소방": "소방", "기계설비": "기계설비", "기계": "기계설비",
-              "토목": "토목", "조경": "조경", "건축": "건축"}
-_TAG_RE = re.compile(r"[\(（\[]\s*(정보통신|통신|전기|소방|기계설비|기계|토목|조경|건축)\s*(?:공사|분야|부문|공종)?\s*[\)）\]]")
+_TAG_LABEL = {"정보통신": "정보통신", "통신설비": "정보통신", "통신": "정보통신", "전기설비": "전기", "전기": "전기", "소방": "소방",
+              "기계설비": "기계설비", "기계": "기계설비", "토목": "토목", "조경": "조경", "건축": "건축"}
+# 괄호 안이 공종 하나뿐인 형태만: '(전기)', '[통신공사]', '(전기/2차분)', '(증축공사, 전기)', '【소방】'.
+# '(소방전기)'·'(소방기계)' 는 소방의 분야 표기라 여기서 다루지 않는다(같은 프로젝트의 소방 공고끼리 서로 대체되는 문제가 있어 보류)
+_TAG_RE = re.compile(r"[\(（\[【〔]\s*(?:(?:신축|증축|건립|조성)\s*공사\s*,\s*)?(?P<t>정보통신|통신설비|통신|전기설비|전기|소방|기계설비|기계|토목|조경|건축)"
+                     r"\s*(?:공사|분야|부문|공종)?\s*(?:/\s*\d+\s*차분?)?\s*[\)）\]】〕]")
+_TAG_HEAD_RE = re.compile(r"(소방|건축)\s*$")
+# '…건축 기계 공사'·'토목,건축,기계공사' 는 건축 통합 계약, '소방기계공사'·'무대기계공사' 는 기계설비 공고가 아니다
+_ARCH_COMBINED_RE = re.compile(r"건축[\s,·ㆍ・∙.및와/+]*(?:(?:토목|조경|전기|통신|소방)[\s,·ㆍ・∙.및와/+]*)*기계(?:설비)?\s*공사")
+_NOT_MECH_RE = re.compile(r"(?:소방|무대)\s*기계")
 
 
 def trade_tag(notice_name: str) -> Optional[str]:
-    """공고명 꼬리표의 공종. 서로 다른 공종 꼬리표가 둘 이상이면(예: '(건축)(전기)') 판단하지 않는다."""
-    labs = {_TAG_LABEL[m] for m in _TAG_RE.findall(notice_name or "")}
+    """공고명 꼬리표의 공종. 괄호 바로 앞이 '소방'·'건축' 이면 괄호는 그 공종의 분야 표기이므로('소방(전기)공사', '건축(기계)공사') 앞 공종을 따른다.
+    서로 다른 공종 꼬리표가 둘 이상이면(예: '(건축)(전기)') 판단하지 않는다."""
+    name = notice_name or ""
+    labs = set()
+    for m in _TAG_RE.finditer(name):
+        head = _TAG_HEAD_RE.search(name[:m.start()])
+        labs.add(_TAG_LABEL[head.group(1) if head else m.group("t")])
     return labs.pop() if len(labs) == 1 else None
 
 
@@ -300,17 +312,22 @@ def classify_trade(notice_name: str = "", main_cnstty: str = "", license_names: 
         lab = match_trade_label(text, rules)
         if lab:
             return lab, src
-    tag = trade_tag(notice_name)
+    name = notice_name or ""
+    tag = trade_tag(name)
     if tag:
         return tag, "공고명(꼬리표)"
-    lab = match_trade_label(notice_name, rules)
+    if _ARCH_COMBINED_RE.search(name):
+        return "건축", "공고명"
+    if _NOT_MECH_RE.search(name):               # '소방기계공사'·'무대기계공사' 가 '기계공사' 규칙에 걸리지 않게
+        rules = {k: [w for w in v if w != "기계공사"] for k, v in rules.items()}
+    lab = match_trade_label(name, rules)
     if lab:
         return lab, "공고명"
     return "기타", "미분류"
 
 
 # '기타'(미분류) 공고의 비고: 왜 분류되지 않았는지와 공고명으로 본 공사 성격. 공종은 '기타' 그대로 둔다(사용자 결정 2026-11-14)
-_ETC_KINDS = [("철거·해체 공사", r"철거|해체|석면"), ("전시·인테리어 공사", r"전시|인테리어|실내"),
+_ETC_KINDS = [("철거·해체 공사", r"철거|해체|석면"), ("전시·인테리어 공사", r"(?<![안대])전시|인테리어|실내\s*(?:건축|인테리어|장식)"),
               ("시설물·설비 설치·제작", r"설치|제작|구매|납품"), ("리모델링·개보수 공사(공종 미표기)", r"리모델링|개보수|보수|수선|개선|정비|교체|방수|도장|보강"),
               ("조성·확충 공사(공종 미표기)", r"조성|확충|확장|건설|건립|신축|증축")]
 
@@ -320,7 +337,7 @@ def trade_note(trade: str, basis: str = "", notice_name: str = "", main_cnstty: 
     if str(trade) != "기타":
         return ""
     lic = " / ".join(x for x in (str(main_cnstty or "").strip(), str(sub_cnstty or "").strip()) if x and x.lower() not in ("nan", "none"))
-    why = f"주공종명 '{lic}' 이 8개 공종 규칙에 없음" if lic else "주공종명·면허 정보 없음, 공고명에 공종어 없음"
+    why = f"주공종명 '{lic}' 이 8개 공종 규칙에 없음" if lic else "주공종명 정보 없음, 공고명에 공종 규칙에 맞는 표기 없음"
     name = str(notice_name or "")
     kind = next((k for k, rx in _ETC_KINDS if re.search(rx, name)), "공고명만으로 공사 성격 판별 불가")
     return f"미분류 사유: {why} / 공사 성격(공고명 기준): {kind}"

@@ -107,6 +107,55 @@ def focus_text(text: str, max_chars: int, window: int = 1200, keys: Optional[Lis
     return head + "\n\n[핵심 구간 발췌]\n" + "\n".join(body)
 
 
+def focus_tiered(text: str, max_chars: int, tiers: List[List[str]], window: int = 1200, head_ratio: float = 0.3, first_n: int = 2) -> str:
+    """앞부분 + 키워드 주변 창. tiers 의 앞 묶음(찾는 항목에만 쓰이는 낱말)부터 예산을 쓰고, 남으면 뒤 묶음(흔한 낱말)에 쓴다.
+    한 묶음 안에서는 각 키워드의 처음 first_n 곳을 먼저 담아, 자주 나오는 낱말 하나가 예산을 다 쓰지 않게 한다. 출력은 문서 순서."""
+    if len(text) <= max_chars:
+        return text
+    head_n = int(max_chars * head_ratio)
+    left = max_chars - head_n - 200
+    taken: List[List[int]] = []                       # 겹치지 않는 [시작, 끝) 구간, 정렬 상태 유지
+
+    def add(s: int, e: int) -> None:
+        nonlocal left, taken
+        s, cur, parts = max(s, head_n), max(s, head_n), []
+        for a, b in taken:                            # 이미 담은 구간을 뺀 나머지만 예산에서 차감
+            if b <= cur:
+                continue
+            if a >= e:
+                break
+            if a > cur:
+                parts.append([cur, a])
+            cur = max(cur, b)
+        if cur < e:
+            parts.append([cur, e])
+        for a, b in parts:
+            if left <= 0:
+                break
+            b = min(b, a + left)
+            taken.append([a, b])
+            left -= b - a
+        taken.sort()
+        merged: List[List[int]] = []
+        for a, b in taken:
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        taken = merged
+
+    for keys in tiers:
+        hits = {k: [m.start() for m in re.finditer(re.escape(k), text)] for k in keys}
+        first = sorted((pos, k) for k, ps in hits.items() for pos in ps[:first_n])
+        rest = sorted((pos, k) for k, ps in hits.items() for pos in ps[first_n:])
+        for pos, k in first + rest:
+            if left <= 0:
+                break
+            add(max(0, pos - window // 3), min(len(text), pos + len(k) + window))
+    body = "\n".join(f"...\n{text[a:b]}\n..." for a, b in taken)
+    return text[:head_n] + "\n\n[핵심 구간 발췌]\n" + body
+
+
 def _parse_json(s: str) -> Dict:
     s = s.strip()
     s = re.sub(r"^```(?:json)?|```$", "", s, flags=re.M).strip()
@@ -131,6 +180,31 @@ def _num(v) -> Optional[float]:
         return None
     try:
         return float(s)
+    except ValueError:
+        return None
+
+
+_UNIT_TAIL = re.compile(r"(㎡|m2|m²|제곱미터|%|퍼센트|미터|세대|가구|대|면|호|m|원|정)$", re.I)
+_MONEY_MULT = {"조": 1e12, "억": 1e8, "천만": 1e7, "백만": 1e6, "만": 1e4, "천": 1e3}
+
+
+def _num_loose(v, money: bool = False) -> Optional[float]:
+    """단위가 붙은 숫자 문자열도 읽는다: '12.35%', '약 125대', '24.5m', '1,817.93㎡', '5,600천원'(money=True → 5,600,000).
+    '60% 이하'·'550평'·'5억6천만원' 처럼 한 숫자로 볼 수 없는 표기는 None(호출부가 원문을 따로 남긴다)."""
+    x = _num(v)
+    if x is not None or v is None or isinstance(v, (int, float, bool)):
+        return x
+    t = re.sub(r"^(약|총|금|계)", "", str(v).replace(",", "").replace(" ", "").strip())
+    mult = 1.0
+    if money:
+        m = re.fullmatch(r"([0-9.]+)(조|억|천만|백만|만|천)?원?정?", t)
+        if not m:
+            return None
+        t, mult = m.group(1), _MONEY_MULT.get(m.group(2) or "", 1.0)
+    else:
+        t = _UNIT_TAIL.sub("", _UNIT_TAIL.sub("", t))
+    try:
+        return float(t) * mult
     except ValueError:
         return None
 
@@ -707,7 +781,7 @@ _EXTRA_STR = ["건축법상용도", "설계특이사항", "기타금액_항목",
 EXTRA_SYSTEM = (
     "당신은 한국 공공건축 공사 입찰공고문·현장설명서·과업지시서에서 공사개요의 세부 항목과 공사금액의 부대 항목을 정확히 추출하는 분석가입니다. "
     "반드시 JSON 객체 하나만 출력합니다(마크다운 코드블록·설명 금지). 문서에 없는 값은 빈 문자열로 둡니다 — 추정하거나 계산해 만들지 않습니다. "
-    "숫자 항목은 쉼표·단위 없이 자릿수만 적습니다. 면적은 ㎡(평→×3.3058), 건폐율·용적률은 % 숫자(예: 12.35), 높이·층고는 m, 주차대수는 대(면) 수, 금액은 원 단위 정수. "
+    "숫자 항목은 쉼표·단위 없이 자릿수만 적습니다. 면적은 ㎡(평→×3.3058), 건폐율·용적률은 % 숫자(예: 12.35), 높이·층고는 m, 주차대수는 대(면) 수, 금액은 원 단위 정수(천원 단위 표는 ×1,000, 백만원 단위는 ×1,000,000 으로 환산). "
     "건폐율·용적률은 이 공사의 설계값만 적고, '60% 이하' 같은 법정 한도·허용 기준은 적지 않습니다. 주차대수도 '법정 주차대수 이상' 같은 기준이면 비웁니다. "
     "'기준층층고_m' 은 기준층의 층고, '최고높이_m' 은 건축물 최고높이입니다. '건축법상용도' 는 문서에 적힌 건축물 용도(예: 업무시설(공공업무시설), 문화 및 집회시설)를 그대로 적습니다. "
     "'설계특이사항' 은 문서에 적힌 범위에서 동 수·주요 구조형식·특수 공법·인증·지반·토공 특이점을 80자 이내로 요약하고, 없으면 비웁니다. "
@@ -718,9 +792,13 @@ EXTRA_SYSTEM = (
     "'면세_문구' 에는 부가가치세 면제·면세 사업임을 밝힌 문구(예: '조세특례제한법 제106조에 의한 부가가치세 면제 대상')를 60자 이내로 인용하고, 없으면 비웁니다. "
     "각 값의 근거가 된 원문 문구를 '근거문구'에 항목명별로 짧게 인용합니다(근거문구는 [{\"항목\": …, \"원문\": …}] 배열)."
 )
-_EXTRA_KEYS = ["공사개요", "공사 개요", "건축개요", "건축 개요", "설계개요", "사업개요", "대지면적", "대지 면적", "부지면적", "건축면적", "조경면적", "건폐율", "용적률",
-               "층고", "최고높이", "건물높이", "높이", "주차", "세대", "용도", "구조", "한전", "불입금", "분담금", "부담금", "수탁비", "납입금", "시설부담금",
-               "표준공사비", "기타금액", "기타 금액", "이설비", "별도", "면세", "면제", "조세특례", "부가가치세", "부가세", "추정금액", "총공사", "관급"]
+# 발췌 키워드 2단: 찾는 항목에만 쓰이는 낱말을 먼저 담고, 남는 분량에 흔한 낱말(용도·구조·관급 …) 주변을 담는다.
+# 한 단으로 섞으면 흔한 낱말이 문서 앞쪽에서 예산을 다 써서 뒤쪽의 건축개요·한전불입금 구간이 빠진다
+_EXTRA_KEYS_MAIN = ["건축개요", "건축 개요", "설계개요", "설계 개요", "공사개요", "공사 개요", "사업개요", "대지면적", "대지 면적", "부지면적", "건축면적", "조경면적",
+                    "건폐율", "용적률", "층고", "최고높이", "건물높이", "주차대수", "주차 대수", "한전", "불입금", "분담금", "부담금", "수탁비", "납입금",
+                    "표준공사비", "기타금액", "기타 금액", "이설비", "조세특례", "면세", "부가가치세 면제", "부가세 면제"]
+_EXTRA_KEYS_SUB = ["높이", "주차", "세대", "용도", "구조", "별도", "면제", "부가가치세", "부가세", "추정금액", "총공사", "관급"]
+_EXTRA_KEYS = _EXTRA_KEYS_MAIN + _EXTRA_KEYS_SUB
 EXTRA_INPUT_CHARS = 40000
 
 
@@ -739,7 +817,7 @@ def build_extra_prompt(text: str, api_hint: Dict, cfg_llm: Dict) -> str:
     limit = int(cfg_llm.get("extra_max_input_chars", EXTRA_INPUT_CHARS))
     return (f"[공고 메타데이터(API)]\n{json.dumps(hint, ensure_ascii=False)}\n\n"
             f"[출력 스키마]\n{json.dumps(EXTRA_FIELDS, ensure_ascii=False, indent=1)}\n\n"
-            f"[공고문 텍스트]\n{focus_text(text, limit, keys=_EXTRA_KEYS)}")
+            f"[공고문 텍스트]\n{focus_tiered(text, limit, [_EXTRA_KEYS_MAIN, _EXTRA_KEYS_SUB])}")
 
 
 def build_extra_request_params(text: str, api_hint: Dict, cfg_llm: Dict, structured: Optional[bool] = None,
@@ -754,33 +832,75 @@ def build_extra_request_params(text: str, api_hint: Dict, cfg_llm: Dict, structu
     return params
 
 
+_EMPTY_WORDS = ("null", "none", "nan", "없음", "-", "")
+
+
+def _etc_where(w) -> str:
+    """기타금액_위치 표기 정리: 스키마 밖 표기('관급 포함', '도급액에 포함', '도급액 별도')도 뜻에 맞는 값으로. 알 수 없으면 ''.
+    '포함' 이라고 적힌 경우에만 포함으로 본다('관급 미포함(별도)'·'관급자재와 별도' 는 별도)."""
+    w = str(w or "").replace(" ", "")
+    if w in ("별도", "관급에포함", "추정가격에포함", "불명"):
+        return w
+    inc = "포함" in w.replace("미포함", "").replace("불포함", "")
+    if "별도" in w and not inc:
+        return "별도"
+    if inc and "관급" in w:
+        return "관급에포함"
+    if inc and ("추정가격" in w or "도급" in w):
+        return "추정가격에포함"
+    return ""
+
+
 def normalize_extra_doc(data: Dict) -> Dict:
-    """보강 추출 출력 정규화: 숫자 필드 → 숫자(0 이하·비현실 값은 비움), 근거문구 배열 → dict, 기타금액이 없으면 항목·위치도 비움."""
+    """보강 추출 출력 정규화: 숫자 필드 → 숫자(단위가 붙은 표기도 해석, 0 이하·비현실 값은 비움), 근거문구 배열 → dict, 기타금액이 없으면 항목·위치도 비움.
+    숫자로 읽지 못한 원문은 '_raw' 에 남긴다 → 저장된 결과에 다시 적용해도 같은 결과(멱등)이고, 해석 규칙을 고친 뒤 excel 만 다시 돌려도 값이 살아난다."""
     out = dict(data)
-    for k in _EXTRA_FLOAT:
-        x = _num(out.get(k))
-        out[k] = x if (x is not None and x > 0) else None
-    for k in _EXTRA_INT:
-        x = _num(out.get(k))
-        out[k] = int(round(x)) if (x is not None and x > 0) else None
-    for k in ("건폐율_pct", "용적률_pct"):               # 0.1235 처럼 비율로 적은 값은 % 로
-        if out[k] is not None and out[k] < 1:
-            out[k] = round(out[k] * 100, 4)
+    raw = dict(out.get("_raw") or {}) if isinstance(out.get("_raw"), dict) else {}
+    for k in _EXTRA_FLOAT + _EXTRA_INT:
+        src = out.get(k)
+        if (src is None or src == "") and raw.get(k):
+            src = raw[k]
+        x = _num_loose(src, money=(k == "기타금액_원"))
+        if x is None and isinstance(src, str) and src.strip().lower() not in _EMPTY_WORDS:
+            raw[k] = src.strip()[:60]
+        else:
+            raw.pop(k, None)
+        if x is not None and x > 0:
+            out[k] = int(round(x)) if k in _EXTRA_INT else x
+        else:
+            out[k] = None
+    # 건폐율을 0.1235 처럼 비율로 적은 경우: 같은 문서의 건축면적/대지면적과 ×100 값이 맞을 때만 % 로 바꾼다.
+    # (1% 미만 건폐율·용적률은 추모공원·운동장·온실처럼 대지가 큰 시설에서 실제로 나오므로 무조건 ×100 하지 않는다)
+    bc, site, bld = out.get("건폐율_pct"), out.get("대지면적_m2"), out.get("건축면적_m2")
+    if bc is not None and bc < 1 and site and bld:
+        calc = bld / site * 100
+        if abs(bc * 100 - calc) <= calc * 0.05 < abs(bc - calc):
+            out["건폐율_pct"] = round(bc * 100, 4)
     if out.get("건폐율_pct") is not None and out["건폐율_pct"] > 100:
         out["건폐율_pct"] = None
     for k in _EXTRA_STR:
         v = str(out.get(k) or "").strip()
-        out[k] = "" if v.lower() in ("null", "none", "nan", "없음", "-") else v
-    w = str(out.get("기타금액_위치") or "").replace(" ", "")
-    out["기타금액_위치"] = w if w in ("별도", "관급에포함", "추정가격에포함", "불명") else ("불명" if out.get("기타금액_원") else "")
-    if not out.get("기타금액_원"):
+        out[k] = "" if v.lower() in _EMPTY_WORDS else v
+    w = _etc_where(out.get("기타금액_위치") or raw.get("기타금액_위치"))
+    if out.get("기타금액_원"):
+        out["기타금액_위치"] = w or "불명"
+        raw.pop("기타금액_위치", None)
+    else:
         out["기타금액_위치"] = ""
+        if raw.get("기타금액_원") and w:              # 금액을 읽지 못한 동안에도 위치는 보존(나중에 금액 해석이 되면 함께 살아남)
+            raw["기타금액_위치"] = w
+        else:
+            raw.pop("기타금액_위치", None)
     ev = out.get("근거문구")
     if isinstance(ev, list):
         out["근거문구"] = {str(e.get("항목", "")): str(e.get("원문", "")) for e in ev if isinstance(e, dict)}
     elif not isinstance(ev, dict):
-        out["근거문구"] = {}
+        out["근거문구"] = {"원문": str(ev)} if ev else {}
     out["신뢰도"] = str(out.get("신뢰도") or "")
+    if raw:
+        out["_raw"] = raw
+    else:
+        out.pop("_raw", None)
     return out
 
 
@@ -806,10 +926,17 @@ def extract_extra_with_claude(text: str, api_hint: Dict, cfg_llm: Dict, max_toke
     return data
 
 
+ETC_MAX_SHARE = 0.30      # 기타금액이 기초금액의 이 비율을 넘으면 도급액·관급자재를 잘못 읽은 것으로 보고 합계에 더하지 않는다
+
+
 def cross_verify_extra(bid_no: str, api_row: Dict, doc: Dict, xdoc: Dict) -> List[Dict]:
-    """보강 추출 정합성: 건폐율 = 건축면적/대지면적, 대지면적 ≥ 건축면적, 1차 추출과 면적 일치, 기타금액과 예산금액 잔차 대조, 면세 문구와 부가세율."""
+    """보강 추출 정합성: 건폐율 = 건축면적/대지면적, 대지면적 ≥ 건축면적·조경면적, 1차 추출과 면적 일치, 층고·높이 범위, 숫자 해석 실패,
+    기타금액과 예산금액 잔차 대조·기초금액 대비 크기, 면세 문구와 부가세율."""
     logs: List[Dict] = []
     doc = doc or {}
+    for k, v in (xdoc.get("_raw") or {}).items():
+        if k != "기타금액_위치":
+            logs.append({"공고번호": bid_no, "항목": f"숫자 해석 실패({k})", "판정": "경고", "비고": f"문서 표기 '{v}' 를 숫자로 읽지 못해 비움 → 원문 확인"})
     site = _num(xdoc.get("대지면적_m2")) or _num(doc.get("대지면적_m2"))
     bld = _num(xdoc.get("건축면적_m2")) or _num(doc.get("건축면적_m2"))
     for k in ("대지면적_m2", "건축면적_m2"):
@@ -819,15 +946,29 @@ def cross_verify_extra(bid_no: str, api_row: Dict, doc: Dict, xdoc: Dict) -> Lis
                          "판정": "경고", "비고": "1차 추출값과 보강 추출값이 다름 → 01 시트는 1차 값을 사용, 원문 확인"})
     if site and bld and bld > site * 1.001:
         logs.append({"공고번호": bid_no, "항목": "대지면적≥건축면적", "API값": site, "문서값": bld, "판정": "경고", "비고": "건축면적이 대지면적보다 큼 → 단위·오독 의심"})
+    land = _num(xdoc.get("조경면적_m2"))
+    if site and land and land > site * 1.001:
+        logs.append({"공고번호": bid_no, "항목": "대지면적≥조경면적", "API값": site, "문서값": land, "판정": "경고", "비고": "조경면적이 대지면적보다 큼 → 단위·오독 의심"})
     bc = _num(xdoc.get("건폐율_pct"))
     if bc and site and bld:
         calc = bld / site * 100
         r = (bc - calc) / calc
+        ratio = abs(r) > 0.02 and abs(bc * 100 - calc) <= calc * 0.05
         logs.append({"공고번호": bid_no, "항목": "건폐율=건축면적/대지면적", "API값": round(calc, 2), "문서값": bc, "차이": round(bc - calc, 2), "차이율": round(r, 5),
-                     "판정": "정상" if abs(r) <= 0.02 else "경고", "비고": "" if abs(r) <= 0.02 else "문서 건폐율과 면적으로 계산한 값이 다름(법정 한도 표기 또는 면적 오독 의심)"})
+                     "판정": "정상" if abs(r) <= 0.02 else "경고",
+                     "비고": "" if abs(r) <= 0.02 else ("문서가 건폐율을 비율(0.xx)로 적은 것으로 보임 — ×100 하면 계산값과 일치" if ratio
+                                                       else "문서 건폐율과 면적으로 계산한 값이 다름(법정 한도 표기 또는 면적 오독 의심)")})
+    elif bc and bc < 1:
+        logs.append({"공고번호": bid_no, "항목": "건폐율 1% 미만", "문서값": bc, "판정": "참고", "비고": "면적으로 대조할 수 없음 — 비율(0.xx) 표기일 수 있으니 원문 확인"})
     vl = _num(xdoc.get("용적률_pct"))
     if vl and vl > 1500:
         logs.append({"공고번호": bid_no, "항목": "용적률 범위", "문서값": vl, "판정": "경고", "비고": "용적률 1,500% 초과 → 오독 의심"})
+    elif vl and vl < 1:
+        logs.append({"공고번호": bid_no, "항목": "용적률 1% 미만", "문서값": vl, "판정": "참고", "비고": "비율(0.xx) 표기일 수 있으니 원문 확인"})
+    for k, hi, what in (("기준층층고_m", 20, "층고 20m 초과"), ("최고높이_m", 300, "최고높이 300m 초과")):
+        hv = _num(xdoc.get(k))
+        if hv and hv > hi:
+            logs.append({"공고번호": bid_no, "항목": f"{k} 범위", "문서값": hv, "판정": "경고", "비고": f"{what} → 단위(mm·cm)·오독 의심"})
     etc = _num(xdoc.get("기타금액_원"))
     if etc:
         b, p = _num(api_row.get("기초금액")), _num(api_row.get("추정가격"))
@@ -835,12 +976,10 @@ def cross_verify_extra(bid_no: str, api_row: Dict, doc: Dict, xdoc: Dict) -> Lis
         budget = _num(api_row.get("예산금액"))
         base = b or (p * 1.1 if p else None)
         note, verdict = f"{xdoc.get('기타금액_항목') or ''} (위치: {xdoc.get('기타금액_위치') or '불명'})".strip(), "참고"
-        if budget and base:
-            resid = budget - base - gov
-            if abs(resid - etc) <= max(1.0, etc * 0.01):
-                note += " — 예산금액(API) − 기초금액 − 관급 잔차와 일치"
-            elif base and etc > base * 0.3:
-                verdict, note = "경고", note + " — 기타금액이 기초금액의 30% 초과 → 관급자재·도급액을 기타금액으로 읽었는지 확인"
+        if budget and base and abs(budget - base - gov - etc) <= max(1.0, etc * 0.01):
+            note += " — 예산금액(API) − 기초금액 − 관급 잔차와 일치"
+        elif base and etc > base * ETC_MAX_SHARE:
+            verdict, note = "경고", note + f" — 기타금액이 기초금액의 {ETC_MAX_SHARE:.0%} 초과 → 관급자재·도급액을 기타금액으로 읽었는지 확인(금액 합계에는 더하지 않음)"
         logs.append({"공고번호": bid_no, "항목": "기타금액(문서)", "문서값": etc, "판정": verdict, "비고": note})
     ex = str(xdoc.get("면세_문구") or "").strip()
     if ex:

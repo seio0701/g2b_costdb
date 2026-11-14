@@ -62,6 +62,24 @@ def inherit_work_type(d: pd.DataFrame, max_days: int = 730) -> pd.Series:
     return out
 
 
+REPLACED_OTHER = "대체됨(공고명 상이 — 별개 공사 가능)"      # 05 시트의 COUNTIFS/SUMIFS 가 이 문자열을 그대로 쓴다
+
+
+def _name_key(name) -> str:
+    """재공고 판별용 공고명 비교 키: '[긴급]'·'(재공고)'·'입찰공고' 같은 머리말·꼬리말과 공백·괄호·기호를 지운다."""
+    s = re.sub(r"[\[\(（【<〈][^\]\)）】>〉]{0,12}(?:긴급|재공고|재입찰|변경|정정|수정|취소|소액|수의)[^\]\)）】>〉]{0,12}[\]\)）】>〉]", "", str(name or ""))
+    s = re.sub(r"긴급|재공고|재입찰|입찰\s*공고", "", s)
+    return re.sub(r"[\s\-_·ㆍ,.\[\]\(\)（）【】<>〈〉/]", "", s)
+
+
+def _is_rebid(row, rep) -> bool:
+    """대체된 공고(row)가 대표(rep)의 재공고·재발주 관계인지: 공고명이 (머리말·기호를 빼고) 같거나, 대표의 API 이전공고번호가 이 공고를 가리킨다.
+    이름이 다르면 같은 시설·같은 공종의 별개 공사(다른 단지·다른 구역·다른 연도 사업)일 수 있다."""
+    if _name_key(row["공고명"]) == _name_key(rep["공고명"]):
+        return True
+    return str(rep.get("이전공고번호") or "").strip() == str(row["공고번호"]).strip()
+
+
 def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
                  minor_ratio: float = 0.30) -> Tuple[pd.DataFrame, pd.DataFrame, List[dict]]:
     """반환: (전체 이력 df[최신여부·대체공고번호 부여], 최신만 df, 검증로그 rows)"""
@@ -121,7 +139,14 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
                                                 "본공사가 맞으면 keywords.yaml/검수 결과를 확인"})
                 continue
             else:
-                d.at[i, "대표선정사유"] = "대체됨(이후 재공고/재발주)"
+                rebid = _is_rebid(row, rep)
+                d.at[i, "대표선정사유"] = "대체됨(이후 재공고/재발주)" if rebid else REPLACED_OTHER
+                # 공고명이 다른 공고에 대체된 경우: 재공고가 아니라 같은 공종의 별개 공사일 수 있다(대체된 금액은 합계에서 빠짐) → 검수용 경고
+                if not rebid:
+                    logs.append({"공고번호": row["공고번호"], "항목": "대표 교체(공고명 상이)", "API값": _num(row.get("추정가격")),
+                                 "문서값": _num(rep.get("추정가격")), "판정": "경고",
+                                 "비고": f"{key}: '{row['공고명']}' 이 이후 공고 '{rep['공고명']}'({rep['공고번호']}, 공종근거 {rep.get('공종근거', '')})에 대체되어 합계에서 빠짐. "
+                                         "공고명이 달라 재공고가 아닌 별개 공사(다른 단지·구역·연도)일 수 있음 → 검토"})
             # 금액 급변 경고
             p0, p1 = _num(row.get("추정가격")), _num(rep.get("추정가격"))
             if p0 and p1 and p0 > 0:

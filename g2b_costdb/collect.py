@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import re
 from datetime import date
 from typing import Dict, Iterable, List, Optional
 
@@ -122,6 +123,9 @@ def _collect_monthly(cfg: dict, op_key: str, prefix: str, start: Optional[str], 
             path = os.path.join(raw_dir, f"{prefix}{ym}.jsonl")
             # 진행 중인 달, 또는 done.txt 에서 지워 재수집을 요청한 달(파일은 있음)은 캐시를 우회해 새로 받는다
             refresh = is_current or os.path.exists(path)
+            if refresh and purge_cache:
+                # 다시 받는 달은 전날까지 받아 둔 사본을 먼저 지운다(진행 중인 달을 날마다 받으면 날짜별 사본이 쌓임). 오늘 받은 페이지는 남겨 이어받기에 쓴다
+                client.purge_cache(op, f'"inqryBgnDt": "{bgn}"', before=date.today().isoformat())
             try:
                 rows = list(client.iter_all(op, {**(extra or {"inqryDiv": "1"}), "inqryBgnDt": bgn, "inqryEndDt": endd},
                                             cache_salt=(date.today().isoformat() if refresh else None)))
@@ -199,7 +203,8 @@ def collect_bsis_amounts(cfg: dict, start: str = None, end: str = None) -> pd.Da
 
 
 # ── 용역 입찰공고(폐기물처리 용역·건설사업관리·설계용역) ─────────────────────────────────────────────
-SERVC_KEEP_NAME = r"폐기물|건설사업관리|감리|설계\s*용역|설계\s*공모|실시\s*설계|기본\s*설계|기본\s*및\s*실시|CM\s*용역"
+SERVC_KEEP_NAME = (r"폐기물|건설사업관리|감리|설계\s*용역|설계\s*(?:제안\s*)?공모|제안\s*공모|설계안\s*공모|설계\s*경기|현상\s*설계|건축\s*설계|기획\s*설계|"
+                   r"실시\s*설계|기본\s*설계|기본\s*및\s*실시|CM\s*용역")
 SERVC_KEEP_CLASS = r"폐기물"
 
 
@@ -259,7 +264,8 @@ def probe_servc(cfg: dict, ym: str) -> None:
         print("config.yaml api.ops.servc_list 가 없습니다.")
         return
     which = ["bid_no", "bid_ord", "name", "kind", "notice_dt", "notice_inst", "demand_inst", "demand_inst_cd", "presmpt_price", "vat",
-             "servc_budget", "servc_div", "servc_class", "prespec_no", "detail_url", "attach_url_prefix", "attach_name_prefix"]
+             "servc_budget", "servc_div", "servc_class", "servc_class_mid", "servc_class_lrg", "prespec_no", "detail_url",
+             "attach_url_prefix", "attach_name_prefix"]
     try:
         body = client.call(op, {"inqryDiv": "1", "inqryBgnDt": bgn, "inqryEndDt": end, "pageNo": 1, "numOfRows": 50}, use_cache=False)
     except ApiError as e:
@@ -284,6 +290,15 @@ def probe_servc(cfg: dict, ym: str) -> None:
     kept = [it for it in items if keep(it)]
     print(f"[보존 규칙] 표본 {len(items)}건 중 {len(kept)}건이 보존 대상(공고명·조달분류 기준): "
           + "; ".join(str(it.get(f['name']))[:40] for it in kept[:5]))
+    # 보존 규칙을 넓힐지 판단할 자료: 표본의 조달분류명 분포와, 버려지는 공고 중 '설계'·'관리' 가 든 이름
+    from collections import Counter
+    ck = f.get("servc_class")
+    if ck:
+        top = Counter(str(it.get(ck) or "(없음)") for it in items).most_common(8)
+        print("[조달분류 분포] " + ", ".join(f"{n} {c}" for n, c in top))
+    lost = [str(it.get(f["name"]))[:50] for it in items if not keep(it) and re.search(r"설계|사업관리|감독|해체|철거", str(it.get(f["name"]) or ""))]
+    if lost:
+        print(f"[버려지는 공고 중 확인할 이름 {len(lost)}건] " + "; ".join(lost[:8]))
     try:
         n = int(float(total))
         pages = math.ceil(n / int(cfg["api"]["num_of_rows"]))

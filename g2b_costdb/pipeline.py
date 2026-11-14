@@ -9,7 +9,11 @@ python -m g2b_costdb.pipeline research                    # S3 시설명 재검�
 python -m g2b_costdb.pipeline dedup                       # S4 최신 공고 선별
 python -m g2b_costdb.pipeline attach                      # S5 첨부 다운로드·텍스트 추출
 python -m g2b_costdb.pipeline extract                     # S6 비용 견적만 출력 (--yes: API 호출 / --batch --yes: 배치 제출 후 --batch 로 수거 / --export → --import: 파일 인수인계)
-python -m g2b_costdb.pipeline excel                       # S7 Excel DB
+python -m g2b_costdb.pipeline extract-trades              # (선택) 2차 추출: 내역서 집계표의 공종별 금액 → 04b (실행 방식은 extract 와 같음)
+python -m g2b_costdb.pipeline extract-extra               # (선택) 보강 추출: 기타금액(한전불입금 등)·면세 문구·공사개요 세부 항목 → 01·04 (--only 전기,건축 / --limit N)
+python -m g2b_costdb.pipeline excel                       # S7 Excel DB (검증로그는 저장된 추출 결과에 현재 규칙을 다시 적용해 새로 만든다)
+python -m g2b_costdb.pipeline probe --servc --ym 2026-08  # 용역 입찰공고 오퍼레이션 시험 호출(필드명·분류명 확인)
+python -m g2b_costdb.pipeline collect --servc             # 용역 입찰공고 수집(설계·건설사업관리·폐기물처리만 보존)
 """
 from __future__ import annotations
 
@@ -29,7 +33,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from . import attachments, collect, dedup, discover, extract_llm, classify
-from .api_client import ApiError
+from .api_client import ApiError, DailyBudgetExceeded
 from .build_excel import build_workbook
 from .classify import ROOT, load_config
 
@@ -244,7 +248,9 @@ def stage_research(cfg):
         col = collect.license_name_column(cfg, lic)
     if not col and "부공종명" in hits.columns:
         from .classify import classify_trade
-        tr = [classify_trade(n, (mc or "") + (" / " + sub if sub else ""), l)
+        # 주공종명이 건축이면 주공종명만 본다('건축공사업 / 조경공사업' 이 부공종 때문에 조경이 되던 문제). 그 밖에는 주공종명 + 부공종명
+        is_arch = lambda mc: classify.match_trade_label(mc or "", classify.load_keywords()["trade_rules"]) == "건축"
+        tr = [classify_trade(n, (mc or "") if is_arch(mc) else (mc or "") + (" / " + sub if sub else ""), l)
               for n, mc, sub, l in zip(hits["공고명"], hits["주공종명"], hits["부공종명"], hits["면허제한업종"])]
         hits["공종"], hits["공종근거"] = [t[0] for t in tr], [t[1] for t in tr]
     if col:
@@ -520,14 +526,44 @@ def _error_summary(docs: dict, top: int = 8) -> str:
     return f"추출 실패 {sum(errs.values())}건의 원인 상위:\n" + "\n".join(lines)
 
 
-def _verify_and_report(cfg, latest, docs, n_ok=None, n_err=None):
-    logs = []
+def _verify_logs(cfg, latest, docs) -> List[Dict]:
+    """1차 추출 검증로그를 현재 규칙·현재 대표 공고로 만들어 logs_verify.parquet 에 저장(수거 직후와 excel 단계 양쪽에서 호출, 재과금 없음).
+    excel 때 다시 만들지 않으면 규칙이 바뀌거나(부가세 '참고' 규칙) 대표 공고가 바뀐 뒤에도 옛 로그가 06 시트에 그대로 실린다."""
+    logs: List[Dict] = []
+    seen = set()
     for _, row in latest.iterrows():
-        d = docs.get(row["공고키"], {})
-        if d and "_error" not in d:
+        k = row["공고키"]
+        d = docs.get(k, {})
+        if isinstance(d, dict) and d and "_error" not in d and k not in seen:
+            seen.add(k)                       # 복수 시설 배정 공고는 한 번만
             logs.extend(extract_llm.cross_verify(row["공고번호"], row.to_dict(), d,
                                                  cfg["verify"]["price_diff_warn_ratio"], cfg["verify"]["vat_ratio"]))
     _logs_frame(logs).to_parquet(_p(cfg, "logs_verify.parquet"), index=False)
+    return logs
+
+
+def _pending_batch_keys(cfg, state_name: str) -> set:
+    """아직 수거하지 않은 배치에 들어 있는 공고키. 즉시 호출(--yes)이 같은 공고를 한 번 더 부르지 않게(이중 과금 방지) 대상에서 뺀다."""
+    path = _p(cfg, state_name)
+    if not os.path.exists(path):
+        return set()
+    try:
+        state = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {k for b in state.get("batches", []) if b.get("status") != "ended" for k in b.get("keys", [])}
+
+
+def _skip_pending(cfg, todo: List[str], state_name: str, cmd: str) -> List[str]:
+    pend = _pending_batch_keys(cfg, state_name)
+    hit = [k for k in todo if k in pend]
+    if hit:
+        print(f"대기 중인 배치에 들어 있는 공고 {len(hit)}건은 이번 대상에서 제외합니다 — 먼저 수거:  python -m g2b_costdb.pipeline {cmd} --batch")
+    return [k for k in todo if k not in pend]
+
+
+def _verify_and_report(cfg, latest, docs, n_ok=None, n_err=None):
+    logs = _verify_logs(cfg, latest, docs)
     done = len([k for k in latest["공고키"] if k in docs and "_error" not in docs[k]])
     usage_in = sum((d.get("_usage_in") or 0) for d in docs.values() if isinstance(d, dict))
     usage_out = sum((d.get("_usage_out") or 0) for d in docs.values() if isinstance(d, dict))
@@ -688,6 +724,7 @@ def stage_extract(cfg, yes: bool = False, batch: bool = False, export: bool = Fa
         print("결과 수거:  python -m g2b_costdb.pipeline extract --batch")
         return
 
+    todo = _skip_pending(cfg, todo, "llm_batch.json", "extract")
     _print_estimate(cfg, texts, todo, docs, latest)
     if not yes:
         print("실제 추출을 실행하려면:  python -m g2b_costdb.pipeline extract --yes   (50% 저렴한 배치: extract --batch --yes / 파일 인수인계: extract --export)")
@@ -976,6 +1013,7 @@ def stage_extract_trades(cfg, yes: bool = False, batch: bool = False, limit: Opt
         print(f"2차 배치 {len(submitted)}개 제출 (공고 {len(todo)}건). 결과 수거:  python -m g2b_costdb.pipeline extract-trades --batch   (또는 extract --batch --trades)")
         return
 
+    todo[:] = _skip_pending(cfg, todo, "llm_trades_batch.json", "extract-trades")
     _estimate(False)
     _save_docs(cache_path, tdocs)
     if not todo:
@@ -1010,6 +1048,7 @@ def _extra_logs(cfg, latest, docs: dict, xdocs: dict) -> List[Dict]:
     """보강 추출 검증로그를 현재 규칙으로 만들어 logs_extra.parquet 에 저장(수거 직후와 excel 단계 양쪽에서 호출, 재과금 없음)."""
     logs: List[Dict] = []
     seen = set()
+    xdocs = _renormalize_extra(xdocs)
     for _, row in latest.iterrows():
         k = row["공고키"]
         x = xdocs.get(k)
@@ -1018,6 +1057,10 @@ def _extra_logs(cfg, latest, docs: dict, xdocs: dict) -> List[Dict]:
         seen.add(k)
         d = docs.get(k) or {}
         logs.extend(extract_llm.cross_verify_extra(row["공고번호"], row.to_dict(), {} if "_error" in d else d, x))
+    for (pid, k), keep in _etc_duplicates(latest, docs, xdocs).items():
+        no = str(latest.loc[latest["공고키"] == k, "공고번호"].iloc[0])
+        logs.append({"공고번호": no, "항목": "기타금액 중복 가능", "문서값": extract_llm._num(xdocs[k].get("기타금액_원")), "판정": "참고",
+                     "비고": f"{pid}: 같은 프로젝트의 공고 {keep} 와 같은 기타금액 → 이 공고의 금액은 합계에서 제외(이중계산 방지). 서로 다른 항목이면 04 '기타금액_판정' 확인"})
     _logs_frame(logs).to_parquet(_p(cfg, "logs_extra.parquet"), index=False)
     return logs
 
@@ -1049,12 +1092,19 @@ def stage_extract_extra(cfg, yes: bool = False, batch: bool = False, limit: Opti
     xdocs = json.load(open(cache_path, encoding="utf-8")) if os.path.exists(cache_path) else {}
     env, model = cfg["llm"].get("api_key_env", "ANTHROPIC_API_KEY"), cfg["llm"].get("model", "")
     max_chars = int(cfg["llm"].get("extra_max_input_chars", extract_llm.EXTRA_INPUT_CHARS))
-    trades = [t.strip() for t in str(only or "").split(",") if t.strip()]
+    alias = {"통신": "정보통신", "기계": "기계설비", "설비": "기계설비"}
+    trades = list(dict.fromkeys(alias.get(t.strip(), t.strip()) for t in re.split(r"[,·ㆍ/\s]+", str(only or "")) if t.strip()))
+    known = ["건축", "전기", "정보통신", "소방", "기계설비", "토목", "조경", "기타"]
+    bad = [t for t in trades if t not in known]
+    if bad:
+        raise SystemExit(f"--only 의 공종 이름을 알 수 없습니다: {', '.join(bad)}. 쓸 수 있는 이름: {', '.join(known)} (쉼표로 여러 개, 예: --only 전기,건축)")
     pool = latest[latest["공종"].astype(str).isin(trades)] if trades else latest
     # 건축 공종을 먼저, 그 안에서 추정가격 큰 순(--limit 시범 추출이 공사개요가 있는 본공사부터 되도록)
     order = pool.assign(_amt=pd.to_numeric(pool["추정가격"], errors="coerce").fillna(0), _arch=(pool["공종"].astype(str) == "건축").astype(int))
     keys = list(dict.fromkeys(order.sort_values(["_arch", "_amt"], ascending=[False, False])["공고키"]))
     todo = [k for k in keys if texts.get(k) and not (k in xdocs and "_error" not in xdocs[k])]
+    if not batch:                                     # 즉시 호출: 수거 전 배치에 든 공고는 빼고(이중 과금 방지) 그다음에 --limit 을 적용
+        todo = _skip_pending(cfg, todo, "llm_extra_batch.json", "extract-extra")
     if limit:
         todo = todo[:int(limit)]
     hints = {r["공고키"]: {"공고번호": r["공고번호"], "공고명": r["공고명"], "수요기관": r["수요기관"], "공종": r["공종"]} for _, r in latest.iterrows()}
@@ -1158,6 +1208,14 @@ def stage_extract_extra(cfg, yes: bool = False, batch: bool = False, limit: Opti
     _extra_report(cfg, latest, docs, xdocs, n_ok, n_err)
 
 
+def _renormalize_extra(xdocs: dict) -> dict:
+    """저장된 보강 추출 결과에 현재 정규화 규칙을 다시 적용(재과금 없음): 단위가 붙어 비워졌던 숫자('_raw')를 다시 해석하고 위치 표기를 정리한다."""
+    out = {}
+    for k, x in (xdocs or {}).items():
+        out[k] = extract_llm.normalize_extra_doc(x) if (isinstance(x, dict) and "_error" not in x) else x
+    return out
+
+
 def _renormalize_trades(tdocs: dict) -> dict:
     """저장된 2차 결과에 현재 라벨 규칙을 다시 적용(재과금 없음): '도급비(건축, 토목, 기계)' 같은 합산 행은 '합계' 로, 라벨 밖 공종명은 매핑."""
     out = {}
@@ -1227,22 +1285,67 @@ def assemble_trade_detail_table(latest: pd.DataFrame, tdocs: dict) -> pd.DataFra
 
 def _etc_decision(etc, where: str, api_row: Dict, doc: Dict) -> str:
     """기타금액(한전불입금·분담금 등)을 금액 합계에 더할지. 문서가 도급·관급과 '별도' 로 적었으면 가산, 관급·추정가격에 포함이라 적었거나
-    관급 금액과 같은 값이면(발주기관이 한전불입금을 관급 칸에 넣은 사례) 제외 — 이중계산 방지."""
-    v = extract_llm._num(etc)
+    관급 금액과 같은 값이면(발주기관이 한전불입금을 관급 칸에 넣은 사례) 제외 — 이중계산 방지.
+    추정가격·기초금액·부가세·총공사금액·예산과 같은 값이거나 기초금액의 30% 를 넘는 값은 다른 금액을 잘못 읽은 것으로 보고 더하지 않는다(확인 필요)."""
+    num = extract_llm._num
+    v = num(etc)
     if not v:
         return ""
-    gov = [extract_llm._num(api_row.get(k)) for k in ("도급자관급액_API", "관급자관급액_API", "관급자재_API")] + \
-          [extract_llm._num(doc.get(k)) for k in ("도급자관급액_원", "관급자관급액_원")]
-    if any(g and abs(g - v) <= max(1.0, v * 0.001) for g in gov):
+    same = lambda g: bool(g) and abs(g - v) <= max(1.0, v * 0.001)
+    gov = [num(api_row.get(k)) for k in ("도급자관급액_API", "관급자관급액_API", "관급자재_API")] + \
+          [num(doc.get(k)) for k in ("도급자관급액_원", "관급자관급액_원")]
+    if any(same(g) for g in gov):
         return "제외(관급 금액과 같은 값 — 이중계산 방지)"
-    w = str(where or "").replace(" ", "")
-    if "관급" in w:
-        return "제외(문서: 관급에 포함)"
-    if "추정가격" in w or "도급" in w:
-        return "제외(문서: 추정가격에 포함)"
-    if "별도" in w:
+    main = {"추정가격": [num(api_row.get("추정가격")), num(doc.get("추정가격_원"))], "기초금액": [num(api_row.get("기초금액")), num(doc.get("기초금액_원"))],
+            "부가세": [num(api_row.get("부가세_API")), num(doc.get("부가가치세_원"))], "총공사금액": [num(doc.get("총공사금액_원")), num(doc.get("설계금액_원"))],
+            "예산금액": [num(api_row.get("예산금액"))]}
+    for name, vals in main.items():
+        if any(same(g) for g in vals):
+            return f"제외(확인 필요: {name}과 같은 값 — 오독 의심)"
+    base = num(api_row.get("기초금액")) or num(doc.get("기초금액_원")) or (num(api_row.get("추정가격")) or num(doc.get("추정가격_원")) or 0) * 1.1
+    if base and v > base * extract_llm.ETC_MAX_SHARE:
+        return f"제외(확인 필요: 기초금액의 {extract_llm.ETC_MAX_SHARE:.0%} 초과 — 오독 의심)"
+    w = extract_llm._etc_where(where)                 # 표기 변형('관급 포함', '도급액에 포함', '도급액 별도')을 뜻에 맞게 정리
+    if w == "별도":
         return "가산(문서: 별도 금액)"
+    if w == "관급에포함":
+        return "제외(문서: 관급에 포함)"
+    if w == "추정가격에포함":
+        return "제외(문서: 추정가격에 포함)"
     return "가산(위치 불명 — 확인 필요)"
+
+
+def _etc_duplicates(latest: pd.DataFrame, docs: dict, extra: dict) -> Dict[Tuple[str, str], str]:
+    """한 프로젝트의 여러 공고(예: 건축 공고문의 사업비 표와 전기 공고문)가 같은 기타금액을 읽은 경우 하나만 더한다.
+    반환 {(프로젝트ID, 제외할 공고키): 남기는 공고키}. 남기는 공고 = 항목에 '한전'이 있으면 전기 공고, 아니면 건축 공고, 그다음 목록 순서."""
+    out: Dict[Tuple[str, str], str] = {}
+    if latest is None or latest.empty or not extra:
+        return out
+    for pid, g in latest.groupby("프로젝트ID"):
+        cand = []
+        for _, r in g.drop_duplicates("공고키").iterrows():
+            k = r["공고키"]
+            x, d = extra.get(k) or {}, docs.get(k) or {}
+            if not isinstance(x, dict) or "_error" in x:
+                continue
+            d = {} if (not isinstance(d, dict) or "_error" in d) else d
+            v = extract_llm._num(x.get("기타금액_원"))
+            if v and _etc_decision(v, x.get("기타금액_위치"), r.to_dict(), d).startswith("가산"):
+                cand.append((k, v, str(r["공종"]), str(x.get("기타금액_항목") or "")))
+        used = set()
+        for i, (k, v, trade, item) in enumerate(cand):
+            if k in used:
+                continue
+            grp = [c for c in cand[i:] if c[0] not in used and abs(c[1] - v) <= max(1.0, v * 0.001)]
+            used.update(c[0] for c in grp)
+            if len(grp) < 2:
+                continue
+            want = "전기" if any("한전" in c[3] for c in grp) else "건축"
+            keep = next((c for c in grp if c[2] == want), None) or next((c for c in grp if c[2] == "건축"), None) or grp[0]
+            for c in grp:
+                if c[0] != keep[0]:
+                    out[(str(pid), c[0])] = keep[0]
+    return out
 
 
 def assemble_trade_table(latest: pd.DataFrame, docs: dict, texts: Optional[dict] = None, extra: Optional[dict] = None) -> pd.DataFrame:
@@ -1250,15 +1353,17 @@ def assemble_trade_table(latest: pd.DataFrame, docs: dict, texts: Optional[dict]
     extra = 보강 추출(llm_extra.json): 기타금액·면세 문구."""
     rows = []
     texts, extra = texts or {}, extra or {}
+    dup = _etc_duplicates(latest, docs, extra)
     for _, r in latest.iterrows():
         d = docs.get(r["공고키"], {}) or {}
-        if "_error" in d:
+        if not isinstance(d, dict) or "_error" in d:
             d = {}
         x = extra.get(r["공고키"], {}) or {}
-        if "_error" in x:
+        if not isinstance(x, dict) or "_error" in x:
             x = {}
-        ev = dict(d.get("근거문구") or {})
-        ev.update({f"[보강]{k}": v for k, v in (x.get("근거문구") or {}).items()})
+        raw_ev, raw_xev = d.get("근거문구"), x.get("근거문구")       # 옛 추출 결과는 근거문구가 문자열·배열일 수 있다 → 그대로 '원문' 으로
+        ev = dict(raw_ev) if isinstance(raw_ev, dict) else ({"원문": raw_ev} if raw_ev else {})
+        ev.update({f"[보강]{k}": v for k, v in (raw_xev.items() if isinstance(raw_xev, dict) else ([("원문", raw_xev)] if raw_xev else []))})
         inc_api = classify.included_trades(r.get("주공종명"), r.get("부공종명"), r["공종"])
         inc_doc, inc_src = classify.normalize_trade_list(d.get("포함공종_문서") or ""), "LLM"
         if not inc_doc:
@@ -1281,7 +1386,9 @@ def assemble_trade_table(latest: pd.DataFrame, docs: dict, texts: Optional[dict]
             "부가세_문서": d.get("부가가치세_원"),
             "도급자관급액_문서": d.get("도급자관급액_원"), "관급자관급액_문서": d.get("관급자관급액_원"),
             "기타금액_문서": x.get("기타금액_원"), "기타금액_항목_문서": x.get("기타금액_항목") or "",
-            "기타금액_판정": _etc_decision(x.get("기타금액_원"), x.get("기타금액_위치"), r.to_dict(), d),
+            "기타금액_판정": (f"제외(같은 프로젝트의 공고 {dup[(str(r['프로젝트ID']), r['공고키'])]} 와 같은 금액 — 이중계산 방지)"
+                              if (str(r["프로젝트ID"]), r["공고키"]) in dup
+                              else _etc_decision(x.get("기타금액_원"), x.get("기타금액_위치"), r.to_dict(), d)),
             "면세_문구_문서": x.get("면세_문구") or "",
             "공사기간_일_문서": d.get("공사기간_일"), "추정가격_문서": d.get("추정가격_원"), "기초금액_문서": d.get("기초금액_원"),
             "신뢰도": d.get("신뢰도"), "근거문구": json.dumps(ev, ensure_ascii=False) if ev else "",
@@ -1298,6 +1405,18 @@ FAC_EXTRA_COLS = {"조경면적_m2": "조경면적_m2", "건폐율_pct": "건폐
 
 def _empty(v) -> bool:
     return v is None or v == "" or (isinstance(v, float) and v != v)
+
+
+# 0 이 '값 없음' 인 열(면적·비율·높이·대수·기간). 지하층수·지상층수는 0 이 실제 값일 수 있어 제외
+_ZERO_EMPTY_COLS = {"연면적_m2", "건축면적_m2", "대지면적_m2", "조경면적_m2", "건폐율_pct", "용적률_pct", "기준층층고_m", "최고높이_m",
+                    "주차대수", "세대수", "공사기간_일"}
+
+
+def _blank(c: str, v) -> bool:
+    """01 공사개요 칸을 비어 있다고 볼지: None·''·NaN, 그리고 면적·대수 열의 0(1차 추출이 0 으로 적은 값이 보강 값을 막지 않게)."""
+    if _empty(v):
+        return True
+    return c in _ZERO_EMPTY_COLS and extract_llm._num(v) == 0
 
 
 def enrich_facility(fac: pd.DataFrame, latest: pd.DataFrame, docs: dict, extra: Optional[dict] = None) -> pd.DataFrame:
@@ -1325,12 +1444,12 @@ def enrich_facility(fac: pd.DataFrame, latest: pd.DataFrame, docs: dict, extra: 
             x = {} if "_error" in x else x
             used = False
             for c in cols:
-                if not _empty(fac.at[i, c]):
+                if not _blank(c, fac.at[i, c]):
                     continue
                 v = d.get(c) if c in FAC_BASE_COLS else None
-                if _empty(v):
+                if _blank(c, v):
                     v = x.get(FAC_EXTRA_COLS.get(c, c))
-                if not _empty(v):
+                if not _blank(c, v):
                     fac.at[i, c] = v
                     used = True
             if _empty(fac.at[i, "현장위치"]) and not _empty(d.get("공사위치")):
@@ -1358,10 +1477,12 @@ def stage_excel(cfg):
     docs = json.load(open(docs_path, encoding="utf-8")) if os.path.exists(docs_path) else {}
     tpath = _p(cfg, "llm_trades.json")
     tdocs = json.load(open(tpath, encoding="utf-8")) if os.path.exists(tpath) else {}
+    if docs:
+        _verify_logs(cfg, latest, docs)        # 1차 검증로그도 현재 규칙·현재 대표 공고 기준으로 새로 만든다(규칙 변경·대표 교체 뒤 옛 로그가 남지 않게)
     if tdocs:
         _trade_logs(cfg, latest, tdocs)        # 2차 검증로그는 저장된 결과에 현재 규칙을 다시 적용해 새로 만든다(수거 때 로그가 옛 규칙일 수 있음)
     xpath = _p(cfg, "llm_extra.json")
-    extra = json.load(open(xpath, encoding="utf-8")) if os.path.exists(xpath) else {}
+    extra = _renormalize_extra(json.load(open(xpath, encoding="utf-8")) if os.path.exists(xpath) else {})
     if extra:
         _extra_logs(cfg, latest, docs, extra)  # 보강 추출 검증로그도 현재 규칙으로 다시 만든다
     log_names = ("logs_dedup.parquet", "logs_verify.parquet") + (("logs_trades.parquet",) if tdocs else ()) \
@@ -1419,7 +1540,12 @@ def main(argv=None):
     if a.stage == "doctor":
         stage_doctor(cfg)
     elif a.stage == "probe":
-        collect.probe_servc(cfg, a.ym) if a.servc else collect.probe(cfg, a.ym)
+        try:
+            collect.probe_servc(cfg, a.ym) if a.servc else collect.probe(cfg, a.ym)
+        except DailyBudgetExceeded as e:
+            print(f"[중단] 오늘 API 호출 예산을 다 썼습니다({e}). 내일 같은 명령으로 다시 실행하세요.")
+        except RuntimeError as e:
+            print(f"[중단] API 에 연결하지 못했습니다: {str(e)[:300]}\n  네트워크 상태를 확인하고 잠시 뒤 다시 실행하세요(python -m g2b_costdb.pipeline doctor 로 점검).")
     elif a.stage == "collect" and a.servc:
         collect.collect_servc(cfg)
     elif a.stage == "extract":

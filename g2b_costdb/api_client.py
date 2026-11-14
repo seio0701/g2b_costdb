@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Dict, Iterator, List, Optional
-from urllib.parse import unquote
+from urllib.parse import quote, quote_plus, unquote
 
 import requests
 
@@ -235,16 +235,29 @@ class G2BClient:
                 raise
             except (requests.RequestException, RuntimeError, ValueError) as e:
                 last_err = e
-                log.warning("호출 실패(%d/%d) op=%s params=%s err=%s", attempt, self.cfg.max_retries, op, p, e)
+                log.warning("호출 실패(%d/%d) op=%s params=%s err=%s", attempt, self.cfg.max_retries, op, p, self._scrub(e))
                 if attempt < self.cfg.max_retries:
                     time.sleep(delay)
                     delay = min(delay * 2, 60)
-        raise RuntimeError(f"재시도 소진 op={op} params={p}: {last_err}")
+        raise RuntimeError(f"재시도 소진 op={op} params={p}: {self._scrub(last_err)}")
 
-    def purge_cache(self, op: str, contains: str) -> int:
+    def _scrub(self, text) -> str:
+        """오류 문구에서 인증키를 가린다. 연결 오류 메시지에는 요청 URL(serviceKey=… 포함)이 그대로 들어 있어, 화면·로그에 키가 찍히지 않게 한다."""
+        s = str(text)
+        k = self.cfg.service_key or ""
+        for v in {k, quote(k, safe=""), quote_plus(k)}:
+            if v:
+                s = s.replace(v, "***")
+        return re.sub(r"(serviceKey=)[^&\s'\")]+", r"\1***", s, flags=re.I)
+
+    def purge_cache(self, op: str, contains: str, before: Optional[str] = None) -> int:
         """op 의 응답 캐시 중 요청 파라미터에 contains 가 든 행을 지운다. 용역 전수 수집처럼 응답은 크고 보존하는 행은 적을 때,
-        한 달을 다 받아 저장한 뒤 그 달의 캐시를 비워 cache.sqlite 가 불어나지 않게 한다(달 중간에 끊기면 캐시가 남아 이어받기 가능)."""
-        cur = self.conn.execute("DELETE FROM cache WHERE op=? AND params LIKE ?", (op, f"%{contains}%"))
+        한 달을 다 받아 저장한 뒤 그 달의 캐시를 비워 cache.sqlite 가 불어나지 않게 한다(달 중간에 끊기면 캐시가 남아 이어받기 가능).
+        before('YYYY-MM-DD'): 그 날짜 이전에 받은 행만 지운다 — 진행 중인 달을 날마다 다시 받을 때 전날까지의 사본을 지우고 오늘 받은 페이지는 남긴다."""
+        if before:
+            cur = self.conn.execute("DELETE FROM cache WHERE op=? AND params LIKE ? AND fetched_at < ?", (op, f"%{contains}%", before))
+        else:
+            cur = self.conn.execute("DELETE FROM cache WHERE op=? AND params LIKE ?", (op, f"%{contains}%"))
         self.conn.commit()
         return int(cur.rowcount or 0)
 
