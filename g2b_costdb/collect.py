@@ -97,8 +97,10 @@ def _write_done(path: str, done: set) -> None:
 
 
 def _collect_monthly(cfg: dict, op_key: str, prefix: str, start: Optional[str], end: Optional[str],
-                     base_url: Optional[str] = None, op_name: Optional[str] = None, extra: Optional[dict] = None) -> pd.DataFrame:
-    """월 단위 전량 수집 공통 루틴. 반환: 누적 원문 DataFrame(문자열화)."""
+                     base_url: Optional[str] = None, op_name: Optional[str] = None, extra: Optional[dict] = None,
+                     row_filter=None, purge_cache: bool = False) -> pd.DataFrame:
+    """월 단위 전량 수집 공통 루틴. 반환: 누적 원문 DataFrame(문자열화).
+    row_filter: 저장할 행만 고르는 함수(용역 공고처럼 대부분이 무관한 경우). purge_cache: 완료한 달의 응답 캐시를 비움."""
     client = make_client(cfg, base_url)
     op = op_name or cfg["api"]["ops"][op_key]
     raw_dir = cfg["paths"]["raw_dir"]
@@ -133,14 +135,20 @@ def _collect_monthly(cfg: dict, op_key: str, prefix: str, start: Optional[str], 
                 log.warning("월 %s 수집 실패(건너뜀): %s", ym, e)
                 failed.append(ym)
                 continue
+            n_all = len(rows)
+            if row_filter is not None:
+                rows = [r for r in rows if row_filter(r)]
             if os.path.exists(path):
                 os.remove(path)
             n = _append_jsonl(path, rows)
-            log.info("%s %s: %d건%s", op, ym, n, " (진행 중인 달 — 완료 표시 안 함)" if is_current else "")
+            log.info("%s %s: %s%d건%s", op, ym, f"전체 {n_all:,}건 중 보존 " if row_filter is not None else "", n,
+                     " (진행 중인 달 — 완료 표시 안 함)" if is_current else "")
             collected.append(ym)
             if not is_current:
                 done.add(ym)
                 _write_done(done_marker, done)
+                if purge_cache:
+                    client.purge_cache(op, f'"inqryBgnDt": "{bgn}"')
     except DailyBudgetExceeded as e:
         log.warning("%s → 내일 같은 명령으로 재개하면 완료된 월은 건너뜁니다. (오늘 호출 %d회)", e, client.calls_today())
     except ApiError as e:
@@ -188,6 +196,117 @@ def collect_bsis_amounts(cfg: dict, start: str = None, end: str = None) -> pd.Da
         df.to_parquet(os.path.join(cfg["paths"]["data_dir"], "bsis_all.parquet"), index=False)
     log.info("누적 기초금액 %d건 → bsis_all.parquet", len(df))
     return df
+
+
+# ── 용역 입찰공고(폐기물처리 용역·건설사업관리·설계용역) ─────────────────────────────────────────────
+SERVC_KEEP_NAME = r"폐기물|건설사업관리|감리|설계\s*용역|설계\s*공모|실시\s*설계|기본\s*설계|기본\s*및\s*실시|CM\s*용역"
+SERVC_KEEP_CLASS = r"폐기물"
+
+
+def servc_period(cfg: dict) -> tuple:
+    """용역 수집 기간: config servc.period_start(없으면 공사 수집 시작월) ~ servc.period_end(없으면 오늘이 속한 달 — 폐기물처리 용역은 공사 뒤에 발주)."""
+    sv = cfg.get("servc") or {}
+    return (str(sv.get("period_start") or cfg["period"]["start"]), str(sv.get("period_end") or date.today().strftime("%Y-%m")))
+
+
+def servc_keep_filter(cfg: dict):
+    """용역 공고 중 보존할 행: 공고명이 keep_name_regex 에 걸리거나 공공조달분류명이 keep_class_regex 에 걸리는 공고.
+    용역 공고는 월 1.5만~2.5만 건이고 대부분(청소·경비·전산 등)이 무관하므로 관련 공고만 원문으로 남긴다."""
+    import re
+    sv = cfg.get("servc") or {}
+    f = cfg["fields"]
+    name_re = re.compile(sv.get("keep_name_regex") or SERVC_KEEP_NAME)
+    cls_re = re.compile(sv.get("keep_class_regex") or SERVC_KEEP_CLASS)
+    name_k = f["name"]
+    cls_keys = [f.get(k) for k in ("servc_class", "servc_class_mid", "servc_class_lrg") if f.get(k)]
+
+    def keep(row: dict) -> bool:
+        if name_re.search(str(row.get(name_k) or "")):
+            return True
+        return any(cls_re.search(str(row.get(k) or "")) for k in cls_keys)
+    return keep
+
+
+def collect_servc(cfg: dict, start: str = None, end: str = None) -> pd.DataFrame:
+    """용역 입찰공고 목록을 월 단위로 받아 관련 공고(폐기물·건설사업관리·설계)만 data/raw/servc_YYYYMM.jsonl + data/servc_all.parquet 에 저장.
+    공사 수집과 같은 서비스·같은 인증키. 호출량이 크므로(월 15~26회, 전 기간 약 1,300~2,400회) 일일 예산 안에서 여러 날에 걸쳐 이어받는다."""
+    if "servc_list" not in (cfg["api"].get("ops") or {}):
+        raise SystemExit("config.yaml api.ops.servc_list 가 없습니다(용역 입찰공고 목록 오퍼레이션명).")
+    s0, e0 = servc_period(cfg)
+    df = _collect_monthly(cfg, "servc_list", "servc_", start or s0, end or e0, row_filter=servc_keep_filter(cfg), purge_cache=True)
+    os.makedirs(cfg["paths"]["data_dir"], exist_ok=True)
+    if not df.empty:
+        f = cfg["fields"]
+        df["_presmpt_price"] = (df[f["presmpt_price"]] if f["presmpt_price"] in df.columns
+                                else pd.Series([None] * len(df), index=df.index)).map(parse_amount)
+        df.to_parquet(os.path.join(cfg["paths"]["data_dir"], "servc_all.parquet"), index=False)
+        name = df[f["name"]].astype(str) if f["name"] in df.columns else pd.Series([""] * len(df))
+        log.info("누적 용역 공고(보존분) %d건 → servc_all.parquet (공고명 '폐기물' %d건, '건설사업관리·감리' %d건, '설계' %d건)", len(df),
+                 int(name.str.contains("폐기물").sum()), int(name.str.contains("건설사업관리|감리").sum()), int(name.str.contains("설계").sum()))
+    else:
+        log.info("누적 용역 공고(보존분) 0건")
+    return df
+
+
+def probe_servc(cfg: dict, ym: str) -> None:
+    """용역 입찰공고 오퍼레이션 시험 호출(2~3회): 응답 필드·표본, config 매핑 대조, 한 달 건수로 전 기간 호출 수 추정, 공고명 검색(PPSSrch) 동작 확인."""
+    client = make_client(cfg)
+    bgn, end = G2BClient.month_ranges(ym, ym)[0]
+    f = cfg["fields"]
+    ops = cfg["api"].get("ops") or {}
+    op = ops.get("servc_list")
+    if not op:
+        print("config.yaml api.ops.servc_list 가 없습니다.")
+        return
+    which = ["bid_no", "bid_ord", "name", "kind", "notice_dt", "notice_inst", "demand_inst", "demand_inst_cd", "presmpt_price", "vat",
+             "servc_budget", "servc_div", "servc_class", "prespec_no", "detail_url", "attach_url_prefix", "attach_name_prefix"]
+    try:
+        body = client.call(op, {"inqryDiv": "1", "inqryBgnDt": bgn, "inqryEndDt": end, "pageNo": 1, "numOfRows": 50}, use_cache=False)
+    except ApiError as e:
+        print(f"\n=== {op} ({ym}) 실패: API 오류 {e.code} ({explain_code(e.code)}) — 공공데이터포털 마이페이지에서 「조달청_나라장터 입찰공고정보서비스」 활용신청의 "
+              f"상세기능에 용역 오퍼레이션이 포함돼 있는지, 오퍼레이션명(config api.ops.servc_list)이 맞는지 확인")
+        return
+    items = client._items(body)
+    total = body.get("totalCount")
+    print(f"\n=== {op} ({ym}) totalCount={total} 표본 {len(items)}건 ===")
+    if not items:
+        print("항목 없음 — 다른 달(--ym)로 다시 시도하세요.")
+        return
+    keys = sorted(set().union(*[it.keys() for it in items]))
+    print("필드:", keys)
+    print("표본:", json.dumps(items[0], ensure_ascii=False, indent=1)[:2500])
+    missing = _check_mapping(f, keys, [k for k in which if k in f])
+    if missing:
+        print("[매핑 확인 필요] config.yaml fields 중 용역 응답에 없는 항목:", {k: f[k] for k in missing})
+    else:
+        print("[매핑 OK] config.yaml fields 의 용역 관련 항목이 모두 응답에 존재합니다.")
+    keep = servc_keep_filter(cfg)
+    kept = [it for it in items if keep(it)]
+    print(f"[보존 규칙] 표본 {len(items)}건 중 {len(kept)}건이 보존 대상(공고명·조달분류 기준): "
+          + "; ".join(str(it.get(f['name']))[:40] for it in kept[:5]))
+    try:
+        n = int(float(total))
+        pages = math.ceil(n / int(cfg["api"]["num_of_rows"]))
+        s0, e0 = servc_period(cfg)
+        months = len(G2BClient.month_ranges(s0, e0))
+        print(f"[호출 수 추정] {ym} 한 달 {n:,}건 = {pages}회. 수집 기간 {s0}~{e0}({months}개월)을 같은 규모로 보면 약 {pages * months:,}회 "
+              f"→ 일 {cfg['api']['daily_call_budget']}회 예산으로 약 {math.ceil(pages * months / int(cfg['api']['daily_call_budget']))}일(공사 수집과 예산을 함께 씀)")
+    except (TypeError, ValueError):
+        print("[호출 수 추정] totalCount 가 없어 추정하지 못했습니다.")
+    sop = ops.get("servc_search")
+    if sop:
+        try:
+            b2 = client.call(sop, {"inqryDiv": "1", "inqryBgnDt": bgn, "inqryEndDt": end, f["name"]: "폐기물", "pageNo": 1, "numOfRows": 5}, use_cache=False)
+            it2 = client._items(b2)
+            print(f"\n=== {sop} 공고명 '폐기물' ({ym}) totalCount={b2.get('totalCount')} 표본 {len(it2)}건 ===")
+            for it in it2[:5]:
+                print("  -", str(it.get(f["name"]))[:70], "|", it.get(f["demand_inst"]), "| 추정가격", it.get(f["presmpt_price"]),
+                      "|", it.get(f.get("servc_class", ""), ""))
+            print("[검색] 공고명 검색이 동작하면 totalCount 가 위 전체 건수보다 훨씬 작습니다(같으면 검색 조건이 무시된 것).")
+        except ApiError as e:
+            print(f"\n=== {sop} 실패: API 오류 {e.code} ({explain_code(e.code)}) — 검색 오퍼레이션은 참고용이라 수집에는 영향 없음")
+    print(f"\n오늘 API 호출 {client.calls_today()}회 (예산 {cfg['api']['daily_call_budget']})")
+    print("다음: python -m g2b_costdb.pipeline collect --servc   (여러 날에 걸쳐 같은 명령으로 이어받기)")
 
 
 def collect_awards(cfg: dict, start: str = None, end: str = None) -> pd.DataFrame:

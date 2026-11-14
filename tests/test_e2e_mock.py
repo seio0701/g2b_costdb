@@ -97,6 +97,7 @@ def run():
     cfg["api"]["use_awards"] = True                                 # 낙찰정보서비스(별도 End Point) 경로도 검증
     cfg["api"]["award_base_url"] = base + "/ScsbidInfoService"
     cfg["period"] = {"start": "2024-01", "end": "2024-04"}          # 2024-04 는 데이터 없음(03) 경로
+    cfg["servc"]["period_end"] = "2024-04"                           # 용역 수집 기간(비우면 오늘이 속한 달까지 — 테스트에서는 고정)
     cfg["paths"] = {"data_dir": "data", "raw_dir": "data/raw", "cache_db": "data/cache.sqlite", "text_dir": "data/text",
                     "files_dir": "data/files", "out_dir": "output", "excel_name": "공사비DB.xlsx"}
     cfg_path = os.path.join(tmp, "config.yaml")
@@ -114,6 +115,24 @@ def run():
         out = _run(["probe", "--ym", "2024-01", "--config", cfg_path])
         assert out.count("[매핑 OK]") == 2 and "후보 lcnsLmtNm 발견" in out, out
         assert "[award_amt] OK" in out and "[award_rate] OK" in out and "[낙찰정보] 기간 조회 파라미터 {'inqryDiv': '1'}" in out, out
+        # 1-2) 용역 공고(같은 서비스의 용역 오퍼레이션): probe --servc → collect --servc. 폐기물·건설사업관리만 보존, 무관한 청소 용역은 버림
+        out = _run(["probe", "--servc", "--ym", "2024-03", "--config", cfg_path])
+        assert "getBidPblancListInfoServc (2024-03) totalCount=4" in out and "[매핑 OK]" in out and "표본 4건 중 3건이 보존 대상" in out, out
+        assert "공고명 '폐기물' (2024-03) totalCount=1" in out and "[호출 수 추정]" in out, out
+        calls0 = server.calls["getBidPblancListInfoServc"]
+        out = _run(["collect", "--servc", "--config", cfg_path])
+        sv = pd.read_parquet(data("servc_all.parquet"))
+        assert sorted(sv["bidNtceNo"]) == ["R24S00001", "R24S00002", "R24S00004"], sv["bidNtceNm"].tolist()
+        assert set(open(data("raw", "servc_done.txt")).read().split()) == {"202401", "202402", "202403", "202404"}
+        assert server.calls["getBidPblancListInfoServc"] - calls0 == 4, "월 1회씩 4개월"
+        assert not os.path.exists(data("notices_all.parquet")), "collect --servc 는 공사 수집을 하지 않는다"
+        import sqlite3
+        con = sqlite3.connect(data("cache.sqlite"))
+        assert con.execute("SELECT COUNT(*) FROM cache WHERE op='getBidPblancListInfoServc' AND params LIKE '%inqryBgnDt%'").fetchone()[0] == 0, "완료한 달의 용역 응답 캐시는 비운다"
+        con.close()
+        calls1 = server.calls["getBidPblancListInfoServc"]
+        _run(["collect", "--servc", "--config", cfg_path])
+        assert server.calls["getBidPblancListInfoServc"] == calls1, "완료한 달은 다시 호출하지 않는다"
         # 2) collect — 4개월(1개월은 NODATA), done.txt, parquet
         out = _run(["collect", "--config", cfg_path])
         notices = pd.read_parquet(data("notices_all.parquet"))

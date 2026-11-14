@@ -180,7 +180,21 @@ def build_dataset(base: str) -> Dict:
         "야외공연장_공고문.hwpx": (_hwpx(["가상시 야외공연장 조성공사 입찰공고", "규모: 객석 1,200석, 연면적 2,400㎡, 지상2층",
                                        "추정가격 5,000,000,000원 / 기초금액 5,500,000,000원", "공사기간 540일"]), "application/octet-stream"),
     }
-    return {"notices": N, "bsis": bsis, "license": lic, "files": files, "awards": awards}
+    # 용역 입찰공고(폐기물처리 용역·건설사업관리·설계 + 무관한 청소 용역) — 공사와 같은 서비스의 다른 오퍼레이션
+    sv = lambda **kw: dict(dict(bidNtceOrd="000", ntceKindNm="등록공고", reNtceYn="N", rgstTyNm="조달청 또는 나라장터 자체 공고건", ntceInsttNm="가상군",
+                                dminsttNm="가상군", dminsttCd="4790000", VAT="", asignBdgtAmt="", srvceDivNm="일반용역", pubPrcrmntLrgClsfcNm="",
+                                pubPrcrmntMidClsfcNm="", pubPrcrmntClsfcNm="", bfSpecRgstNo="", bidNtceDtlUrl="https://example.invalid/servc",
+                                ntceSpecDocUrl1="", ntceSpecFileNm1=""), **kw)
+    servc = [
+        sv(bidNtceNo="R24S00001", bidNtceNm="가상군 문화예술회관 건립공사 건설폐기물 처리용역", bidNtceDt="2024-03-20 10:00:00", presmptPrce="129834000",
+           VAT="12983400", asignBdgtAmt="142817400", pubPrcrmntLrgClsfcNm="폐기물 처리 및 재활용서비스", pubPrcrmntClsfcNm="건설폐기물처리서비스"),
+        sv(bidNtceNo="R24S00002", bidNtceNm="가상군 문화예술회관 건립 건설사업관리용역", bidNtceDt="2024-03-05 10:00:00", presmptPrce="1500000000",
+           srvceDivNm="기술용역", pubPrcrmntClsfcNm="건설사업관리"),
+        sv(bidNtceNo="R24S00003", bidNtceNm="가상군청 청사 청소용역", bidNtceDt="2024-03-07 10:00:00", presmptPrce="80000000", pubPrcrmntClsfcNm="건물청소서비스"),
+        sv(bidNtceNo="R24S00004", bidNtceNm="가상군 생활자원 수거 위탁", bidNtceDt="2024-03-11 10:00:00", presmptPrce="90000000",
+           pubPrcrmntLrgClsfcNm="폐기물 처리 및 재활용서비스", pubPrcrmntClsfcNm="생활폐기물수집운반서비스"),
+    ]
+    return {"notices": N, "bsis": bsis, "license": lic, "files": files, "awards": awards, "servc": servc}
 
 
 def _xml_error(code: str, msg: str) -> bytes:
@@ -240,6 +254,10 @@ class MockG2B:
                     if q.get("inqryDiv") != "1":
                         return self._send(200, _xml_error("10", "INVALID_REQUEST_PARAMETER_ERROR"), "application/xml")
                     items = [w for w in mock.data["awards"] if w["opengDt"][:7].replace("-", "") == q.get("inqryBgnDt", "")[:6]]
+                elif op in ("getBidPblancListInfoServc", "getBidPblancListInfoServcPPSSrch"):
+                    items = [n for n in mock.data["servc"] if n["bidNtceDt"][:7].replace("-", "") == q.get("inqryBgnDt", "")[:6]]
+                    if op.endswith("PPSSrch") and q.get("bidNtceNm"):
+                        items = [n for n in items if q["bidNtceNm"] in n["bidNtceNm"]]
                 elif op == "getBidPblancListInfoLicenseLimit":
                     if q.get("inqryDiv") != "2" or not q.get("bidNtceNo"):
                         return self._send(200, _xml_error("10", "INVALID_REQUEST_PARAMETER_ERROR"), "application/xml")

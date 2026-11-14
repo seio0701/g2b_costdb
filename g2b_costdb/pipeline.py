@@ -1408,6 +1408,7 @@ def main(argv=None):
     ap.add_argument("--batch", action="store_true", help="extract: Message Batches 로 제출/수거 (50%% 할인, 최대 24시간)")
     ap.add_argument("--export", action="store_true", help="extract: 공고별 작업지시 txt 를 data/llm_in 에 내보내기 (Cowork·사람이 채움)")
     ap.add_argument("--import", dest="import_", action="store_true", help="extract: data/llm_out 의 JSON 을 가져와 반영")
+    ap.add_argument("--servc", action="store_true", help="probe/collect: 용역 입찰공고(폐기물처리 용역·건설사업관리·설계용역) 시험 호출·수집")
     ap.add_argument("--only", default=None, help="extract-extra: 공종을 한정(쉼표 구분, 예: 전기,건축). 생략하면 대표 공고 전체")
     ap.add_argument("--trades", action="store_true", help="extract 와 함께 2차 추출(내역서 집계표의 공종별 금액)도 같은 방식(--yes/--batch/--limit)으로 실행")
     a = ap.parse_args(argv)
@@ -1418,7 +1419,9 @@ def main(argv=None):
     if a.stage == "doctor":
         stage_doctor(cfg)
     elif a.stage == "probe":
-        collect.probe(cfg, a.ym)
+        collect.probe_servc(cfg, a.ym) if a.servc else collect.probe(cfg, a.ym)
+    elif a.stage == "collect" and a.servc:
+        collect.collect_servc(cfg)
     elif a.stage == "extract":
         stage_extract(cfg, yes=a.yes, batch=a.batch, export=a.export, import_=a.import_, limit=a.limit, redo_low=a.redo_low, refetch=a.refetch)
         if a.trades and not (a.export or a.import_):

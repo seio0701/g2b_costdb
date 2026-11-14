@@ -14,6 +14,8 @@ api:
     cnstwk_bsis_amount: "getBidPblancListInfoCnstwkBsisAmount"
     license_limit: "getBidPblancListInfoLicenseLimit"
     chg_history: "getBidPblancListInfoChgHstryCnstwk"
+    servc_list: "getBidPblancListInfoServc"            # 용역 입찰공고 목록(같은 서비스·같은 인증키). probe --servc 로 응답 확인 후 collect --servc
+    servc_search: "getBidPblancListInfoServcPPSSrch"   # 용역 공고 검색(공고명 키워드) — probe 가 동작 여부만 시험
   use_license_limit: false                 # true 면 research 단계에서 공고별 면허제한 조회(호출량 큼). 목록 응답의 주공종명·부공종명이 업종명이므로 기본 false
   # ── 낙찰정보(참고 컬럼: 낙찰금액·낙찰률·낙찰자). 공공데이터포털 「조달청_나라장터 낙찰정보서비스」 활용신청 후 use_awards: true ──
   use_awards: false
@@ -28,6 +30,15 @@ api:
 period:
   start: "2019-01"                          # 공사비정보광장 개통 시점
   end: "2026-09"
+
+# 용역 입찰공고 수집(폐기물처리 용역 = 사업의 폐기물 비용·공고 완료 보조지표, 건설사업관리·설계용역 = 공사개요 보완용 과업지시서)
+servc:
+  period_start: ""            # 비우면 공사 수집 시작월(period.start). 설계용역은 공사보다 1~3년 앞서 발주되므로 필요하면 "2016-01" 처럼 앞당김
+  period_end: ""              # 비우면 오늘이 속한 달까지(폐기물처리 용역은 공사 공고 뒤에 발주)
+  # 보존 규칙: 용역 공고는 월 1.5만~2.5만 건이고 대부분 무관하므로 아래에 걸리는 공고만 data/raw/servc_YYYYMM.jsonl 에 남긴다.
+  # 규칙을 바꾸면 data/raw/servc_done.txt 를 지우고 collect --servc 를 다시 실행(API 를 다시 호출함)
+  keep_name_regex: "폐기물|건설사업관리|감리|설계\\s*용역|설계\\s*공모|실시\\s*설계|기본\\s*설계|기본\\s*및\\s*실시|CM\\s*용역"
+  keep_class_regex: "폐기물"  # 공공조달분류명(예: 건설폐기물처리서비스)에 이 말이 있으면 공고명과 무관하게 보존
 
 paths:
   data_dir: "data"
@@ -68,6 +79,12 @@ fields:
   prev_bid_no: "befBidBbancNo"            # 이전 입찰공고번호(재공고 연결)
   chg_reason: "chgNtceRsn"                # 변경공고 사유
   demand_inst_cd: "dminsttCd"             # 수요기관 코드
+  # ── 용역 입찰공고 응답 필드(활용가이드 1.2 기준, probe --servc 로 확인) ──
+  servc_budget: "asignBdgtAmt"            # 배정예산금액(통상 추정가격+부가세)
+  servc_div: "srvceDivNm"                 # 용역구분(일반용역/기술용역)
+  servc_class: "pubPrcrmntClsfcNm"        # 공공조달분류명(예: 건설폐기물처리서비스)
+  servc_class_mid: "pubPrcrmntMidClsfcNm"
+  servc_class_lrg: "pubPrcrmntLrgClsfcNm"
   sub_cnstty_prefix: "subsiCnsttyNm"      # 부공종명 1..9
   sub_cnstty_max: 9
   spt_url_prefix: "sptDscrptDocUrl"       # 현장설명서 첨부 URL 1..5

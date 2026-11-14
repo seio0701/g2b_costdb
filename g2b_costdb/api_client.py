@@ -241,6 +241,13 @@ class G2BClient:
                     delay = min(delay * 2, 60)
         raise RuntimeError(f"재시도 소진 op={op} params={p}: {last_err}")
 
+    def purge_cache(self, op: str, contains: str) -> int:
+        """op 의 응답 캐시 중 요청 파라미터에 contains 가 든 행을 지운다. 용역 전수 수집처럼 응답은 크고 보존하는 행은 적을 때,
+        한 달을 다 받아 저장한 뒤 그 달의 캐시를 비워 cache.sqlite 가 불어나지 않게 한다(달 중간에 끊기면 캐시가 남아 이어받기 가능)."""
+        cur = self.conn.execute("DELETE FROM cache WHERE op=? AND params LIKE ?", (op, f"%{contains}%"))
+        self.conn.commit()
+        return int(cur.rowcount or 0)
+
     # ── 페이지네이션 ─────────────────────────────────────────────
     @staticmethod
     def _items(body: Dict[str, Any]) -> List[Dict[str, Any]]:
