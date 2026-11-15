@@ -6,7 +6,9 @@
  2) 취소공고 제외 후, 시설ID×사업유형 안의 공고를 세부사업으로 나눈다(works.assign_works: 공고명의 현장·건물 이름, 식별 번호, 시기).
     세부사업이 둘 이상이면 프로젝트ID 에 '-01', '-02' … 를 붙인다(최초 공고일 순)
  3) 세부사업 안에서는 재공고·재발주로 대체된 공고만 빼고 모두 대표(합산 대상). 같은 공종의 공고가 여럿이면(기계소방/전기소방, 부대공사 등) 모두 합산
- 4) 대체된 공고에는 '대체됨' + 대체공고번호 기록, 금액 급변(±30%) 시 경고
+ 4) 대체된 공고에는 '대체됨(사유)' + 대체공고번호 기록, 금액 급변(±30%) 시 경고
+ 5) 공법·자재 선정용 제안서 제출 안내 공고(공사 발주 아님)는 대표에서 제외
+ 6) 같은 공고가 여러 시설 후보에 걸려 같은 사업이 두 프로젝트로 집계되면 cross_facility_duplicates 가 표시(05 시트 '시설간_중복'·'중복_제외권장')
 """
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ from .classify import WORK_TYPE_CODE, clean_notice_name
 _RENOTICE_ORD = re.compile(r"(제\s*)?\d+\s*차\s*(재공고|공고|입찰|재입찰|변경|정정|수정)")
 _PHASE = re.compile(r"(\d+\s*단계|\d+\s*공구|\d+\s*차분|골조|마감)")
 log = logging.getLogger(__name__)
+PROPOSAL_REASON = "제안 안내 공고(공사 발주 아님)"
 
 
 def _phase_token(name: str) -> str:
@@ -45,6 +48,30 @@ def _mode(s: pd.Series, default: str = "") -> str:
     """가장 많이 나온 값. 같은 횟수면 가나다순 첫 값(입력 행 순서에 따라 결과가 달라지지 않게)."""
     vc = s[s.map(lambda v: v is not None and str(v).strip() not in ("", "nan", "None"))].astype(str).value_counts()
     return sorted(vc[vc == vc.max()].index)[0] if len(vc) else default
+
+
+def _parse_dt(col: pd.Series) -> pd.Series:
+    """공고일시 → Timestamp. 한 열에 형식이 섞여 있어도('2024-01-10 10:00:00', '2024-01-10T10:00', '202401101000') 값마다 다시 읽는다."""
+    raw = col.map(lambda v: "" if (v is None or v is pd.NaT or (isinstance(v, float) and v != v)) else str(v).strip()).astype(object)
+    out = pd.to_datetime(raw.map(lambda v: v[:19]), errors="coerce")
+    bad = out.isna() & ~raw.isin(["", "nan", "None", "NaT", "<NA>"])
+    for i in out.index[bad]:
+        v = raw.at[i]
+        t = pd.to_datetime(v[:19], errors="coerce")
+        if pd.isna(t) and re.fullmatch(r"\d{8,14}", v):
+            t = pd.to_datetime(v[:12].ljust(12, "0"), format="%Y%m%d%H%M", errors="coerce")
+        out.at[i] = t
+    return out
+
+
+def _no(v) -> str:
+    """공고번호·이전공고번호 비교용 문자열: 공백 제거, 빈 값은 '', 숫자로 읽혀 붙은 '.0' 제거."""
+    if v is None:
+        return ""
+    t = str(v).strip()
+    if t in ("", "nan", "None", "<NA>", "NaT"):
+        return ""
+    return t[:-2] if re.fullmatch(r"\d+\.0", t) else t
 
 
 def inherit_work_type(d: pd.DataFrame, max_days: int = 730) -> pd.Series:
@@ -79,7 +106,7 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
     d["사업유형_원분류"] = d["사업유형"]
     d["사업유형"] = inherit_work_type(d)
     d["_ord"] = pd.to_numeric(d["공고차수"], errors="coerce").fillna(0)
-    d["_dt"] = pd.to_datetime(d["공고일시"].astype(str).str.strip().str[:19], errors="coerce")
+    d["_dt"] = _parse_dt(d["공고일시"])
     if d["_dt"].isna().any():
         n_bad = int(d["_dt"].isna().sum())
         log.warning("공고일시를 해석할 수 없는 공고 %d건 — 가장 오래된 것으로 취급", n_bad)
@@ -88,7 +115,7 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
     if "이전공고번호" not in d.columns:
         d["이전공고번호"] = ""
     # 이전공고번호는 차수마다 채워지지 않을 수 있다(변경 차수에서 빠짐) → 같은 (시설, 공고번호)의 어느 차수에든 있으면 모든 차수에 채운다
-    pv = d["이전공고번호"].map(lambda v: "" if (v is None or str(v).strip() in ("", "nan", "None", "<NA>")) else str(v).strip())
+    pv = d["이전공고번호"].map(_no)
     d["이전공고번호"] = pv.groupby([d["시설ID"].astype(str), d["공고번호"].astype(str)]).transform(lambda x: next((y for y in x if y), ""))
 
     # 1) (시설, 공고번호)별 최대 차수. 구차수의 사업유형은 최신 차수를 따른다(공고명 오타를 고친 변경공고 때문에 같은 공고가 두 프로젝트로 갈리지 않게)
@@ -98,30 +125,48 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
     d["사업유형"] = [last_type.get((f, n), t) for f, n, t in zip(d["시설ID"], d["공고번호"], d["사업유형"])]
     d["_base"] = d["시설ID"].astype(str) + "-" + d["사업유형"].map(lambda t: WORK_TYPE_CODE.get(t, "U"))
 
-    # 2) 세부사업 배정(유효 공고 = 최신 차수이고 취소가 아닌 공고)
+    # 2) 세부사업 배정(유효 공고 = 최신 차수이고 취소·제안 안내 공고가 아닌 공고)
     d["최신여부"] = False
     d["대체공고번호"] = ""
     d["대표선정사유"] = ""
     d["세부사업번호"] = 1
     d["세부사업명"] = ""
     logs: List[dict] = []
-    valid = d["최신차수여부"] & (d["공고종류"] != "취소")
+    d["_prop"] = d["공고명"].map(works.is_proposal)     # 공법·자재 선정용 제안서 제출 안내 공고: 공사 발주가 아니므로 합산하지 않는다
+    valid = d["최신차수여부"] & (d["공고종류"] != "취소") & ~d["_prop"]
     w = works.assign_works(d[valid], "_base")
     d.loc[valid, "세부사업번호"] = w["세부사업번호"].astype(int)
     d.loc[valid, "세부사업명"] = w["세부사업명"]
     role = w["역할"].to_dict()
     n_works = d[valid].groupby("_base")["세부사업번호"].max().to_dict()
-    # 유효하지 않은 행(구차수·취소공고)은 같은 공고번호의 유효 행을 따르고, 없으면 공고명이 가장 비슷한 유효 공고의 세부사업을 따른다
+    # 유효하지 않은 행(구차수·취소공고·제안 안내 공고)은 같은 공고번호의 유효 행을 따른다. 유효 행이 없는 공고는 그 공고의 최신 차수 공고명으로
+    # 세부사업을 고른다(현장 이름[구분어]이 같은 유효 공고 가운데 공고명이 가장 비슷한 것 → 없으면 전체에서 가장 비슷한 것). 한 공고의 모든 차수는 같은 세부사업
     by_notice = {(b, str(n)): k for b, n, k in zip(d.loc[valid, "_base"], d.loc[valid, "공고번호"], d.loc[valid, "세부사업번호"])}
     valid_by_base = {b: g for b, g in d[valid].groupby("_base")}
+    orphan: dict = {}
     for i in d.index[~valid]:
-        b = d.at[i, "_base"]
-        k = by_notice.get((b, str(d.at[i, "공고번호"])))
-        if k is None and b in valid_by_base:
+        b, no = d.at[i, "_base"], str(d.at[i, "공고번호"])
+        k = by_notice.get((b, no))
+        if k is None:
+            orphan.setdefault((b, no), []).append(i)
+        else:
+            d.at[i, "세부사업번호"] = int(k)
+    disc_cache: dict = {}
+    for (b, no), rows in orphan.items():
+        k = 1
+        if b in valid_by_base:
             g = valid_by_base[b]
-            key = works.title_key(d.at[i, "공고명"])
-            k = int(g.at[max(g.index, key=lambda j: works.similarity(key, works.title_key(g.at[j, "공고명"]))), "세부사업번호"])
-        d.at[i, "세부사업번호"] = int(k or 1)
+            ref = max(rows, key=lambda i: (d.at[i, "_ord"], d.at[i, "_dt"]))
+            fac_name = d.at[ref, "시설명"] if "시설명" in d.columns else ""
+            if b not in disc_cache:
+                disc_cache[b] = {j: works.features(g.at[j, "공고명"], fac_name)["disc"] for j in g.index}
+            disc, key, trade = works.features(d.at[ref, "공고명"], fac_name)["disc"], works.title_key(d.at[ref, "공고명"]), d.at[ref, "공종"]
+            cand = [j for j in g.index if disc_cache[b][j] == disc] or list(g.index)
+            best = max(cand, key=lambda j: (works.similarity(key, works.title_key(g.at[j, "공고명"])), g.at[j, "공종"] == trade,
+                                            -abs((g.at[j, "_dt"] - d.at[ref, "_dt"]).days)))
+            k = int(g.at[best, "세부사업번호"])
+        for i in rows:
+            d.at[i, "세부사업번호"] = k
     name_of = {(b, k): n for b, k, n in zip(d.loc[valid, "_base"], d.loc[valid, "세부사업번호"], d.loc[valid, "세부사업명"])}
     d["세부사업수"] = d["_base"].map(lambda b: int(n_works.get(b, 1)))
     # 세부사업명은 시설 후보가 둘 이상으로 나뉜 경우에만 적는다(나뉘지 않았으면 시설명으로 충분)
@@ -139,18 +184,26 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
     no_valid = set(d.loc[d["최신차수여부"], "_base"]) - set(d.loc[valid, "_base"])
     for b in sorted(no_valid):
         g = d[d["최신차수여부"] & (d["_base"] == b)]
-        d.loc[g.index, "대표선정사유"] = "전부 취소공고"
-        logs.append({"공고번호": ", ".join(g["공고번호"].astype(str)), "항목": "대표선정", "판정": "경고", "비고": f"{b}: 유효 공고 없음(모두 취소)"})
+        only_cancel = bool((g["공고종류"] == "취소").all())
+        d.loc[g.index, "대표선정사유"] = ["전부 취소공고" if c else PROPOSAL_REASON for c in (g["공고종류"] == "취소")]
+        logs.append({"공고번호": ", ".join(g["공고번호"].astype(str)), "항목": "대표선정", "판정": "경고",
+                     "비고": f"{b}: 유효 공고 없음({'모두 취소' if only_cancel else '취소 또는 제안 안내 공고뿐'})"})
     for (pid, trade), g in d[d["최신차수여부"]].groupby(["프로젝트ID", "공종"], sort=False):
         if g["_base"].iloc[0] in no_valid:
             continue
-        ok = g[g["공고종류"] != "취소"].sort_values("_dt")
+        ok = g[(g["공고종류"] != "취소") & ~g["_prop"]].sort_values("_dt")
+        for i in g.index[g["_prop"] & (g["공고종류"] != "취소")]:
+            d.at[i, "대표선정사유"] = PROPOSAL_REASON
+            amt = _num(d.at[i, "추정가격"]) or 0
+            logs.append({"공고번호": str(d.at[i, "공고번호"]), "항목": "제안 안내 공고 제외", "판정": "참고",
+                         "비고": f"{pid}|{trade}: '{str(d.at[i, '공고명'])[:60]}' 추정가격 {amt / 1e8:,.2f}억 — 공법·자재 선정용 제안서 제출 안내(공사 발주 아님)로 보아 합산하지 않음. "
+                                 "이 금액이 본 공사 공고에 들어 있지 않은 별도 계약이면 검수에서 확인"})
         cnt = [i for i in ok.index if role.get(i) != "superseded"]
         sup = [i for i in ok.index if role.get(i) == "superseded"]
         n_cancel = int((g["공고종류"] == "취소").sum())
         for i in cnt:
             d.at[i, "최신여부"] = True
-            n_rep = sum(1 for j in sup if str(w.at[j, "대체공고번호"]) == str(d.at[i, "공고번호"]))
+            n_rep = sum(1 for j in sup if str(w.at[j, "대체공고번호"]) == str(d.at[i, "공고번호"]).strip())
             reason = "단독 공고" if len(cnt) == 1 else f"합산(같은 공종 {len(cnt)}건)"
             d.at[i, "대표선정사유"] = reason + (f", 재공고로 {n_rep}건 대체" if n_rep else "") + (f", 취소 {n_cancel}건 제외" if n_cancel else "")
         if len(cnt) > 1:
@@ -161,8 +214,8 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
         for i in sup:
             rep_no = str(w.at[i, "대체공고번호"])
             d.at[i, "대체공고번호"] = rep_no
-            d.at[i, "대표선정사유"] = "대체됨(이후 재공고/재발주)"
-            rep = ok[ok["공고번호"].astype(str) == rep_no]
+            d.at[i, "대표선정사유"] = f"대체됨({str(w.at[i, '사유']) or '이후 재공고/재발주'})"
+            rep = ok[ok["공고번호"].astype(str).str.strip() == rep_no]
             p0, p1 = _num(d.at[i, "추정가격"]), (_num(rep["추정가격"].iloc[0]) if len(rep) else None)
             if p0 and p1 and p0 > 0:
                 ratio = (p1 - p0) / p0
@@ -184,25 +237,25 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
             d.at[i, "대표선정사유"] = "취소됨(이후 차수가 취소공고)"
         else:
             d.at[i, "대표선정사유"] = "구차수(이후 차수로 대체)"
-            d.at[i, "대체공고번호"] = d.at[i, "공고번호"]
+            d.at[i, "대체공고번호"] = str(d.at[i, "공고번호"])
 
     # 5) API 의 이전공고번호(befBidBbancNo) 연결 가운데 세부사업 배정으로 처리되지 않은 것(사업유형이 달라 다른 시설×유형에 놓인 재공고):
     #    유효한(취소되지 않은 최신 차수) 공고 B 가 A 를 이전 공고로 가리키면 A 는 대표에서 뺀다. 취소된 재공고는 원 공고를 대체하지 못한다
     prev_rows = d[valid & d["이전공고번호"].map(bool)]
     for _, b in prev_rows.iterrows():
-        targets = d.index[(d["시설ID"] == b["시설ID"]) & (d["공고번호"].astype(str) == str(b["이전공고번호"])) & d["최신여부"]]
+        targets = d.index[(d["시설ID"] == b["시설ID"]) & (d["공고번호"].map(_no) == _no(b["이전공고번호"])) & d["최신여부"]]
         for i in targets:
-            if i == b.name:
-                continue
+            if i == b.name or _no(d.at[b.name, "대체공고번호"]) == _no(d.at[i, "공고번호"]):
+                continue                              # 자기 자신, 또는 서로를 이전 공고로 가리키는 잘못된 연결(이미 한쪽이 대체됨)
             d.at[i, "최신여부"] = False
-            d.at[i, "대체공고번호"] = b["공고번호"]
+            d.at[i, "대체공고번호"] = str(b["공고번호"])
             d.at[i, "대표선정사유"] = "대체됨(API 이전공고번호 연결)"
             logs.append({"공고번호": d.at[i, "공고번호"], "항목": "이전공고번호 연결", "판정": "참고",
                          "비고": f"{b['공고번호']} 의 이전 공고로 지정되어 대표에서 제외"})
 
     latest = d[d["최신여부"]].copy()
-    d = d.drop(columns=["_ord", "_dt", "_price", "_base"])
-    latest = latest.drop(columns=["_ord", "_dt", "_price", "_base"])
+    d = d.drop(columns=["_ord", "_dt", "_price", "_base", "_prop"])
+    latest = latest.drop(columns=["_ord", "_dt", "_price", "_base", "_prop"])
     return d, latest, logs
 
 
@@ -212,7 +265,9 @@ def facility_summary(latest: pd.DataFrame, all_hist: pd.DataFrame) -> pd.DataFra
     rows = []
     if latest.empty:
         return pd.DataFrame(columns=["프로젝트ID", "시설ID", "시설명", "세부사업명", "세부사업수", "사업유형", "표2_대분류", "표2_중분류", "검색어", "수요기관",
-                                     "공사현장지역", "공고건수_전체", "공고건수_최신", "최초공고일", "최종공고일"] + [f"공종_{t}" for t in trades])
+                                     "공사현장지역", "공고건수_전체", "공고건수_최신", "최초공고일", "최종공고일"] + [f"공종_{t}" for t in trades]
+                                    + ["시설간_중복", "중복_제외권장"])
+    dup = cross_facility_duplicates(latest)
     for pid, g in latest.groupby("프로젝트ID"):
         h = all_hist[all_hist["프로젝트ID"] == pid]
         row = {
@@ -229,5 +284,55 @@ def facility_summary(latest: pd.DataFrame, all_hist: pd.DataFrame) -> pd.DataFra
         }
         for t in trades:
             row[f"공종_{t}"] = "O" if (g["공종"] == t).any() else "X"
+        row["시설간_중복"] = dup.at[pid, "시설간_중복"] if pid in dup.index else ""
+        row["중복_제외권장"] = dup.at[pid, "중복_제외권장"] if pid in dup.index else ""
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def cross_facility_duplicates(latest: pd.DataFrame) -> pd.DataFrame:
+    """같은 공고가 여러 시설 후보의 대표로 잡혀 같은 사업이 05 시트에 두 번 이상 집계되는 경우를 찾는다
+    (예: '○○공사 공공주택' 이라는 묶음 시설의 세부사업과, 그 단지 이름으로 따로 잡힌 시설의 프로젝트가 같은 공고들로 이루어진 경우).
+    반환: index = 프로젝트ID(다른 시설의 프로젝트와 공고가 겹치는 것만), 열
+      시설간_중복   — 겹치는 프로젝트와 관계: '같은 사업: X'(대표 공고가 모두 같음) / 'X 의 일부'(이 프로젝트의 공고가 모두 X 에 있음) /
+                      'X 를 포함(n/m건)' / 'X 와 일부 겹침(n/m건)'  (m = 이 프로젝트의 대표 공고 수, n = 그중 X 에도 있는 수)
+      중복_제외권장 — 'Y' = 이 행을 빼면 같은 공고가 두 번 합산되지 않는다(다른 프로젝트의 일부이거나, 같은 사업 가운데 남길 한 행이 아닌 경우).
+                      같은 사업끼리는 세부사업으로 나뉘지 않은(더 구체적인) 시설의 프로젝트를 남기고, 같으면 프로젝트ID 가 앞선 것을 남긴다.
+                      일부만 겹치는 경우는 어느 쪽도 권장하지 않는다(검수에서 판단)."""
+    cols = ["시설간_중복", "중복_제외권장"]
+    if latest is None or latest.empty or "프로젝트ID" not in latest.columns:
+        return pd.DataFrame(columns=cols)
+    sets = {str(p): frozenset(g["공고번호"].map(_no)) for p, g in latest.groupby("프로젝트ID")}
+    fac = {str(p): str(f) for p, f in zip(latest["프로젝트ID"], latest["시설ID"])}
+    n_works = {str(p): (int(k) if (k is not None and k == k) else 1) for p, k in zip(latest["프로젝트ID"], latest["세부사업수"])} if "세부사업수" in latest.columns else {}
+    by_no: dict = {}
+    for p, nos in sets.items():
+        for n in nos:
+            by_no.setdefault(n, set()).add(p)
+    share: dict = {}
+    for ps in by_no.values():
+        if len(ps) < 2:
+            continue
+        for a in ps:
+            for b in ps:
+                if a != b and fac[a] != fac[b]:
+                    share.setdefault(a, {})
+                    share[a][b] = share[a].get(b, 0) + 1
+    keep_key = lambda p: (n_works.get(p, 1), p)
+    rows = {}
+    for a in sorted(share):
+        notes, drop = [], False
+        for b in sorted(share[a], key=lambda x: (-share[a][x], x)):
+            n, m = share[a][b], len(sets[a])
+            if sets[a] == sets[b]:
+                notes.append(f"같은 사업: {b}")
+                drop = drop or keep_key(b) < keep_key(a)
+            elif sets[a] < sets[b]:
+                notes.append(f"{b} 의 일부")
+                drop = True
+            elif sets[a] > sets[b]:
+                notes.append(f"{b} 를 포함({n}/{m}건)")
+            else:
+                notes.append(f"{b} 와 일부 겹침({n}/{m}건)")
+        rows[a] = {"시설간_중복": "; ".join(notes), "중복_제외권장": "Y" if drop else ""}
+    return pd.DataFrame.from_dict(rows, orient="index", columns=cols)

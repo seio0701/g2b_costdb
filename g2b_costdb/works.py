@@ -7,7 +7,9 @@
  세부사업 = 같은 현장·같은 건물의 공사를 공종별(건축·전기·통신·소방·기계·토목·조경)·분야별(기계소방/전기소방)·차수별(1차분/2차분)·
             부대공사(무대기계·승강기·전시·인테리어 등)로 나눠 발주한 공고의 묶음 → 모두 합산
  다른 세부사업 = 다른 단지·지구·블록·동·권역·현장, 다른 연도의 연례 사업, 같은 시설 안이라도 공간·목적과 시기가 다른 별개 공사
- 대체(superseded) = 같은 세부사업·같은 공종에서 같은 공고명으로 며칠 뒤 다시 난 공고(재공고·유찰 후 재발주)가 있는 앞 공고, 또는 API 이전공고번호로 연결된 앞 공고
+ 대체(superseded) = 같은 세부사업·같은 공종에서 같은 공고명으로 며칠 뒤 다시 난 공고(재공고·유찰 후 재발주)가 있는 앞 공고, 또는 API 이전공고번호로 연결된 앞 공고.
+            공고명에 차수·단계 표기가 다르면('조성사업' / '조성사업(2차분)', '(1차)' / '(2차)') 재공고가 아니라 차수별 발주 → 둘 다 합산
+ 제안 안내 공고 = '공법·자재 선정 기술제안서 제출 안내' 처럼 공사 발주가 아닌 공고(is_proposal). 그 금액은 본 공사 공고에 들어 있으므로 합산하지 않는다(dedup 에서 제외)
 
 방법: 공고명에서 머리말·공종어·일반어·시설명을 지우고 남는 '구분어'(현장·건물·구간 이름)를 비교한다.
  ① 구분어가 같으면(둘 다 비었거나 거의 같음) 같은 세부사업  ② 한쪽 구분어가 다른 쪽에 들어 있으면(공종 공고 ⊂ 본공사) 같은 세부사업
@@ -33,6 +35,7 @@ PARAMS = dict(
                                                                             # 공고종류·공고명에 '재공고' 가 있으면 같은 날·다음 날 다시 난 것도 재공고
     oneoff_max_days=1200, oneoff_lo=0.5, oneoff_hi=2.0,                     # 건립·신축·증축·조성처럼 한 번 하는 공사가 같은 공고명·같은 공종으로 다시 나면
                                                                             # 300일이 넘어도(사업 지연 뒤 재발주) 같은 사업의 재공고로 본다
+    recur_max_days=180,               # 유지관리·연간단가·위탁처럼 해마다(반기마다) 다시 발주하는 공사는 같은 이름이 180일 넘게 떨어지면 다음 회차(재공고 아님)
     rebid_fuzzy=0.92, rebid_fuzzy_lo=0.85, rebid_fuzzy_hi=1.18,             # 공고명이 조금 바뀐 재공고: 이름 유사도·금액비(더 좁게)
     repeat_sim=0.9,                   # 같은 공종에서 300일 넘게 떨어진 두 공고의 이름이 이만큼 비슷하면 연례 사업의 다른 해 분(다른 세부사업)
     anc_max_ratio=5.0,                # 부대공사로 보고 본공사에 붙이는 공고의 금액은 그 본공사 공고의 5배 이하(큰 공사가 작은 공사의 부대공사일 수는 없다)
@@ -46,17 +49,35 @@ _ADMIN = (r"긴급|재공고|재입찰|입찰\s*공고|입찰\s*대행|수의\s*
           r"별도\s*재무관|전자\s*입찰|지역\s*제한|총액|공사\s*계약|계약|변경|정정|수정|취소|소액")
 _BRACKET = re.compile(r"[%s]([^%s%s]{0,40})[%s]" % (_BR_OPEN, _BR_OPEN, _BR_CLOSE, _BR_CLOSE))
 _ADMIN_ONLY = re.compile(r"(?:%s|\d|차|제|회|후|건|분|및|[\s,·ㆍ/\-_.:])+" % _ADMIN)
+_ADMIN_RE = re.compile(_ADMIN)
+_LOT_IN = re.compile(r"(?:제\s*)?\d+(?:\s*-\s*\d+)*\s*차\s*분")      # 행정 괄호 안에 함께 적힌 차수 표기: '(2차분 재공고)' 의 '2차분'
 _REBID_WORD = re.compile(r"재공고|재입찰|새로운\s*입찰")
-_NOISE = re.compile(r"(?:제\s*)?\d+\s*차\s*(?:재공고|재입찰)|(?:재공고|재입찰)\s*[\(\[（]?\s*(?:제\s*)?\d+\s*차\s*[\)\]）]?|새로운\s*입찰|"
+_NOISE = re.compile(r"(?:전체|총\s*차|총괄)\s*분|(?:제\s*)?\d+\s*차\s*(?:재공고|재입찰)|(?:재공고|재입찰)\s*[\(\[（]?\s*(?:제\s*)?\d+\s*차\s*[\)\]）]?|새로운\s*입찰|"
                     r"긴급|재공고|재입찰|전자\s*입찰\s*공고|전자\s*입찰|입찰\s*공고|입찰\s*대행|"
                     r"(?:소액\s*수의|수의\s*(?:계약|견적))(?:\s*견적)?(?:\s*제출)?(?:\s*안내)?(?:\s*공고)?|견적\s*(?:제출\s*)?(?:안내\s*)?(?:공고)?|안내\s*공고|"
                     r"(?:여성|장애인|사회적)[^)\]）]{0,24}대상|공법\s*제안\s*공고|공법\s*제안|공사\s*계약|장기\s*계속\s*계약|계속비|별도\s*재무관|총괄|가칭")
 
 
 def _strip_admin(name) -> str:
-    """공고명에서 행정 꼬리표 괄호('[긴급]', '(재공고)', '(2차 변경)')와 행정 문구('입찰공고', '수의견적 제출 안내공고')를 지운다."""
-    s = _BRACKET.sub(lambda m: " " if (m.group(1).strip() and _ADMIN_ONLY.fullmatch(m.group(1))) else m.group(0), str(name or ""))
-    return _NOISE.sub(" ", s)
+    """공고명에서 행정 꼬리표 괄호('[긴급]', '(재공고)', '(2차 변경)')와 행정 문구('입찰공고', '수의견적 제출 안내공고')를 지운다.
+    행정 문구가 없는 괄호 '(2차)'·'(2차분)'·'(3-2)' 는 차수·단계 표기(다른 계약)이므로 남기고, '(2차분 재공고)' 는 '2차분' 만 남긴다."""
+    def tag(m):
+        x = m.group(1)
+        if not (x.strip() and _ADMIN_ONLY.fullmatch(x) and _ADMIN_RE.search(x)):
+            return m.group(0)
+        lots = _LOT_IN.findall(x)
+        return (" " + " ".join(lots) + " ") if lots else " "
+    return _NOISE.sub(" ", _BRACKET.sub(tag, str(name or "")))
+
+
+# 제안 안내 공고: 특허공법·자재 선정을 위한 기술제안서 제출 안내·공모. 공사 발주 공고가 아니며, 금액이 적혀 있어도 본 공사 공고의 일부다.
+# '실시설계 기술제안 입찰공고'(기술제안입찰 = 실제 공사 발주)와 '…건립공사(특허공법)'(특허공법을 포함한 공사)은 해당하지 않는다
+_PROPOSAL = re.compile(r"제안서\s*제출\s*(?:안내|공고)|(?:공법|자재|기술)\s*제안\s*(?:공모|공고|안내)|(?:공법|자재)\s*선정[^,]{0,12}(?:공모|안내\s*공고)")
+
+
+def is_proposal(name) -> bool:
+    """공법·자재 선정용 제안서 제출 안내 공고(공사 발주가 아닌 공고)인지."""
+    return bool(_PROPOSAL.search(str(name or "")))
 
 
 _TRADE = "정보통신|통신설비|통신|전기설비|전기|소방시설|소방|기계설비|기계|설비|토목|조경|건축|골조|마감"
@@ -69,9 +90,11 @@ _PHASE = re.compile(r"(?:제\s*)?(\d+(?:\s*-\s*\d+)*)\s*(단계|공구|차분|�
                     r"|(?<![0-9A-Za-z가-힣])(?:제\s*)?(\d+)\s*(차)(?![0-9A-Za-z가-힣])")
 _ONEOFF = re.compile(r"건립|신축|증축|개축|재건축|건설|조성|신설")
 _RECUR = re.compile(r"유지|관리|연간|단가|정비|보수|위탁|운영")
+_ANNUAL = re.compile(r"유지\s*(?:관리|보수)|연간|단가")   # 해마다 다시 발주하는 것이 분명한 공사('관리동 증축'·'개보수'·'국유지' 같은 말에 걸리지 않는 표현만)
 # 일반어: 사업 종류·공사 종류·부대공사 이름처럼 현장을 가리키지 않는 말(지워도 어느 현장인지는 달라지지 않는다)
 _GENERIC = re.compile(
     r"건립|신축|증축|개축|재건축|건설|조성|리모델링|개보수|보수|정비|공사|사업(?![화단소장부비])|시설물|일원|일대|"
+    r"(?<![동서남북중])부지(?![구방역])|(?<!어린)이전|"          # '부지조성'·'주차장부지', '이전 조성'·'이전에 따른' ('서부지구'·'어린이전용' 은 제외)
     r"인테리어|실내|내부|외부|부대|보강|개설|설치|철거|해체|석면|지장물|지정폐기물|폐기물|포장|가설|울타리|정화조|승강기|엘리베이터|"
     r"무대\s*(?:기계|장치|조명|음향)?|전시물?|집기|가구|사인물|간판|제작|구매|관급\s*자재|자재|기타|일괄|에\s*따른|관련|시설|구조|수선|분야|부문|시행|및")
 _VERB = re.compile(r"건립|신축|증축|개축|재건축|건설|조성|리모델링|개보수|신설|확장|이전")
@@ -319,6 +342,7 @@ def _assign_group(g: pd.DataFrame) -> Dict:
             union(i, by_no[prev[i]])
     price = {i: (float(g.at[i, "_price"]) if pd.notna(g.at[i, "_price"]) else 0.0) for i in idx}
     tk = {i: title_key(g.at[i, "공고명"]) for i in idx}
+    annual = {i: bool(_ANNUAL.search(str(g.at[i, "공고명"]))) for i in idx}
     members = {i: [i] for i in idx}
     for i in idx:                                       # 이전공고번호로 이미 묶인 것 반영
         r = find(i)
@@ -334,6 +358,12 @@ def _assign_group(g: pd.DataFrame) -> Dict:
             return True
         return "재공고여부" in g.columns and str(g.at[i, "재공고여부"]).strip().upper() == "Y"
 
+    def rebid_limit(i, j) -> int:
+        """같은 공고명으로 다시 난 공고를 재공고로 볼 수 있는 최대 간격[일]. 유지관리·연간단가 공사는 더 짧게(재공고라고 밝힌 공고는 예외)."""
+        if annual[i] and annual[j] and not is_rebid_notice(i) and not is_rebid_notice(j):
+            return PARAMS["recur_max_days"]
+        return PARAMS["rebid_max_days"]
+
     def retender(i, j) -> bool:
         """한 번 하는 공사(건립·신축·증축·조성 …)가 같은 공고명·같은 공종으로 다시 난 경우(사업이 늦어져 1~3년 뒤 재발주한 것 포함).
         연례 사업(관리·유지·연간단가, 연도 표기)은 해당하지 않는다."""
@@ -347,12 +377,14 @@ def _assign_group(g: pd.DataFrame) -> Dict:
     def apart(i, j) -> bool:
         """같은 공종에서 (거의) 같은 공고명으로 300일 넘게 떨어져 다시 난 공고(연례 사업의 다음 해 분)는 한 세부사업이 될 수 없다.
         같은 사업의 뒤늦은 분할 발주라면 공종이 다르거나 이름에 다른 내용(부대공사 이름)이 붙는다. 한 번 하는 공사의 재발주(retender)는 예외."""
-        if g.at[i, "공종"] != g.at[j, "공종"] or abs((g.at[j, "_dt"] - g.at[i, "_dt"]).days) <= PARAMS["rebid_max_days"]:
+        if g.at[i, "공종"] != g.at[j, "공종"] or abs((g.at[j, "_dt"] - g.at[i, "_dt"]).days) <= rebid_limit(i, j):
             return False
         if (prev[i] and prev[i] == str(g.at[j, "공고번호"]).strip()) or (prev[j] and prev[j] == str(g.at[i, "공고번호"]).strip()):
             return False
         if retender(i, j):
             return False
+        if feat[i]["phases"] != feat[j]["phases"] and feat[i]["oneoff"] and feat[j]["oneoff"]:
+            return False                               # 한 번 하는 공사의 차수·단계 표기가 다른 공고('조성사업' / '조성사업(2차분)')는 차수별 발주 → 같은 세부사업일 수 있다
         return tk[i] == tk[j] or similarity(tk[i], tk[j]) >= PARAMS["repeat_sim"]
 
     def years_clash(a, b) -> bool:
@@ -419,7 +451,7 @@ def _assign_group(g: pd.DataFrame) -> Dict:
             days = (g.at[j, "_dt"] - g.at[i, "_dt"]).days
             ratio = (price[j] / price[i]) if (price[i] > 0 and price[j] > 0) else 1.0
             flagged = is_rebid_notice(j) and g.at[j, "_dt"] > g.at[i, "_dt"]      # 재공고라고 밝힌 공고는 같은 날·다음 날이어도 재공고
-            in_time = (0 if flagged else PARAMS["rebid_min_days"]) <= days <= PARAMS["rebid_max_days"]
+            in_time = (0 if flagged else PARAMS["rebid_min_days"]) <= days <= rebid_limit(i, j)
             exact = tk[i] == tk[j] and in_time and PARAMS["rebid_lo"] <= ratio <= PARAMS["rebid_hi"]
             late = (not exact and retender(i, j) and days >= (0 if flagged else PARAMS["rebid_min_days"]))
             fuzzy = (not exact and not late and in_time and PARAMS["rebid_fuzzy_lo"] <= ratio <= PARAMS["rebid_fuzzy_hi"] and price[i] > 0
@@ -427,6 +459,15 @@ def _assign_group(g: pd.DataFrame) -> Dict:
                      and feat[i]["disc"] == feat[j]["disc"])
             if exact or late or fuzzy:
                 supersede(i, j, "같은 공고명으로 다시 공고" if exact else ("같은 공고명으로 다시 발주(사업 지연 뒤 재발주)" if late else "거의 같은 공고명·금액으로 다시 공고"))
+    # 재공고가 거듭된 경우(A ← B ← C) 대체공고번호는 끝까지 남은 공고(C)를 가리키게 한다
+    for i in idx:
+        if role[i] == "superseded":
+            seen, t = {i}, by_no.get(repl[i])
+            while t is not None and role[t] == "superseded" and t not in seen:
+                seen.add(t)
+                t = by_no.get(repl[t])
+            if t is not None and role[t] != "superseded":
+                repl[i] = str(g.at[t, "공고번호"]).strip()
     names = {}
     for r in order:
         mem = sorted(cl[r], key=lambda i: (0 if g.at[i, "공종"] == "건축" else 1, -price[i], pos[i]))

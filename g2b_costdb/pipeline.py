@@ -286,7 +286,12 @@ def stage_dedup(cfg):
             r = latest[latest["공고키"] == key].iloc[0]
             multi.append({"공고번호": str(r["공고번호"]), "프로젝트키": "/".join(ids), "항목": "복수 시설 배정",
                           "비고": f"'{r['공고명']}' 이 시설 {len(ids)}개({', '.join(ids)})의 대표 공고 — 05 시트에 시설마다 집계됨. 한 시설만 남기려면 검수에서 다른 시설을 제외"})
-    _logs_frame(logs + multi).to_parquet(_p(cfg, "logs_dedup.parquet"), index=False)
+    dup = dedup.cross_facility_duplicates(latest)
+    n_drop = int((dup["중복_제외권장"] == "Y").sum()) if len(dup) else 0
+    dup_log = [{"공고번호": "", "항목": "시설 간 중복 프로젝트", "판정": "참고",
+                "비고": f"프로젝트 {len(dup)}개가 다른 시설 후보의 프로젝트와 대표 공고를 함께 가짐(같은 사업이 두 번 이상 집계). "
+                        f"05 시트 '중복_제외권장' = Y 인 {n_drop}개 행을 빼면 같은 공고가 두 번 합산되지 않음 — 관계는 05 '시설간_중복' 열"}] if len(dup) else []
+    _logs_frame(logs + multi + dup_log).to_parquet(_p(cfg, "logs_dedup.parquet"), index=False)
     n_split = int((hist.drop_duplicates("프로젝트ID")["세부사업수"] > 1).sum()) if len(hist) else 0
     n_base = hist.loc[hist["세부사업수"] > 1, "시설ID"].astype(str).add(hist.loc[hist["세부사업수"] > 1, "사업유형"].astype(str)).nunique() if len(hist) else 0
     warn = [l for l in logs if l.get("판정") == "경고"]
@@ -301,6 +306,8 @@ def stage_dedup(cfg):
         print(f"    · [{l.get('항목')}] {str(l.get('비고'))[:150]}")
     if multi:
         print(f"  - 복수 시설 배정 {len(multi)}건 (06_검증로그 '복수 시설 배정' 항목, 예: {multi[0]['비고'][:80]}…)")
+    if len(dup):
+        print(f"  - 시설 간 중복 프로젝트 {len(dup)}개: 05 시트 '중복_제외권장' = Y 인 {n_drop}개 행을 빼면 같은 공고가 두 번 합산되지 않습니다('시설간_중복' 열에 관계 표시)")
 
 
 def _merge_attachment_slots(rep: dict, others: list, attach_max: int, spt_max: int = 5):
