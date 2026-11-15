@@ -275,8 +275,7 @@ def stage_research(cfg):
 
 def stage_dedup(cfg):
     hits = _read(cfg, "notices_research.parquet")
-    hist, latest, logs = dedup.dedup_latest(hits, cfg["dedup"]["price_change_warn_ratio"],
-                                            float(cfg["dedup"].get("minor_notice_ratio", 0.30)))
+    hist, latest, logs = dedup.dedup_latest(hits, cfg["dedup"]["price_change_warn_ratio"])
     hist.to_parquet(_p(cfg, "notices_hist.parquet"), index=False)
     latest.to_parquet(_p(cfg, "notices_latest.parquet"), index=False)
     # 같은 공고가 여러 시설의 대표로 잡힌 경우(복합 발주: '충남미술관 및 공영주차장 건립공사' 등) → 05 시트에서 시설마다 집계되므로 검수자가 판단
@@ -288,10 +287,18 @@ def stage_dedup(cfg):
             multi.append({"공고번호": str(r["공고번호"]), "프로젝트키": "/".join(ids), "항목": "복수 시설 배정",
                           "비고": f"'{r['공고명']}' 이 시설 {len(ids)}개({', '.join(ids)})의 대표 공고 — 05 시트에 시설마다 집계됨. 한 시설만 남기려면 검수에서 다른 시설을 제외"})
     _logs_frame(logs + multi).to_parquet(_p(cfg, "logs_dedup.parquet"), index=False)
+    n_split = int((hist.drop_duplicates("프로젝트ID")["세부사업수"] > 1).sum()) if len(hist) else 0
+    n_base = hist.loc[hist["세부사업수"] > 1, "시설ID"].astype(str).add(hist.loc[hist["세부사업수"] > 1, "사업유형"].astype(str)).nunique() if len(hist) else 0
+    warn = [l for l in logs if l.get("판정") == "경고"]
     print(f"전체 {len(hist)}건 → 대표 {len(latest)}건 (고유 공고 {latest['공고키'].nunique() if len(latest) else 0}건, "
-          f"프로젝트 {latest['프로젝트ID'].nunique() if len(latest) else 0}개, 경고 {len(logs)}건, 복수 시설 배정 {len(multi)}건)")
-    for l in logs[:20]:
-        print(f"  - {l.get('항목')}: {l.get('비고')}")
+          f"프로젝트 {latest['프로젝트ID'].nunique() if len(latest) else 0}개, 경고 {len(warn)}건, 복수 시설 배정 {len(multi)}건)")
+    if n_split:
+        print(f"  - 세부사업 분리: 시설 후보 {n_base}개를 세부사업 {n_split}개로 나눔(프로젝트ID 끝 -01, -02 …). 06_검증로그 '세부사업 분리'·'같은 공종 합산' 에서 확인")
+    from collections import Counter
+    for name, n in Counter(str(l.get("항목")) for l in logs).most_common():
+        print(f"  - {name}: {n}건")
+    for l in warn[:10]:
+        print(f"    · [{l.get('항목')}] {str(l.get('비고'))[:150]}")
     if multi:
         print(f"  - 복수 시설 배정 {len(multi)}건 (06_검증로그 '복수 시설 배정' 항목, 예: {multi[0]['비고'][:80]}…)")
 
@@ -1371,7 +1378,7 @@ def assemble_trade_table(latest: pd.DataFrame, docs: dict, texts: Optional[dict]
         if not inc_doc:
             inc_src = ""
         rows.append({
-            "프로젝트ID": r["프로젝트ID"], "시설ID": r["시설ID"], "시설명": r["시설명"], "사업유형": r["사업유형"],
+            "프로젝트ID": r["프로젝트ID"], "시설ID": r["시설ID"], "시설명": r["시설명"], "세부사업명": r.get("세부사업명") or "", "사업유형": r["사업유형"],
             "공종": r["공종"],
             "공종_비고": classify.trade_note(r["공종"], r.get("공종근거"), r["공고명"], r.get("주공종명"), r.get("부공종명")),
             "포함공종_API": inc_api, "포함공종_문서": inc_doc, "포함공종_출처": inc_src,

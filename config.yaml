@@ -105,7 +105,6 @@ fields:
 
 dedup:
   price_change_warn_ratio: 0.30            # 대체 전후 추정가격 ±30% 초과 → 설계변경 의심
-  minor_notice_ratio: 0.30                 # 같은 프로젝트·공종에서 추정가격이 최대치의 30% 미만인 공고는 부대공사로 보고 대표에서 제외(경고 기록)
 
 llm:
   model: "claude-sonnet-5"                 # https://docs.claude.com/en/api/overview 에서 최신 모델명 확인 (정확도 우선이면 claude-opus-5)

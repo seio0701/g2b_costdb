@@ -167,15 +167,17 @@ def run():
         assert "R24010008" not in set(rs["공고번호"]) and set(rs[rs["시설명"] == "다른군 문화예술회관"]["공고번호"]) == {"R24020007"}
         assert rs[rs["공고번호"] == "R24010001"]["공종"].iloc[0] == "건축", "토목건축공사업 → 건축"
         assert rs[rs["공고번호"] == "R24020004"]["공고종류"].iloc[0] == "재공고", "'(취소 후 재공고)' 는 재공고"
-        # 5) dedup — 변경차수 채택, 소방은 재공고가 대표, 설치공사(소액)는 대표 제외, 기초금액 없는 다른군은 대표 유지
+        # 5) dedup — 변경차수 채택, 소방은 재공고가 대표, 본공사 두 달 뒤의 관리사무소 건립공사(4억)는 같은 세부사업의 건축 공고로 합산,
+        #    기초금액 없는 다른군은 대표 유지
         out = _run(["dedup", "--config", cfg_path])
         latest = pd.read_parquet(data("notices_latest.parquet"))
-        rep = latest.set_index("프로젝트키")
         gid = ids_before["가상군"]
-        assert rep.loc[f"{gid}-N|건축|", "공고번호"] == "R24010001" and rep.loc[f"{gid}-N|건축|", "공고차수"] == "001"
-        assert rep.loc[f"{gid}-N|소방|", "공고번호"] == "R24020004"
-        assert "R24030005" not in set(latest["공고번호"]) and "소액 공고 분리" in out
-        assert len(latest) == 5, latest[["프로젝트키", "공고번호"]]
+        by_no = latest.set_index("공고번호")
+        assert by_no.at["R24010001", "프로젝트ID"] == f"{gid}-N" and by_no.at["R24010001", "공고차수"] == "001"
+        assert by_no.at["R24020004", "프로젝트키"] == f"{gid}-N|소방|" and "R24010003" not in by_no.index
+        assert by_no.at["R24030005", "프로젝트ID"] == f"{gid}-N" and by_no.at["R24030005", "대표선정사유"].startswith("합산(같은 공종 2건)"), by_no["대표선정사유"].to_dict()
+        assert "같은 공종 합산" in out and "소액 공고" not in out
+        assert len(latest) == 6 and latest["프로젝트ID"].nunique() == 3, latest[["프로젝트키", "공고번호"]]
         # 6) attach — HWPX/DOCX/cp949 TXT 추출, HTML 응답은 실패 기록, 재실행 시 파일 재요청 없음
         out = _run(["attach", "--config", cfg_path])
         texts = json.load(open(data("texts.json"), encoding="utf-8"))
@@ -197,7 +199,7 @@ def run():
         assert sum(v for k, v in server.calls.items() if k.startswith("file:")) == n_file_calls + 1, "실패했던 파일 1개만 다시 요청"
         assert json.load(open(data("texts.json"), encoding="utf-8")).keys() == texts.keys()
         out = _run(["attach", "--report", "--config", cfg_path])
-        assert "텍스트 없는 공고 2건의 원인" in out and "다운로드 실패" in out and os.path.exists(data("notes_notext.parquet")), out
+        assert "텍스트 없는 공고 3건의 원인" in out and "다운로드 실패" in out and os.path.exists(data("notes_notext.parquet")), out
         # 7) extract — 견적만 / --yes 는 가짜 추출기로
         out = _run(["extract", "--config", cfg_path])
         assert "extract --yes" in out and not os.path.exists(data("llm_docs.json"))
@@ -399,7 +401,8 @@ def run():
             r = rows[f"{gid}-N"]
             area, total, per = val("05_공사비DB_시설합산", f"{col('연면적_m2')}{r}"), val("05_공사비DB_시설합산", f"{col('총공사비합계_기초금액기준(수식)')}{r}"), val("05_공사비DB_시설합산", f"{col('㎡당공사비_기초금액기준_원(수식)')}{r}")
             assert float(area) == 15200.0, area
-            assert abs(float(total) - (33000000000 + 2100000000 + 2860000000 + 583000000 + 38000000)) < 1, total   # 건축(기초+관급)+전기(+한전불입금)+소방
+            # 건축(기초+관급) + 전기(+한전불입금) + 소방 + 같은 세부사업으로 합산된 관리사무소 건립공사(추정가격 4억 + 부가세 10% 가정)
+            assert abs(float(total) - (33000000000 + 2100000000 + 2860000000 + 583000000 + 38000000 + 440000000)) < 1, total
             assert abs(float(per) - float(total) / 15200) < 1, per
             total_p = val("05_공사비DB_시설합산", f"{col('총공사비합계_추정가격기준(수식)')}{r}")
             assert abs(float(total_p) - float(total)) < 1, ("과세 공사는 추정가격+부가세 기준과 기초금액 기준이 같다", total_p, total)
@@ -427,7 +430,7 @@ def run():
             assert abs(net - (arch - tot04 * (3 / 23))) < 1, (net, arch, tot04)
             assert val("05_공사비DB_시설합산", f"{col('문서배분_중복경고(수식)')}{r5a}") in ("", None), "분리발주 중복 없음"
             assert abs(float(rate) - 28500000000 / 33000000000) < 1e-6, ("낙찰률(수식) = 낙찰금액/기초금액", rate)
-            assert abs(float(total) - (33000000000 + 2100000000 + 2860000000 + 583000000 + 38000000)) < 1, "낙찰금액은 총공사비에 쓰이지 않음"
+            assert abs(float(total) - (33000000000 + 2100000000 + 2860000000 + 583000000 + 38000000 + 440000000)) < 1, "낙찰금액은 총공사비에 쓰이지 않음"
             assert float(v4("기타금액ⓒ(수식)", r4e)) == 38000000 and float(v4("금액합계_기초금액기준(수식)", r4e)) == 2860000000 + 38000000, "전기 공고의 한전불입금이 금액 합계에 가산"
             print("05 시설합산 값 검증 OK")
         except ImportError:
