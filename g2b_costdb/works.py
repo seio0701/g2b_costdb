@@ -51,7 +51,8 @@ _BRACKET = re.compile(r"[%s]([^%s%s]{0,40})[%s]" % (_BR_OPEN, _BR_OPEN, _BR_CLOS
 _ADMIN_ONLY = re.compile(r"(?:%s|\d|차|제|회|후|건|분|및|[\s,·ㆍ/\-_.:])+" % _ADMIN)
 _ADMIN_RE = re.compile(_ADMIN)
 _LOT_IN = re.compile(r"(?:제\s*)?\d+(?:\s*-\s*\d+)*\s*차\s*분")                        # 행정 괄호 안에 함께 적힌 차수 표기: '(2차분 재공고)' 의 '2차분'
-_LOT_TAG = re.compile(r"\s*(?:제\s*)?\d+(?:\s*-\s*\d+)*\s*(?:차(?:\s*분)?)?\s*")     # 괄호 전체가 차수 표기: '(2차)', '(2차분)', '(3-2)', '(2)'
+_LOT1 = r"(?:제\s*)?\d+(?:\s*-\s*\d+)*\s*(?:차(?:\s*분)?)?"
+_LOT_TAG = re.compile(r"\s*%s(?:\s*(?:[,·ㆍ/]|및)\s*%s)*\s*" % (_LOT1, _LOT1))     # 괄호 전체가 차수 표기: '(2차)', '(2차분)', '(3-2)', '(2)'
 _LOT_BARE = re.compile(r"(?:제\s*)?\d+(?:\s*-\s*\d+)+|(?:제\s*)?\d+\s*차(?!\s*분)")   # '(2차, 긴급)' 의 '2차', '(긴급, 3-2)' 의 '3-2'
 _ORDINAL_ADMIN = re.compile(r"재공고|재입찰|공고|변경|정정|수정|취소")               # 숫자·차수가 공고 회차를 뜻하게 만드는 행정 문구('(2차 재공고)', '(2차 변경)')
 _REBID_WORD = re.compile(r"재공고|재입찰|새로운\s*입찰")
@@ -61,7 +62,10 @@ _NOISE = re.compile(r"(?:전체|총\s*차|총괄)\s*분(?![가-힣])|(?:제\s*)?
                     r"(?:여성|장애인|사회적)[^)\]）]{0,24}대상|공법\s*제안\s*공고|공법\s*제안|공사\s*계약|장기\s*계속\s*계약|계속비|별도\s*재무관|총괄|가칭")
 
 
-def _strip_admin(name) -> str:
+_BARE_ORD = re.compile(r"\s*(?:제\s*)?\d+\s*차\s*")
+
+
+def _strip_admin(name, drop_ord: bool = False) -> str:
     """공고명에서 행정 꼬리표 괄호('[긴급]', '(재공고)', '(2차 변경)')와 행정 문구('입찰공고', '수의견적 제출 안내공고')를 지운다.
     괄호 전체가 차수·단계 표기인 '(2차)'·'(2차분)'·'(3-2)' 는 다른 계약을 가리키므로 남긴다. '(2차분 재공고)' 는 '2차분', '(2차, 긴급)' 은 '2차' 만 남기고,
     '(2차 재공고)'·'(2차 변경)'·'(2회)'·'(제2회)' 는 공고 회차이므로 지운다."""
@@ -70,10 +74,14 @@ def _strip_admin(name) -> str:
         if not (x.strip() and _ADMIN_ONLY.fullmatch(x)):
             return m.group(0)
         if not _ADMIN_RE.search(x):
-            return m.group(0) if _LOT_TAG.fullmatch(x) else " "       # '(2회)'·'(제2회)'·'(1건)' 은 공고 회차 → 예전처럼 지운다
+            if not _LOT_TAG.fullmatch(x):
+                return " "                                             # '(2회)'·'(제2회)'·'(1건)' 은 공고 회차 → 예전처럼 지운다
+            return " " if (drop_ord and _BARE_ORD.fullmatch(x)) else m.group(0)
         lots = _LOT_IN.findall(x)
         if not lots and not _ORDINAL_ADMIN.search(x):
             lots = _LOT_BARE.findall(x)                                # '(2차, 긴급)' → '2차'
+            if drop_ord:
+                lots = [t for t in lots if not _BARE_ORD.fullmatch(t)]
         return (" " + " ".join(lots) + " ") if lots else " "
     return _NOISE.sub(" ", _BRACKET.sub(tag, str(name or "")))
 
@@ -81,16 +89,19 @@ def _strip_admin(name) -> str:
 # 제안 안내 공고: 특허공법·자재 선정을 위한 기술제안서 제출 안내·공모. 공사 발주 공고가 아니며, 금액이 적혀 있어도 본 공사 공고의 일부다.
 # '실시설계 기술제안 입찰공고'(기술제안입찰 = 실제 공사 발주)와 '…건립공사(특허공법)'(특허공법을 포함한 공사)은 해당하지 않는다
 # 무엇을 제안받는지(공법·자재·신기술·특허)가 이름에 있어야 한다 — '전시물 제작·설치 제안서 제출 안내'(협상에 의한 계약 = 실제 발주)는 해당하지 않는다
-_PROPOSAL = re.compile(r"제안서\s*제출\s*(?:안내|공고)|(?:공법|자재|기술)\s*제안\s*(?:공모|공고|안내)|(?:공법|자재)\s*선정[^,)\]）]{0,12}(?:공모|안내\s*공고)")
-_PROPOSAL_CTX = re.compile(r"공법|자재|신기술|특허")
-_BARE_ORD_BR = re.compile(r"[%s]\s*(?:제\s*)?\d+\s*차\s*[%s]" % (_BR_OPEN, _BR_CLOSE))        # 괄호로만 적은 'N차': '(2차)'
-_ORD_REBID_BR = re.compile(r"[%s]\s*((?:제\s*)?\d+\s*차)\s*(?:재공고|재입찰)\s*[%s]" % (_BR_OPEN, _BR_CLOSE))   # '(2차 재공고)'
+_PROPOSAL = re.compile(r"제안서\s*(?:제출|접수)\s*(?:안내|공고)|(?:공법|자재|기술)\s*제안\s*(?:공모|공고|안내)"
+                       r"|(?:공법|자재)\s*선정[^,)\]）]{0,12}(?:공모|안내\s*공고)|(?:공법|자재)\s*(?:선정\s*)?(?:공모|공고)(?![가-힣])")
+_PROPOSAL_CTX = re.compile(r"공법|(?<!기)자재|신기술(?!\s*(?:창업|사업화|센터|단지))|특허")          # '기자재'·'신기술창업센터' 는 공법·자재 선정이 아니다
+# 제안서를 받더라도 공사·제작 발주인 공고: 실시설계 기술제안 입찰, 협상계약 방식의 제작·설치(전시물, 무대 기자재)
+_PROPOSAL_NOT = re.compile(r"(?:실시|기본)\s*설계\s*기술\s*제안|입찰|(?:제작|구매)\s*[·ㆍ,및]?\s*설치|제작\s*[·ㆍ,및]?\s*구매")
+_ORD_REBID_BR = re.compile(r"[%s]?\s*((?:제\s*)?\d+\s*차)\s*(?:재공고|재입찰)\s*[%s]?|(?:재공고|재입찰)\s*[%s]?\s*((?:제\s*)?\d+\s*차)\s*[%s]?"
+                           % (_BR_OPEN, _BR_CLOSE, _BR_OPEN, _BR_CLOSE))   # '(2차 재공고)', '2차 재공고', '재공고(2차)'
 
 
 def is_proposal(name) -> bool:
     """공법·자재 선정용 제안서 제출 안내 공고(공사 발주가 아닌 공고)인지."""
     s_ = str(name or "")
-    return bool(_PROPOSAL.search(s_)) and bool(_PROPOSAL_CTX.search(s_))
+    return bool(_PROPOSAL.search(s_)) and bool(_PROPOSAL_CTX.search(s_)) and not _PROPOSAL_NOT.search(s_)
 
 
 _TRADE = "정보통신|통신설비|통신|전기설비|전기|소방시설|소방|기계설비|기계|설비|토목|조경|건축|골조|마감"
@@ -101,10 +112,19 @@ _YEAR = re.compile(r"(20[12]\d)\s*년(?:도)?")
 _PHASE = re.compile(r"(?:제\s*)?(\d+(?:\s*-\s*\d+)*)\s*(단계|공구|차분|차년도)"
                     r"|[\(\[（]\s*(\d+(?:\s*-\s*\d+)+)\s*()[\)\]）]"
                     r"|(?<![0-9A-Za-z가-힣])(?:제\s*)?(\d+)\s*(차)(?![0-9A-Za-z가-힣])")
+_LOT_LIST = re.compile(r"[%s]\s*(%s(?:\s*(?:[,·ㆍ/]|및)\s*%s)+)\s*[%s]" % (_BR_OPEN, _LOT1, _LOT1, _BR_CLOSE))
 _ONEOFF = re.compile(r"건립|신축|증축|개축|재건축|건설|조성|신설")
 _RECUR = re.compile(r"유지|관리|연간|단가|정비|보수|위탁|운영")
 # 해마다 다시 발주하는 것이 분명한 공사. '관리동 증축'·'개보수'·'국유지', 건물 이름 '유지관리동·유지관리센터', 낱말 속 글자 '산단가로등' 에는 걸리지 않게
-_ANNUAL = re.compile(r"유지\s*(?:관리|보수)(?!\s*(?:동|센터|사무소|청사|실(?![가-힣])))|연간|(?<![가-힣])단가|단가\s*(?:계약|공사|입찰)")
+_ANNUAL = re.compile(r"유지\s*[·ㆍ]?\s*(?:관리|보수)(?!\s*(?:동|센터|사무소|청사|실(?![가-힣])))|(?<![가-힣])연간|연간\s*(?:단가|유지|관리|보수)|(?<![0-9가-힣])단가|단가\s*(?:계약|공사|입찰)")
+_ANNUAL_NOT = re.compile(r"(?:건립|신축|증축|개축|재건축|신설)(?=$|[^가-힣]|공사|사업)")   # 연례 공사 말 뒤에 오는 한 번짜리 공사 말: '유지관리 사무실 신축공사'
+
+
+def is_annual(name) -> bool:
+    """해마다 다시 발주하는 공사 이름인지. '유지관리 사무실 신축공사'·'유지관리용 창고 신축공사' 처럼 연례 공사 말 뒤에 건물 공사 말이 오면 한 번짜리 공사."""
+    s_ = str(name or "")
+    m = _ANNUAL.search(s_)
+    return bool(m) and not _ANNUAL_NOT.search(s_, m.end())
 # '부지'·'이전' 은 낱말로 쓰였을 때만 일반어('부지조성'·'주차장부지 조성', '이전 조성'·'이전에 따른'). 낱말 속 글자('서부지구', '본부지하주차장', '어린이전용', '기업이전단지')와
 # 장소 이름 '고수부지' 는 지우지 않는다
 _SITE = (r"(?<![동서남북중])(?<!고수)부지(?=$|[^가-힣]|조성|정비|정리|매입|성토)"
@@ -117,6 +137,7 @@ _GENERIC = re.compile(
     r"인테리어|실내|내부|외부|부대|보강|개설|설치|철거|해체|석면|지장물|지정폐기물|폐기물|포장|가설|울타리|정화조|승강기|엘리베이터|"
     r"무대\s*(?:기계|장치|조명|음향)?|전시물?|집기|가구|사인물|간판|제작|구매|관급\s*자재|자재|기타|일괄|에\s*따른|관련|시설|구조|수선|분야|부문|시행|및")
 _SITE_WORD = re.compile(r"(?<![동서남북중])(?<!고수)부지(?=$|[^가-힣])|(?<!어린)이전(?=$|[^가-힣])")
+_BUILD_RE = re.compile(r"(?:건립|신축|증축|개축|재건축|건설|신설)(?!\s*(?:예정|사업|공사)?\s*부지)")   # 부지 정리가 아니라 건물 공사를 함께 발주한 공고
 _VERB = re.compile(r"건립|신축|증축|개축|재건축|건설|조성|리모델링|개보수|신설|확장|이전")
 _REGION_TAIL = re.compile(r"(특별자치도|특별자치시|특별시|광역시|자치도|도|시|군|구)$")
 _PUNCT = re.compile(r"[\s\-_·ㆍ・,.\[\]\(\)（）【】<>〈〉/~:;'\"]")
@@ -126,7 +147,8 @@ def clean_title(name) -> str:
     """머리말·꼬리말('[긴급]', '(재공고)', '입찰공고')을 뺀 공고명(표시용)."""
     t = re.sub(r"\s+", " ", _strip_admin(name))
     t = re.sub(r"\s*,\s*(?=[\]\)）])", "", re.sub(r"(?<=[\[\(（])\s*,\s*", "", t))      # 문구를 지우고 남은 '(전기, )' → '(전기)'
-    t = re.sub(r"(?<=[\[\(（])\s*및\s+", "", t)                                          # '(전체분 및 1차분)' → '(1차분)'
+    t = re.sub(r"(?<=[\[\(（/])\s*및\s*(?=(?:제\s*)?\d)", "", re.sub(r"(?<=[\[\(（])\s*및\s+", "", t))   # '(전체분 및 1차분)'·'(총괄및1차분)' → '(1차분)'
+    t = re.sub(r"(?<=,)\s*및\s*(?=(?:제\s*)?\d)", " ", t)                           # '(장기계속, 전체분 및 1차분)' → '(장기계속, 1차분)'
     t = re.sub(r"[\[\(（]\s*[\]\)）]", "", t)                                               # 빈 괄호
     return re.sub(r"\s+", " ", t).strip(" -")
 
@@ -169,7 +191,9 @@ def features(name, facility="") -> Dict:
     s = _strip_admin(name)
     years = frozenset(_YEAR.findall(s))
     s = _YEAR.sub(" ", s)
-    phases = frozenset("".join(x for x in m.groups() if x).replace(" ", "") for m in _PHASE.finditer(s))
+    lots = [_PUNCT.sub("", m.group(1)) for m in _LOT_LIST.finditer(s)]      # '(2,3차분)', '(2차 및 3차)' — 여러 차수를 묶은 괄호
+    s = _LOT_LIST.sub(" ", s)
+    phases = frozenset("".join(x for x in m.groups() if x).replace(" ", "") for m in _PHASE.finditer(s)) | frozenset(lots)
     s = _PHASE.sub(" ", s)
     verb = bool(_VERB.search(s))
     s = _TRADE_RE.sub(" ", s)
@@ -212,7 +236,8 @@ def features(name, facility="") -> Dict:
     raw = str(name or "")
     return {"disc": disc, "years": years, "phases": phases, "digits": frozenset(re.findall(r"\d+", disc)), "verb": verb, "base": base,
             "alts": frozenset(alts), "rebid": bool(_REBID_WORD.search(raw)),
-            "oneoff": bool(_ONEOFF.search(raw)) and not _RECUR.search(raw) and not years, "site": site}
+            "oneoff": bool(_ONEOFF.search(raw)) and not _RECUR.search(raw) and not years, "site": site,
+            "site_prep": "부지" in site and not _SITE_RE.search(str(facility or "")) and not _BUILD_RE.search(raw)}
 
 
 def _window(price) -> int:
@@ -308,12 +333,12 @@ def _link(fa: Dict, fb: Dict, gap: int, window: int, ta: str, tb: str, new_build
             return "contain"
         return ""
     child, main, pc, pm = (fa, fb, pa, pb) if da else (fb, fa, pb, pa)
-    if "부지" in main.get("site", ()):
-        return ""                                      # '부지'를 지워서 구분어가 빈 공고(지구 전체의 부지조성)는 이름이 다른 공고의 본공사 노릇을 하지 않는다
     # 구분어가 빈 본공사 ↔ 구분어가 있는 공고: 자기 목적어를 가진 별개 사업('○○ 신축', '△△ 조성')이면 연결하지 않는다.
     # 다만 본공사와 거의 같은 때 난 공고(권역별·구역별 분할 발주)나, 본공사 이름 뒤에 세부 이름을 붙인 공고('…리모델링 사업 클라이밍장 조성공사')는 연결
     if len(main["base"]) >= 6 and child["base"].startswith(main["base"]):
         return "main"
+    if main.get("site_prep"):
+        return ""                                      # '부지'를 지워서 구분어가 빈 공고(지구 전체의 부지조성)는 이름이 다른 공고의 본공사 노릇을 하지 않는다
     if not child["verb"]:
         # 부대공사로 보이는 이름('연결통로공사', '자동관수시설공사'): 신축은 준공 때까지 부대공사가 이어지므로 허용 간격 전체,
         # 증축·리모델링 시설은 이름이 다른 소규모 공사가 대개 별개 사업이므로 본공사와 가까운 때에만
@@ -374,11 +399,11 @@ def _assign_group(g: pd.DataFrame) -> Dict:
     for i in idx:
         nm = str(g.at[i, "공고명"] or "")
         if _ORD_REBID_BR.search(nm):
-            lot_key = title_key(_ORD_REBID_BR.sub(lambda m: "(" + m.group(1) + ")", nm))
-            if lot_key != tk[i] and any(k != i and tk[k] == lot_key and g.at[k, "공종"] == g.at[i, "공종"] for k in idx):
+            lot_key = title_key(_ORD_REBID_BR.sub(lambda m: "(" + (m.group(1) or m.group(2)) + ")", nm))
+            if lot_key != tk[i] and any(k != i and tk[k] == lot_key and g.at[k, "공종"] == g.at[i, "공종"] and g.at[k, "_dt"] <= g.at[i, "_dt"] for k in idx):
                 tk[i] = lot_key
-    tk0 = {i: title_key(_BARE_ORD_BR.sub(" ", str(g.at[i, "공고명"] or ""))) for i in idx}        # 괄호로만 적은 'N차' 를 뺀 키
-    annual = {i: bool(_ANNUAL.search(str(g.at[i, "공고명"]))) for i in idx}
+    tk0 = {i: _PUNCT.sub("", _strip_admin(g.at[i, "공고명"], True)) for i in idx}        # 괄호로만 적은 'N차' 를 뺀 키
+    annual = {i: is_annual(g.at[i, "공고명"]) for i in idx}
     members = {i: [i] for i in idx}
     for i in idx:                                       # 이전공고번호로 이미 묶인 것 반영
         r = find(i)
@@ -477,6 +502,13 @@ def _assign_group(g: pd.DataFrame) -> Dict:
             return
         role[old], repl[old], why[old] = "superseded", str(g.at[new, "공고번호"]).strip(), reason
 
+    ann = set()                                         # 괄호 'N차' 가 차수가 아니라 공고 회차(몇 번째 공고)임이 드러난 공고
+
+    def round_ord(i) -> bool:
+        """i 의 괄호 'N차' 가 공고 회차인지: 앞에서 그렇게 판정됐거나, 재공고라고 밝힌 공고인데 같은 이름(같은 차수)의 앞 공고가 없을 때.
+        같은 이름의 앞 공고가 있으면 그 차수 공고의 재공고이므로 차수 표기다('(1차)' → '(1차)' 재공고 → 금액이 같은 '(2차)' 는 다른 차수)."""
+        return i in ann or (is_rebid_notice(i) and not any(pos[k] < pos[i] and tk[k] == tk[i] and g.at[k, "공종"] == g.at[i, "공종"] and k not in ann for k in idx))
+
     for n, i in enumerate(idx):
         for j in idx[n + 1:]:                           # j 는 i 보다 공고일시가 같거나 뒤
             if work[i] != work[j]:
@@ -496,14 +528,18 @@ def _assign_group(g: pd.DataFrame) -> Dict:
             in_time = (0 if flagged else PARAMS["rebid_min_days"]) <= days <= rebid_limit(i, j)
             # 괄호로만 적은 '(2차)' 는 차수 발주일 수도, '두 번째 공고'(재공고)일 수도 있다. 금액이 그대로이고(차수 발주는 금액이 다르다),
             # 앞 공고가 차수 표기 없는 같은 이름(또는 그 재공고)이며, 그 차수의 원 공고가 따로 없을 때만 재공고로 본다
-            loose = (tk[i] != tk[j] and tk0[j] != tk[j] and tk0[i] == tk0[j] and (tk[i] == tk0[i] or is_rebid_notice(i))
-                     and price[i] > 0 and 0.99 <= ratio <= 1.01
+            loose = (tk[i] != tk[j] and tk0[j] != tk[j] and tk0[i] == tk0[j] and (tk[i] == tk0[i] or j in ann or round_ord(i))
+                     and price[i] > 0 and price[j] > 0 and 0.99 <= ratio <= 1.01 and (flagged or days <= PARAMS["near_days"])
                      and not any(k != j and tk[k] == tk[j] and work[k] == work[j] and g.at[k, "공종"] == g.at[j, "공종"] for k in idx))
             exact = (tk[i] == tk[j] or loose) and in_time and PARAMS["rebid_lo"] <= ratio <= PARAMS["rebid_hi"]
             late = (not exact and retender(i, j) and days >= (0 if flagged else PARAMS["rebid_min_days"]))
             fuzzy = (not exact and not late and in_time and PARAMS["rebid_fuzzy_lo"] <= ratio <= PARAMS["rebid_fuzzy_hi"] and price[i] > 0
                      and re.findall(r"\d+", tk[i]) == re.findall(r"\d+", tk[j]) and similarity(tk[i], tk[j]) >= PARAMS["rebid_fuzzy"]
                      and feat[i]["disc"] == feat[j]["disc"] and feat[i]["site"] == feat[j]["site"])
+            if exact and loose:
+                ann.add(j)
+            elif exact and tk[i] != tk0[i] and round_ord(i):
+                ann.update((i, j))                      # 공고 회차 '(2차)' 를 같은 이름으로 한 번 더 낸 공고도 공고 회차
             if exact or late or fuzzy:
                 supersede(i, j, "같은 공고명으로 다시 공고" if exact else ("같은 공고명으로 다시 발주(사업 지연 뒤 재발주)" if late else "거의 같은 공고명·금액으로 다시 공고"))
     # 재공고가 거듭된 경우(A ← B ← C) 대체공고번호는 끝까지 남은 공고(C)를 가리키게 한다

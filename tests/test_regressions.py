@@ -1422,15 +1422,21 @@ def test_work_split_review(tmp):
     _, latest, _ = dedup.dedup_latest(pd.DataFrame(rows), 0.30)
     dup = dedup.cross_facility_duplicates(latest)
     assert dup.at["F1-N-01", "중복_제외권장"] == "Y" and dup.at["F7-N", "중복_제외권장"] == "" and dup.at["F7-N", "시설간_중복"] == "같은 사업: F1-N-01", dup.to_dict()
-    rows = [mk("X", "가상 1단지 아파트 건설공사", "2024-01-10 10:00:00", 9e10, fac=umb, fid="F6"), mk("Y", "가상 2단지 아파트 건설공사", "2024-01-10 10:00:00", 8e10, fac=umb, fid="F6"),
-            mk("Z", "가상 2단지 아파트 전기공사", "2024-02-10 10:00:00", 8e9, fac=umb, fid="F6", trade="전기"),
-            mk("X", "가상 1단지 아파트 건설공사", "2024-01-10 10:00:00", 9e10, fac="가상 아파트", fid="F5"), mk("Y", "가상 2단지 아파트 건설공사", "2024-01-10 10:00:00", 8e10, fac="가상 아파트", fid="F5")]
+    own2, umb2 = "가상군 청년공공임대주택", "청년공공임대주택"                                                             # 실제 모양: 한 시설은 한 프로젝트, 묶음 시설은 두 세부사업
+    rows = [mk("D", "가상군 청년공공임대주택건립사업 폐교 철거공사", "2024-08-20 10:00:00", 2.8e8, fac=own2, fid="F5"),
+            mk("M", "가상군 청년공공임대주택 건립사업 건축·토목·조경·기계공사", "2024-12-02 10:00:00", 60.3e8, fac=own2, fid="F5"),
+            mk("D", "가상군 청년공공임대주택건립사업 폐교 철거공사", "2024-08-20 10:00:00", 2.8e8, fac=umb2, fid="F6"),
+            mk("M", "가상군 청년공공임대주택 건립사업 건축·토목·조경·기계공사", "2024-12-02 10:00:00", 60.3e8, fac=umb2, fid="F6"),
+            mk("E", "청년공공임대주택 건립사업 전기공사", "2025-02-26 10:00:00", 7e8, fac=umb2, fid="F6", trade="전기")]
     hist, latest, _ = dedup.dedup_latest(pd.DataFrame(rows), 0.30)
     pid = hist.set_index(["시설ID", "공고번호"])["프로젝트ID"]
-    if pid[("F5", "X")] == pid[("F5", "Y")]:                                                                                # F5 가 한 프로젝트로 묶인 경우에만 해당하는 모양
-        dup = dedup.cross_facility_duplicates(latest)
-        a, b1, b2 = pid[("F5", "X")], pid[("F6", "X")], pid[("F6", "Y")]
-        assert dup.at[a, "중복_제외권장"] == "Y" and dup.at[a, "시설간_중복"].startswith(f"{b1} + {b2} 에 나뉘어 있음") and dup.at[b1, "중복_제외권장"] == "" and dup.at[b2, "중복_제외권장"] == "", dup.to_dict()
+    assert pid[("F5", "D")] == pid[("F5", "M")] == "F5-N" and pid[("F6", "D")] != pid[("F6", "M")] == pid[("F6", "E")], pid.to_dict()     # 전제(바뀌면 이 사례를 다시 짤 것)
+    dup = dedup.cross_facility_duplicates(latest)
+    b1, b2 = pid[("F6", "D")], pid[("F6", "M")]
+    assert dup.at["F5-N", "중복_제외권장"] == "Y" and dup.at["F5-N", "시설간_중복"].startswith(f"{b1} + {b2} 에 나뉘어 있음"), dup.to_dict()
+    assert dup.at[b1, "중복_제외권장"] == "" and dup.at[b2, "중복_제외권장"] == "", dup.to_dict()
+    kept = latest[~latest["프로젝트ID"].isin(dup.index[dup["중복_제외권장"] == "Y"])]
+    assert sorted(kept["공고번호"]) == ["D", "E", "M"], sorted(kept["공고번호"])
     sets_ = pd.DataFrame([dict(프로젝트ID="P1", 시설ID="F5", 공고번호="X", 세부사업수=1), dict(프로젝트ID="P1", 시설ID="F5", 공고번호="Y", 세부사업수=1),
                           dict(프로젝트ID="Q1", 시설ID="F6", 공고번호="X", 세부사업수=2), dict(프로젝트ID="Q2", 시설ID="F6", 공고번호="Y", 세부사업수=2),
                           dict(프로젝트ID="Q2", 시설ID="F6", 공고번호="Z", 세부사업수=2)])
@@ -1438,6 +1444,208 @@ def test_work_split_review(tmp):
     assert dup.at["P1", "중복_제외권장"] == "Y" and dup.at["P1", "시설간_중복"].startswith("Q1 + Q2 에 나뉘어 있음") and dup.at["Q1", "중복_제외권장"] == "" and dup.at["Q2", "중복_제외권장"] == "", dup.to_dict()
     kept = sets_[~sets_["프로젝트ID"].isin(dup.index[dup["중복_제외권장"] == "Y"])]
     assert sorted(kept["공고번호"]) == ["X", "Y", "Z"]                                                                       # 빠지는 공고도, 두 번 남는 공고도 없다
+
+
+def test_work_split_review2(tmp):
+    """세부사업 분리 2차 독립 검토(2026-11-16)에서 나온 결함·빈틈: 괄호 'N차' 를 공고 회차로 보는 판정의 가드, 'N차 재공고' 의 여러 표기, 여러 차수를 묶은 괄호,
+    '부지' 본공사 규칙의 범위, 연례 공사 오인, 제안 안내 공고의 범위, 이전공고번호 사슬과 대체공고번호, 취소공고의 대체공고번호, 공고연도, 시설 간 중복 요약 문구."""
+    import io
+    import contextlib
+    from g2b_costdb import works, dedup, pipeline
+
+    t0 = pd.Timestamp("2024-01-10 10:00:00")
+
+    def mk(no, name, day, eok, kind="일반", trade="건축", ord_="000", prev="", wt="신축", fac="가상시 회관", rebid="N", fid="F1"):
+        dt = day if isinstance(day, str) else (t0 + pd.Timedelta(days=day)).strftime("%Y-%m-%d %H:%M:%S")
+        return dict(시설ID=fid, 시설명=fac, 공고번호=no, 공고차수=ord_, 공고키=f"{no}-{ord_}", 공고명=name, 공고일시=dt, 사업유형=wt, 공종=trade,
+                    추정가격=(None if eok is None else eok * 1e8), 공고종류=kind, 재공고여부=rebid, 이전공고번호=prev,
+                    표2_대분류="문화 및 집회시설", 표2_중분류="-", 검색어="회관", 수요기관="가상시")
+
+    def run(rows):
+        h, l, lg = dedup.dedup_latest(pd.DataFrame(rows), 0.30)
+        return h.set_index("공고키"), sorted(str(x).strip() for x in l["공고번호"]), lg
+
+    def check(tag, rows, want, projects=None):
+        h, cnt, _ = run(rows)
+        assert cnt == sorted(want), (tag, cnt, h["대표선정사유"].to_dict())
+        if projects is not None:
+            assert h["프로젝트ID"].nunique() == projects, (tag, h["프로젝트ID"].to_dict())
+        return h
+
+    RB, T = dict(kind="재공고", rebid="Y"), dict(trade="토목")
+    N, B = "가상시 회관 조성사업", "가상시 회관 건립공사"
+
+    # ① 괄호로만 적은 '(2차)': 차수 발주일 수도, 두 번째 공고(재공고)일 수도 있다 → 금액이 그대로(±1%)이고 앞 공고에 차수 표기가 없으며,
+    #    재공고라고 밝혔거나 120일 안에 난 경우에만 재공고로 본다
+    check("(1차)+(2차) 같은 금액 → 차수별 발주", [mk("A", N + "(1차)", 0, 50, **T), mk("B", N + "(2차)", 150, 50, **T)], ["A", "B"])
+    check("(1차)+(2차) 같은 금액 20일", [mk("A", B + "(1차)", 0, 100), mk("B", B + "(2차)", 20, 100)], ["A", "B"])
+    check("금액이 없는 '(2차)' 는 금액이 그대로인 재공고가 아니다", [mk("A", N, 0, 50, **T), mk("B", N + "(2차)", 150, None, **T)], ["A", "B"])
+    check("앞 공고 금액이 없을 때도", [mk("A", N, 0, None, **T), mk("B", N + "(2차)", 20, 60, **T)], ["A", "B"])
+    check("금액 없는 재공고 '(2차)'", [mk("A", B, 0, 100), mk("B", B + "(2차)", 20, None, **RB)], ["A", "B"])
+    assert run([mk("A", B, 0, 100), mk("B", B + "(2차)", 20, 100.5)])[1] == ["B"]                    # +0.5% = 재공고
+    assert run([mk("A", B, 0, 100), mk("B", B + "(2차)", 20, 105)])[1] == ["A", "B"]                 # +5% = 차수 발주
+    check("금액이 3% 다른 '(2차)'", [mk("A", N, 0, 50, **T), mk("B", N + "(2차)", 20, 51.5, **T)], ["A", "B"])
+    check("같은 금액이라도 200일 뒤(재공고 표시 없음)면 차수 발주", [mk("A", N, 0, 50, **T), mk("B", N + "(2차)", 200, 50, **T)], ["A", "B"])
+    check("재공고라고 밝혔으면 200일 뒤라도 재공고", [mk("A", N, 0, 50, **T), mk("B", N + "(2차)", 200, 50, **T, **RB)], ["B"])
+    check("'', '(2차)', '(3차)' 같은 금액 20일 간격 → 마지막만", [mk("A", B, 0, 100), mk("B", B + "(2차)", 20, 100), mk("C", B + "(3차)", 40, 100)], ["C"])
+    check("'', (2차) 재공고, (2차) 재공고, (3차) 재공고 → 마지막만",
+          [mk("A", B, 0, 100), mk("B", B + "(2차)", 15, 100, **RB), mk("B2", B + "(2차)", 30, 100, **RB), mk("C", B + "(3차)", 45, 100, **RB)], ["C"])
+    check("(1차), (1차) 재공고, 같은 금액 (2차) → 1차 재공고 + 2차",
+          [mk("A", N + "(1차)", 0, 50, **T), mk("A2", N + "(1차)", 10, 50, **T, **RB), mk("B", N + "(2차)", 200, 50, **T)], ["A2", "B"])
+    check("(1차), (2차), (2차) 재공고, 금액이 같은 (3차) → 차수 셋",
+          [mk("A", N + "(1차)", 0, 50, **T), mk("B", N + "(2차)", 100, 60, **T), mk("B2", N + "(2차)", 120, 60, **T, **RB), mk("C", N + "(3차)", 250, 60, **T)], ["A", "B2", "C"])
+    h = check("표기 없는 1차와 금액이 같은 (2차) + 그 재공고 → 1차 + 2차 재공고", [mk("A", B, 0, 100), mk("B", B + "(2차)", 60, 100), mk("C", B + "(2차)", 91, 100, **RB)], ["A", "C"])
+    assert h.at["B-000", "대체공고번호"] == "C"
+    check("'(2차, 긴급)' 재공고 같은 금액", [mk("A", B, 0, 100), mk("B", B + "(2차, 긴급)", 20, 100, **RB)], ["B"])
+    check("'(2차, 긴급)' 금액이 다르면 차수 발주", [mk("A", B, 0, 100), mk("B", B + "(2차, 긴급)", 20, 60, **RB)], ["A", "B"])
+    check("'(2차분, 긴급)' 은 금액이 같아도 차수 발주", [mk("A", B, 0, 100), mk("B", B + "(2차분, 긴급)", 20, 100)], ["A", "B"])
+
+    # ② 'N차 재공고' 의 여러 표기: 그 차수의 원 공고('(2차)')가 먼저 나 있으면 그 공고의 재공고(1차는 남는다)
+    for form in ("(2차 재공고)", " 2차 재공고", " 재공고(2차)"):
+        check("N차 재공고 표기 " + form, [mk("A", N, 0, 50, **T), mk("B", N + "(2차)", 150, 60, **T), mk("C", N + form, 170, 60, **T, **RB)], ["A", "C"])
+    check("1차와 금액이 같은 (2차) + (2차 재공고)", [mk("A", N, 0, 60, **T), mk("B", N + "(2차)", 150, 60, **T), mk("C", N + "(2차 재공고)", 170, 60, **T, **RB)], ["A", "C"])
+    check("다른 공종의 '(2차)' 는 원 공고가 아니다", [mk("A", N, 0, 50, **T), mk("E", N + "(2차)", 5, 5, trade="전기"), mk("B", N + "(2차 재공고)", 20, 55, **T, **RB)], ["B", "E"])
+    check("'(2차 재공고)' 뒤에 난 '(2차)' 는 그 원 공고가 아니다", [mk("A", N, 0, 50, **T), mk("B", N + "(2차 재공고)", 20, 50, **T, **RB), mk("C", N + "(2차)", 400, 120, **T)], ["B", "C"])
+    check("'재공고(2차분)'", [mk("A", N, 0, 50, **T), mk("B", N + "(2차분)", 150, 60, **T), mk("C", N + " 재공고(2차분)", 170, 60, **T, **RB)], ["A", "C"])
+
+    # ③ 여러 차수를 묶은 괄호도 차수 표기 — 지워지면 앞 공고의 재공고로 읽힌다. 그 본공사의 다른 공종 공고는 같은 세부사업
+    check("'(2,3차분)'", [mk("A", N, 0, 50, **T), mk("B", N + "(2,3차분)", 200, 80, **T)], ["A", "B"], 1)
+    check("'(2차 및 3차)'", [mk("A", N, 0, 50, **T), mk("B", N + "(2차 및 3차)", 200, 80, **T)], ["A", "B"], 1)
+    check("'(2,3차분)' 본공사와 그 전기 공고", [mk("A", "가상시 회관 별관 증축공사(2,3차분)", 0, 50), mk("B", "가상시 회관 별관 증축 전기공사", 30, 5, trade="전기")], ["A", "B"], 1)
+    check("'(2,3차분)' 재공고", [mk("A", N + "(2,3차분)", 0, 80, **T), mk("B", N + "(2,3차분)", 20, 80, **T, **RB)], ["B"])
+
+    # ④ '부지' 규칙은 지구 전체의 부지조성 공고에만: 시설 이름에 '부지' 가 있거나, 건물 공사를 함께 발주했거나, 그 공고 이름을 딴 부대공사는 한 세부사업
+    fb = "가상 반환부지 문화공원"
+    check("시설명에 '부지'", [mk("A", fb + " 조성사업", 0, 50, fac=fb), mk("B", fb + " 연결통로 공사", 60, 3, trade="토목", fac=fb)], ["A", "B"], 1)
+    check("'부지조성 및 건립공사' 본공사", [mk("A", "가상시 회관 부지조성 및 건립공사", 0, 100), mk("B", "가상시 회관 연결통로 공사", 60, 3, trade="토목")], ["A", "B"], 1)
+    check("부지조성공사와 그 이름을 딴 부대공사", [mk("A", "가상시 회관 부지조성공사", 0, 30, **T), mk("B", "가상시 회관 부지조성공사 방음벽 설치공사", 60, 2, trade="기타")], ["A", "B"], 1)
+    check("지구 부지조성과 무관한 소규모 공사는 다른 세부사업",
+          [mk("A", "가상지구 부지조성공사", 0, 300, fac="가상지구", **T), mk("B", "가상지구 재선충병 방제사업", 60, 2, trade="기타", fac="가상지구")], ["A", "B"], 2)
+    assert "놀이전수관" in works.features("가상 백중놀이전수관 건립공사", "가상 문화마을")["disc"]              # 낱말 속 '이전' 은 지우지 않는다
+    assert "기업이전단지" in works.features("가상 기업이전단지 조성공사", "가상시")["disc"]
+
+    # ⑤ 연례 공사(재공고 간격 180일)는 해마다 다시 발주하는 공사 이름일 때만: 연례 공사 말 뒤에 건물 공사 말이 오거나 낱말 속 글자면 한 번짜리 공사
+    for nm in ("유지관리 사무실 신축공사", "유지관리용 창고 신축공사", "공연간판 설치공사", "2단가변무대 설치공사"):
+        assert not works.is_annual("가상시 회관 " + nm), nm
+        check("한 번짜리 공사 200일 뒤 재발주 → 뒤 공고만: " + nm, [mk("A", "가상시 회관 " + nm, 0, 3, trade="기타"), mk("B", "가상시 회관 " + nm, 200, 3, trade="기타")], ["B"])
+    for nm in ("시설물 유지보수공사", "시설물 유지·보수공사", "연간 보수공사", "(단가) 보수공사", "시설보수단가공사", "신축 청사 유지관리공사", "시설물연간유지공사"):
+        assert works.is_annual("가상시 회관 " + nm), nm
+        h = check("연례 공사 200일 뒤 = 다음 회차: " + nm, [mk("A", "가상시 회관 " + nm, 0, 1, wt="리모델링"), mk("B", "가상시 회관 " + nm, 200, 1, wt="리모델링")], ["A", "B"])
+        assert h.at["A-000", "프로젝트ID"] != h.at["B-000", "프로젝트ID"], nm
+    check("이름 속 '신축'(쌍신축구장)", [mk("A", "쌍신축구장 천연잔디 유지관리공사", 0, 0.45, wt="리모델링", fac="쌍신축구장"),
+                                      mk("B", "쌍신축구장 천연잔디 유지관리공사", 270, 0.45, wt="리모델링", fac="쌍신축구장")], ["A", "B"])
+
+    # ⑥ 제안 안내 공고: 공법·자재 선정용 제안서 안내·공모만. 제작·설치 협상계약, 기술제안 입찰, 이름 속 글자('기자재', '신기술창업센터')는 공사 발주
+    for nm, want in (("가상시 회관 전시물 및 관급자재 제작·설치 제안서 제출 안내 공고", False), ("가상시 회관 무대 기자재 구매 설치 제안서 제출 안내공고", False),
+                     ("가상 신기술창업센터 전시물 제작·설치 제안서 제출 안내 공고", False), ("가상시 회관 건립공사(신기술 적용) 실시설계 기술제안 공고", False),
+                     ("가상시 예술의전당 건립사업 실시설계 기술제안 입찰공고", False), ("가상시 회관 특허공법 적용 방수공사", False),
+                     ("가상시 회관 친환경 자재 공모전 전시관 건립공사", False),
+                     ("가상시 회관 특허공법 선정 공고", True), ("가상시 회관 공법 선정 제안서 접수 공고", True), ("가상시 회관 신기술·특허공법 공모", True),
+                     ("가상시 회관 관급자재(방수) 선정 기술제안서 제출 안내 공고", True), ("가상 주차타워 건립사업 장경간 구조 신기술 제안서 제출 안내 공고", True),
+                     ("「가상읍 공영주차타워 건립사업」건축구조(주차타워) 공법, 자재 제안서 제출안내", True), ("가상군 자주식 주차타워 조성사업 건축구조(주차장)공법제안 공고", True)):
+        assert works.is_proposal(nm) is want, nm
+
+    # ⑦ 표시용 이름: 지운 '전체분'·'총괄' 뒤에 남는 '및'
+    assert works.clean_title("가상시 회관 건립공사(소방)(장기계속, 전체분 및 1차분)") == "가상시 회관 건립공사(소방)(장기계속, 1차분)", works.clean_title("가상시 회관 건립공사(소방)(장기계속, 전체분 및 1차분)")
+    assert works.clean_title("가상군 청년임대주택 건립공사(총괄및1차분)") == "가상군 청년임대주택 건립공사(1차분)", works.clean_title("가상군 청년임대주택 건립공사(총괄및1차분)")
+    assert works.clean_title("가상시 회관 건립공사(전체분 및 1차분)") == "가상시 회관 건립공사(1차분)"
+
+    # ⑧ 이전공고번호 사슬: 유효한 공고에서 멈추고(가운데 공고도 대체), 취소된 공고는 건너뛰며, 대체공고번호는 끝까지 남은 공고
+    h = check("A ← B ← C 모두 유효, 이름이 서로 다름", [mk("A", B, 0, 100), mk("B", "가상시 문화회관 건립공사(건축)", 31, 180, prev="A"),
+                                                       mk("C", "가상시 복합문화회관 신축공사", 60, 290, prev="B")], ["C"])
+    assert h.at["A-000", "대체공고번호"] == h.at["B-000", "대체공고번호"] == "C", h["대체공고번호"].to_dict()
+    h = check("A ← B[취소] ← B2[취소] ← C", [mk("A", B, 0, 100), mk("B", B, 20, 100, kind="취소", prev="A"), mk("B2", B, 31, 100, kind="취소", prev="B"),
+                                              mk("C", "가상시 문화회관 건립공사(건축) 새로운 입찰", 40, 180, prev="B2", **RB)], ["C"])
+    assert h.at["A-000", "대체공고번호"] == "C"
+    h = check("A ← B[취소] ← C: 이름이 달라도 한 세부사업", [mk("A", B, 0, 50), mk("B", B + "(건축)", 31, 52, prev="A", kind="취소"),
+                                                           mk("C", "나래마을 문화센터 신축 건축공사", 60, 55, prev="B")], ["C"])
+    assert h.at["A-000", "프로젝트ID"] == h.at["C-000", "프로젝트ID"] == "F1-N" and "재공고로 1건 대체" in h.at["C-000", "대표선정사유"], h[["프로젝트ID", "대표선정사유"]].to_dict()
+    h = check("사업유형이 다른 사슬 A(신축) ← B(리모델링) ← C(리모델링 재공고)", [mk("A", B, 0, 100), mk("B", "가상시 회관 리모델링공사", 31, 100, prev="A", wt="리모델링"),
+                                                                             mk("C", "가상시 회관 리모델링공사", 60, 100, prev="B", wt="리모델링", **RB)], ["C"])
+    assert h.at["A-000", "대체공고번호"] == "C" and h.at["B-000", "대체공고번호"] == "C", h["대체공고번호"].to_dict()      # B 를 거쳐 끝까지 남은 C
+    h = check("사업유형이 다른 두 공고가 서로를 가리키면 늦게 난 공고가 남는다",
+              [mk("A", B, 0, 100, prev="B"), mk("B", "가상시 회관 리모델링공사", 31, 100, prev="A", wt="리모델링")], ["B"])
+    assert h.at["A-000", "대체공고번호"] == "B" and h.at["B-000", "대체공고번호"] == ""
+    # 다른 프로젝트의 재공고에 대체돼 대표에서 빠지면, 같은 프로젝트·공종에 남은 공고의 사유도 남은 건수에 맞춘다
+    h = check("연결로 대표가 빠진 뒤 남은 공고의 사유", [mk("Y", "가상시 회관 건립 전기공사", 0, 5, trade="전기"), mk("Z", "가상시 회관 건립 무대조명 전기공사", 1, 2, trade="전기"),
+                                                       mk("R", "가상시 회관 리모델링 전기공사", 40, 5, trade="전기", wt="리모델링", prev="Y")], ["R", "Z"])
+    assert h.at["Z-000", "대표선정사유"].startswith("단독 공고") and h.at["Y-000", "대표선정사유"] == "대체됨(API 이전공고번호 연결)", h["대표선정사유"].to_dict()
+    # 한 공고의 차수마다 이전공고번호가 다르면 가장 늦은 차수의 값을 쓴다(입력 행 순서와 무관). 보이는 열은 API 가 준 값 그대로
+    rows = [mk("A", B, 0, 50), mk("X", "가상시 회관 별관 증축공사", 5, 30, wt="증축"), mk("B", "가상시 회관 리모델링공사", 31, 52, prev="A", wt="리모델링"),
+            mk("B", "가상시 회관 리모델링공사", 33, 52, prev="X", wt="리모델링", ord_="001", kind="변경")]
+    for order in ([0, 1, 2, 3], [0, 1, 3, 2], [3, 2, 1, 0]):
+        h, cnt, _ = run([dict(rows[k]) for k in order])
+        assert cnt == ["A", "B"] and h.at["X-000", "대체공고번호"] == "B" and h.at["B-000", "이전공고번호"] == "A" and h.at["B-001", "이전공고번호"] == "X", (order, cnt, h["이전공고번호"].to_dict())
+    # 공고번호가 숫자로 읽혀 '.0' 이 붙어도 이전공고번호 연결을 세부사업 배정에서 쓴다(이름이 다른 재공고가 원 공고와 같은 세부사업)
+    for a, b, pv in ((20240100001.0, 20240100002.0, 20240100001.0), ("20240100001.0", "20240100002.0", "20240100001.0"), (20240100001, 20240100002, 20240100001.0)):
+        h, l, _ = dedup.dedup_latest(pd.DataFrame([mk(a, B, 0, 50, prev=("" if isinstance(pv, str) else float("nan"))), mk(b, "나래마을 문화센터 신축 건축공사", 31, 50, prev=pv)]), 0.30)
+        assert len(l) == 1 and dedup._no(l["공고번호"].iloc[0]) == "20240100002" and set(h["프로젝트ID"]) == {"F1-N"}, (a, list(l["공고번호"]), h["프로젝트ID"].to_dict())
+
+    # ⑨ 취소공고의 대체공고번호: 같은 세부사업·공종에서 이름이 가장 비슷한 대표 공고 — 단, 취소공고보다 먼저 난 공고는 가리키지 않는다(이전공고번호로 이어진 원 공고는 예외)
+    h = check("취소 → 뒤에 다시 난 공고", [mk("X", "가상시 회관 건립 전기공사", 0, 5, trade="전기", kind="취소"), mk("Y", "가상시 회관 건립 전기공사", 31, 5, trade="전기"),
+                                         mk("Z", "가상시 회관 건립 무대조명 전기공사", 32, 2, trade="전기")], ["Y", "Z"])
+    assert h.at["X-000", "대체공고번호"] == "Y" and h.at["X-000", "대표선정사유"] == "취소공고", h["대체공고번호"].to_dict()
+    h = check("취소된 재공고 → 원 공고가 그대로 유효", [mk("A", B, 0, 100), mk("X", B, 31, 100, kind="취소", prev="A")], ["A"])
+    assert h.at["X-000", "대체공고번호"] == "A"
+    fac = "가상공사 온실"
+    rows = [mk("A", "가상군 스마트농업 실습농장 조성사업 온실공사", "2025-08-06 10:00:00", 60, fac=fac), mk("P", "가상 2호 스마트팜 온실신축사업 건축공사", "2023-07-04 10:00:00", 11, fac=fac),
+            mk("X", "다른군 스마트농업 육성지구 조성사업(서부단지) 온실공사", "2026-04-28 10:00:00", 180, fac=fac, kind="취소")]
+    hist, latest, _ = dedup.dedup_latest(pd.DataFrame(rows), 0.30)
+    hk = hist.set_index("공고키")
+    assert hk.at["X-000", "대체공고번호"] == "" and hk.at["X-000", "대표선정사유"] == "취소공고", hk[["프로젝트ID", "대체공고번호"]].to_dict()      # 먼저 난 다른 사업의 공고를 가리키지 않는다
+    # 05 '공고연도'의 근거인 최종공고일은 합산 대상 공고 기준(유효 차수가 없는 취소공고가 붙어 있어도 연도가 밀리지 않는다)
+    fs = dedup.facility_summary(latest, hist).set_index("프로젝트ID")
+    assert str(fs.at[hk.at["A-000", "프로젝트ID"], "최종공고일"]).startswith("2025-08-06") and str(fs.at[hk.at["X-000", "프로젝트ID"], "최종공고일"])[:4] in ("2025", "2023"), fs["최종공고일"].to_dict()
+
+    # ⑩ 시설 간 중복: 같은 사업이고 둘 다 나뉘지 않았으면 프로젝트ID 가 앞선 행을 남긴다(입력 순서와 무관) / 서로의 세부사업에 나뉜 경우 / 합친 것과 같은 경우
+    rows = [mk("A1", "가상 1단지 아파트 건설공사", 0, 900, fac="가상 1단지 아파트", fid="F2"), mk("A1", "가상 1단지 아파트 건설공사", 0, 900, fac="가상 아파트", fid="F7")]
+    _, latest, _ = dedup.dedup_latest(pd.DataFrame(rows), 0.30)
+    dup = dedup.cross_facility_duplicates(latest)
+    assert dup.at["F2-N", "중복_제외권장"] == "" and dup.at["F7-N", "중복_제외권장"] == "Y" and dup.at["F7-N", "시설간_중복"] == "같은 사업: F2-N", dup.to_dict()
+    assert dedup.cross_facility_duplicates(latest.iloc[::-1]).sort_index().equals(dup.sort_index())
+    sets_ = pd.DataFrame([dict(프로젝트ID=p_, 시설ID=f_, 공고번호=n_, 세부사업수=2) for p_, f_, nos in (("A-N-01", "A", "12"), ("A-N-02", "A", "34"), ("B-N-01", "B", "13"), ("B-N-02", "B", "24")) for n_ in nos])
+    dup = dedup.cross_facility_duplicates(sets_)
+    assert list(dup["중복_제외권장"]) == ["", "", "Y", "Y"] and dup.at["B-N-01", "시설간_중복"].startswith("A-N-01 + A-N-02 에 나뉘어 있음"), dup.to_dict()
+    sets_ = pd.DataFrame([dict(프로젝트ID=p_, 시설ID=f_, 공고번호=n_, 세부사업수=k_) for p_, f_, k_, nos in (("A-N", "A", 1, "123"), ("B-N-01", "B", 3, "1"), ("B-N-02", "B", 3, "2"), ("B-N-03", "B", 3, "3")) for n_ in nos])
+    dup = dedup.cross_facility_duplicates(sets_)
+    assert dup.at["A-N", "중복_제외권장"] == "" and list(dup.loc[["B-N-01", "B-N-02", "B-N-03"], "중복_제외권장"]) == ["Y", "Y", "Y"], dup.to_dict()
+
+    # ⑪ dedup 단계 요약: '복수 시설 배정' 건수(공고번호 기준 — 시설마다 다른 차수가 대표여도 한 건)와 '시설 간 중복 프로젝트' 1줄.
+    #    Y 행을 빼도 두 번 남는 공고(일부만 겹치는 프로젝트)가 있으면 '두 번 합산되지 않음' 대신 남은 건수를 적는다
+    def stage(rows, name):
+        d_ = os.path.join(tmp, name)
+        os.makedirs(d_, exist_ok=True)
+        pd.DataFrame(rows).to_parquet(os.path.join(d_, "notices_research.parquet"), index=False)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            pipeline.stage_dedup({"paths": {"data_dir": d_}, "dedup": {"price_change_warn_ratio": 0.30}})
+        lg = pd.read_parquet(os.path.join(d_, "logs_dedup.parquet"))
+        return buf.getvalue(), lg
+
+    own, umb = "가상 1단지 아파트", "가상공사 공공주택"
+    out, lg = stage([mk("A1", "가상 1단지 아파트 건설공사", 0, 900, fac=umb, fid="F9"), mk("A2", "가상 1단지 아파트 전기공사", 31, 90, fac=umb, fid="F9", trade="전기"),
+                     mk("B1", "가상 2단지 아파트 건설공사", 0, 800, fac=umb, fid="F9"),
+                     mk("A1", "가상 1단지 아파트 건설공사", 0, 900, fac=own, fid="F2"), mk("A2", "가상 1단지 아파트 전기공사", 31, 90, fac=own, fid="F2", trade="전기"),
+                     mk("B1", "가상 2단지 아파트 건설공사", 0, 800, fac="가상 2단지 아파트", fid="F3"), mk("B9", "가상 2단지 아파트 전기공사", 31, 80, fac="가상 2단지 아파트", fid="F3", trade="전기")], "dup_clean")
+    row = lg[lg["항목"] == "시설 간 중복 프로젝트"]
+    assert "복수 시설 배정 3건" in out and int((lg["항목"] == "복수 시설 배정").sum()) == 3, out
+    assert len(row) == 1 and row["판정"].iloc[0] == "참고" and "프로젝트 4개" in row["비고"].iloc[0] and "Y 인 2개 행을 빼면 같은 공고가 두 번 합산되지 않음" in row["비고"].iloc[0], row["비고"].tolist()
+    assert "시설 간 중복 프로젝트 4개" in out and "Y 인 2개 행을 빼면 같은 공고가 두 번 합산되지 않음" in out, out
+    umb = "가상도시공사 공공주택"                       # 묶음 시설 F9 는 단지별로 나뉘고, 단지 시설 F2·F3 이 진입도로 공고 R 을 함께 가진 경우 → Y 행을 빼도 R 은 두 번 남는다
+    part = [mk("A1", "가상 1단지 아파트 건설공사", 0, 900, fac=umb, fid="F9"), mk("A2", "가상 1단지 아파트 전기공사", 31, 90, fac=umb, fid="F9", trade="전기"),
+            mk("R", "가상지구 진입도로 개설공사", 60, 50, fac=umb, fid="F9", trade="토목"),
+            mk("B1", "가상 2단지 아파트 건설공사", 0, 800, fac=umb, fid="F9"), mk("B2", "가상 2단지 아파트 전기공사", 31, 80, fac=umb, fid="F9", trade="전기"),
+            mk("A1", "가상 1단지 아파트 건설공사", 0, 900, fac="가상 1단지 아파트", fid="F2"), mk("A2", "가상 1단지 아파트 전기공사", 31, 90, fac="가상 1단지 아파트", fid="F2", trade="전기"),
+            mk("R", "가상지구 진입도로 개설공사", 60, 50, fac="가상 1단지 아파트", fid="F2", trade="토목"),
+            mk("B1", "가상 2단지 아파트 건설공사", 0, 800, fac="가상 2단지 아파트", fid="F3"), mk("B2", "가상 2단지 아파트 전기공사", 31, 80, fac="가상 2단지 아파트", fid="F3", trade="전기"),
+            mk("R", "가상지구 진입도로 개설공사", 60, 50, fac="가상 2단지 아파트", fid="F3", trade="토목")]
+    out, lg = stage(part, "dup_partial")
+    note = lg.loc[lg["항목"] == "시설 간 중복 프로젝트", "비고"].iloc[0]
+    assert "두 번 합산되는 공고가 1건 남음" in note and "두 번 합산되지 않음" not in note and "두 번 합산되는 공고가 1건 남음" in out, (note, out)
+    # 같은 공고가 한 시설에서는 000 차수, 다른 시설에서는 001 차수로 대표가 된 경우도 '복수 시설 배정' 한 건
+    out, lg = stage([mk("A1", "가상 1단지 아파트 건설공사", 0, 900, fac=own, fid="F2"), mk("A1", "가상 1단지 아파트 건설공사", 0, 900, fac="가상 아파트", fid="F7"),
+                     mk("A1", "가상 1단지 아파트 건설공사(정정)", 5, 900, fac="가상 아파트", fid="F7", ord_="001", kind="변경")], "dup_rev")
+    assert "복수 시설 배정 1건" in out and int((lg["항목"] == "복수 시설 배정").sum()) == 1, out
 
 
 def test_trade_run_feedback(tmp):
@@ -1716,6 +1924,7 @@ def run():
         test_request_review_fixes(tmp)
         test_work_split()
         test_work_split_review(tmp)
+        test_work_split_review2(tmp)
         test_trade_run_feedback(tmp)
         test_attachments(tmp)
     print("OK: 회귀 테스트 통과")

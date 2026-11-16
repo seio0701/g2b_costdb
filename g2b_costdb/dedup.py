@@ -116,7 +116,11 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
         d["이전공고번호"] = ""
     # 이전공고번호는 차수마다 채워지지 않을 수 있다(변경 차수에서 빠짐) → 같은 (시설, 공고번호)의 어느 차수에든 있으면 모든 차수에 채운다
     pv = d["이전공고번호"].map(_no)
-    d["이전공고번호"] = pv.groupby([d["시설ID"].astype(str), d["공고번호"].astype(str)]).transform(lambda x: next((y for y in x if y), ""))
+    # 차수마다 값이 다르면 판정에는 가장 늦은 차수의 값을 쓴다(입력 행 순서와 무관). 보이는 열은 빈 차수만 채우고 API 가 준 값은 그대로 둔다
+    _o = d.assign(_pv=pv)[pv != ""].sort_values(["_ord", "_dt"])
+    _last = _o.groupby([_o["시설ID"].astype(str), _o["공고번호"].astype(str)])["_pv"].last().to_dict()
+    d["_pv_eff"] = [_last.get((str(f), str(n)), "") for f, n in zip(d["시설ID"], d["공고번호"])]
+    d["이전공고번호"] = pv.where(pv != "", d["_pv_eff"])
 
     # 1) (시설, 공고번호)별 최대 차수. 구차수의 사업유형은 최신 차수를 따른다(공고명 오타를 고친 변경공고 때문에 같은 공고가 두 프로젝트로 갈리지 않게)
     d = d.sort_values(["시설ID", "공고번호", "_ord", "_dt"])
@@ -137,7 +141,7 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
     # 이전공고번호가 유효하지 않은 공고(취소된 재공고 등)를 가리키면 그 공고의 이전공고번호를 따라 올라간다: A ← B(취소) ← C 이면 C 가 대체하는 공고는 A
     d["_no"] = d["공고번호"].map(_no)
     valid_nos = set(zip(d.loc[valid, "시설ID"].astype(str), d.loc[valid, "_no"]))
-    prev_of = {(str(f), n): p for f, n, p in zip(d["시설ID"], d["_no"], d["이전공고번호"]) if p}
+    prev_of = {(str(f), n): p for f, n, p in zip(d["시설ID"], d["_no"], d["_pv_eff"]) if p}
 
     def _valid_prev(f, p):
         seen = set()
@@ -145,8 +149,9 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
             seen.add(p)
             p = prev_of[(f, p)]
         return p
-    d["_prev"] = [_valid_prev(str(f), p) if p else "" for f, p in zip(d["시설ID"], d["이전공고번호"])]
-    w = works.assign_works(d[valid].assign(이전공고번호=d.loc[valid, "_prev"]), "_base")
+    d["_prev"] = [_valid_prev(str(f), p) if p else "" for f, p in zip(d["시설ID"], d["_pv_eff"])]
+    # works 에도 정규화한 공고번호를 넘긴다(이전공고번호와 같은 꼴이어야 연결을 찾는다 — 숫자로 읽혀 '.0' 이 붙은 공고번호)
+    w = works.assign_works(d[valid].assign(이전공고번호=d.loc[valid, "_prev"], 공고번호=d.loc[valid, "_no"]), "_base")
     d.loc[valid, "세부사업번호"] = w["세부사업번호"].astype(int)
     d.loc[valid, "세부사업명"] = w["세부사업명"]
     role = w["역할"].to_dict()
@@ -198,6 +203,7 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
                          "비고": f"{b}({g['시설명'].iloc[0] if '시설명' in g.columns else ''}): 공고 {len(g)}건을 세부사업 {n}개로 나눔 — " + "; ".join(names)[:600]})
 
     # 3) 세부사업·공종별 대표(합산 대상): 재공고로 대체된 공고만 제외
+    first_dt = d.groupby([d["시설ID"].astype(str), d["_no"]])["_dt"].min().to_dict()
     no_valid = set(d.loc[d["최신차수여부"], "_base"]) - set(d.loc[valid, "_base"])
     for b in sorted(no_valid):
         g = d[d["최신차수여부"] & (d["_base"] == b)]
@@ -220,7 +226,7 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
         n_cancel = int((g["공고종류"] == "취소").sum())
         for i in cnt:
             d.at[i, "최신여부"] = True
-            n_rep = sum(1 for j in sup if str(w.at[j, "대체공고번호"]) == str(d.at[i, "공고번호"]).strip())
+            n_rep = sum(1 for j in sup if str(w.at[j, "대체공고번호"]) == d.at[i, "_no"])
             reason = "단독 공고" if len(cnt) == 1 else f"합산(같은 공종 {len(cnt)}건)"
             d.at[i, "대표선정사유"] = reason + (f", 재공고로 {n_rep}건 대체" if n_rep else "") + (f", 취소 {n_cancel}건 제외" if n_cancel else "")
         if len(cnt) > 1:
@@ -232,7 +238,7 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
             rep_no = str(w.at[i, "대체공고번호"])
             d.at[i, "대체공고번호"] = rep_no
             d.at[i, "대표선정사유"] = f"대체됨({str(w.at[i, '사유']) or '이후 재공고/재발주'})"
-            rep = ok[ok["공고번호"].astype(str).str.strip() == rep_no]
+            rep = ok[ok["_no"] == rep_no]
             p0, p1 = _num(d.at[i, "추정가격"]), (_num(rep["추정가격"].iloc[0]) if len(rep) else None)
             if p0 and p1 and p0 > 0:
                 ratio = (p1 - p0) / p0
@@ -242,9 +248,12 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
                                  "비고": f"{pid}|{trade}: 선행 {d.at[i, '공고번호']} 대비 {ratio:+.1%} → 설계변경 의심"})
         for i in g.index[g["공고종류"] == "취소"]:
             d.at[i, "대표선정사유"] = "취소공고"
-            if cnt:
+            # 취소공고가 처음 난 날보다 먼저 난 공고는 그 공고를 '대체한 공고'가 될 수 없다(이전공고번호로 이어진 원 공고는 예외) → 없으면 비워 둔다
+            first = first_dt.get((str(d.at[i, "시설ID"]), d.at[i, "_no"]), d.at[i, "_dt"])
+            later = [j for j in cnt if d.at[j, "_dt"] >= first or d.at[j, "_no"] == d.at[i, "_prev"]]
+            if later:
                 key = works.title_key(d.at[i, "공고명"])
-                d.at[i, "대체공고번호"] = str(d.at[max(cnt, key=lambda j: works.similarity(key, works.title_key(d.at[j, "공고명"]))), "공고번호"])
+                d.at[i, "대체공고번호"] = str(d.at[max(later, key=lambda j: works.similarity(key, works.title_key(d.at[j, "공고명"]))), "공고번호"])
     # 차수 갱신된 구공고 표시 (최신 차수가 취소공고면 '취소됨'으로 표시)
     old = ~d["최신차수여부"]
     last_kind = d[d["최신차수여부"]].set_index(["시설ID", "공고번호"])["공고종류"]
@@ -260,6 +269,7 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
     #    유효한(취소되지 않은 최신 차수) 공고 B 가 A 를 이전 공고로 가리키면 A 는 대표에서 뺀다. 취소된 재공고는 원 공고를 대체하지 못한다
     prev_rows = d[valid & d["_prev"].map(bool)].sort_values(["_dt", "_no"], ascending=False)      # 늦게 난 공고부터(잘못된 순환 연결이면 늦은 공고가 남는다)
     row_of = {(f, n): i for i, f, n in zip(d.index[d["최신차수여부"]], d.loc[d["최신차수여부"], "시설ID"].astype(str), d.loc[d["최신차수여부"], "_no"])}
+    demoted = set()                                    # 여기서 대표가 빠진 (프로젝트ID, 공종)
     for _, b in prev_rows.iterrows():
         f = str(b["시설ID"])
         i = row_of.get((f, b["_prev"]))
@@ -274,11 +284,27 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
         d.at[i, "최신여부"] = False
         d.at[i, "대체공고번호"] = str(b["공고번호"])
         d.at[i, "대표선정사유"] = "대체됨(API 이전공고번호 연결)"
+        demoted.add((d.at[i, "프로젝트ID"], d.at[i, "공종"]))
         logs.append({"공고번호": d.at[i, "공고번호"], "항목": "이전공고번호 연결", "판정": "참고",
                      "비고": f"{b['공고번호']} 의 이전 공고로 지정되어 대표에서 제외"})
 
+    # 위 5)에서 대표가 바뀌면 대체공고번호가 대표에서 빠진 공고를 가리킬 수 있다 → 끝까지 남은 공고를 가리키게 한다(대체됨·취소공고 행)
+    for i in d.index[d["최신차수여부"] & d["대체공고번호"].map(bool) & ~d["최신여부"]]:
+        f = str(d.at[i, "시설ID"])
+        t, seen = row_of.get((f, _no(d.at[i, "대체공고번호"]))), {i}
+        while t is not None and not d.at[t, "최신여부"] and t not in seen:
+            seen.add(t)
+            t = row_of.get((f, _no(d.at[t, "대체공고번호"])))
+        if t is not None and d.at[t, "최신여부"]:
+            d.at[i, "대체공고번호"] = str(d.at[t, "공고번호"]).strip()
+    # 대표가 빠진 프로젝트·공종에 남은 대표 공고의 사유('합산(같은 공종 N건)'/'단독 공고')를 남은 건수에 맞춘다
+    for pid, trade in demoted:
+        left = d.index[d["최신여부"] & (d["프로젝트ID"] == pid) & (d["공종"] == trade)]
+        head = "단독 공고" if len(left) == 1 else f"합산(같은 공종 {len(left)}건)"
+        for j in left:
+            d.at[j, "대표선정사유"] = re.sub(r"^(?:단독 공고|합산\(같은 공종 \d+건\))", head, str(d.at[j, "대표선정사유"]))
     latest = d[d["최신여부"]].copy()
-    tmp_cols = ["_ord", "_dt", "_price", "_base", "_prop", "_no", "_prev"]
+    tmp_cols = ["_ord", "_dt", "_price", "_base", "_prop", "_no", "_prev", "_pv_eff"]
     d = d.drop(columns=tmp_cols)
     latest = latest.drop(columns=tmp_cols)
     return d, latest, logs
@@ -305,7 +331,8 @@ def facility_summary(latest: pd.DataFrame, all_hist: pd.DataFrame) -> pd.DataFra
             "수요기관": _mode(g["수요기관"]),
             "공사현장지역": _mode(g["공사현장지역"]) if "공사현장지역" in g.columns else "",
             "공고건수_전체": h["공고번호"].nunique(), "공고건수_최신": len(g),
-            "최초공고일": h["공고일시"].min(), "최종공고일": h["공고일시"].max(),
+            # 최종공고일(05 '공고연도'의 근거)은 합산 대상 공고 기준 — 유효 차수가 없는 취소공고가 다른 해에 붙어 있어도 연도가 밀리지 않게
+            "최초공고일": h["공고일시"].min(), "최종공고일": g["공고일시"].max(),
         }
         for t in trades:
             row[f"공종_{t}"] = "O" if (g["공종"] == t).any() else "X"
@@ -322,7 +349,8 @@ def cross_facility_duplicates(latest: pd.DataFrame) -> pd.DataFrame:
       시설간_중복   — 겹치는 프로젝트와 관계: '같은 사업: X'(대표 공고가 모두 같음) / 'X 의 일부'(이 프로젝트의 공고가 모두 X 에 있음) /
                       'X 를 포함(n/m건)' / 'X 와 일부 겹침(n/m건)'  (m = 이 프로젝트의 대표 공고 수, n = 그중 X 에도 있는 수) /
                       'X + Y 에 나뉘어 있음'(이 프로젝트의 공고가 다른 시설 후보 하나의 세부사업 X, Y 에 나뉘어 모두 들어 있음)
-      중복_제외권장 — 'Y' = 이 행을 빼면 같은 공고가 두 번 합산되지 않는다(다른 프로젝트의 일부이거나, 같은 사업 가운데 남길 한 행이 아닌 경우).
+      중복_제외권장 — 'Y' = 이 행을 빼도 그 공고가 남는 프로젝트가 있다(다른 프로젝트의 일부이거나, 같은 사업 가운데 남길 한 행이 아닌 경우). Y 행을 모두 빼면
+        같은 공고가 두 번 합산되지 않는다 — 단, 서로 일부만 겹치는 프로젝트('와 일부 겹침')는 권장이 없어 그 공고는 두 번 남는다(pipeline.stage_dedup 이 남은 건수를 적는다).
                       같은 사업끼리는 세부사업으로 나뉘지 않은(더 구체적인) 시설의 프로젝트를 남기고, 같으면 프로젝트ID 가 앞선 것을 남긴다.
                       일부만 겹치는 경우는 어느 쪽도 권장하지 않는다(검수에서 판단)."""
     cols = ["시설간_중복", "중복_제외권장"]
@@ -376,7 +404,8 @@ def cross_facility_duplicates(latest: pd.DataFrame) -> pd.DataFrame:
             else:
                 notes.append(f"{b} 와 일부 겹침({n}/{m}건)")
         rows[a] = {"시설간_중복": "; ".join(notes), "중복_제외권장": "Y" if drop else ""}
-    # 안전장치: Y 행을 모두 뺐을 때 어느 프로젝트에도 남지 않는 공고가 생기면 그 프로젝트의 권장을 거둔다(권장을 따라도 공고가 사라지지 않게)
+    # 안전장치: Y 행을 모두 뺐을 때 어느 프로젝트에도 남지 않는 공고가 생기면 그 프로젝트의 권장을 거둔다(권장을 따라도 공고가 사라지지 않게).
+    # 지금의 권장 규칙에서는 걸리는 경우가 없다(무작위 구조 12만 개와 실제 자료에서 0건) — 권장 규칙을 바꿀 때를 위한 보호 장치
     dropped = {a for a, r in rows.items() if r["중복_제외권장"] == "Y"}
     while True:
         kept_nos = set().union(*[sets[q] for q in sets if q not in dropped]) if len(dropped) < len(sets) else set()
