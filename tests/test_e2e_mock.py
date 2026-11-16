@@ -117,14 +117,16 @@ def run():
         assert "[award_amt] OK" in out and "[award_rate] OK" in out and "[낙찰정보] 기간 조회 파라미터 {'inqryDiv': '1'}" in out, out
         # 1-2) 용역 공고(같은 서비스의 용역 오퍼레이션): probe --servc → collect --servc. 폐기물·건설사업관리만 보존, 무관한 청소 용역은 버림
         out = _run(["probe", "--servc", "--ym", "2024-03", "--config", cfg_path])
-        assert "getBidPblancListInfoServc (2024-03) totalCount=4" in out and "[매핑 OK]" in out and "표본 4건 중 3건이 보존 대상" in out, out
-        assert "공고명 '폐기물' (2024-03) totalCount=1" in out and "[호출 수 추정]" in out, out
+        # 표본은 그 달의 첫 구간(7일)으로 받는다 — 한 달 전체 조회는 서버가 07(입력범위값 초과)로 거절하며, probe 는 그 답을 그대로 보여 준다
+        assert "getBidPblancListInfoServc (20240301~20240307, 7일) totalCount=2" in out and "[매핑 OK]" in out and "표본 2건 중 1건이 보존 대상" in out, out
+        assert "[조회 기간] 한 달 전체(20240301~20240331) 조회" in out and "코드 07" in out and "입력범위값 초과 에러" in out and "5구간으로 나눠" in out, out
+        assert "공고명 '폐기물' (20240301~20240307) totalCount=0" in out and "[호출 수 추정]" in out and "한 달(5구간)" in out, out
         calls0 = server.calls["getBidPblancListInfoServc"]
         out = _run(["collect", "--servc", "--config", cfg_path])
         sv = pd.read_parquet(data("servc_all.parquet"))
         assert sorted(sv["bidNtceNo"]) == ["R24S00001", "R24S00002", "R24S00004"], sv["bidNtceNm"].tolist()
         assert set(open(data("raw", "servc_done.txt")).read().split()) == {"202401", "202402", "202403", "202404"}
-        assert server.calls["getBidPblancListInfoServc"] - calls0 == 4, "월 1회씩 4개월"
+        assert server.calls["getBidPblancListInfoServc"] - calls0 == 20, "한 달을 7일 이하 5구간으로 나눠 조회 × 4개월"
         assert not os.path.exists(data("notices_all.parquet")), "collect --servc 는 공사 수집을 하지 않는다"
         import sqlite3
         con = sqlite3.connect(data("cache.sqlite"))
@@ -143,6 +145,10 @@ def run():
         assert len(awards) == len(server.data["awards"]) and awards["_award_amt"].notna().all(), awards
         assert set(open(data("raw", "award_done.txt")).read().split()) == {"202401", "202402", "202403", "202404"}
         calls_after_collect = (server.calls["getBidPblancListInfoCnstwk"], server.calls["getScsbidListSttusCnstwk"])
+        # 2-2) check-raw — 받은 원문 점검(API 호출 없음): 서버가 알려 준 건수와 저장된 줄 수가 맞는다
+        out = _run(["check-raw", "--config", cfg_path])
+        assert "다시 받아야 할 달이 없습니다" in out and "notices_*.jsonl" in out and "다시 받아야 할 달 0개" in out, out
+        assert (server.calls["getBidPblancListInfoCnstwk"], server.calls["getScsbidListSttusCnstwk"]) == calls_after_collect, "check-raw 는 API 를 부르지 않는다"
         _run(["collect", "--config", cfg_path])                        # 재실행: 완료된 달은 호출 없음(낙찰 목록 포함)
         assert (server.calls["getBidPblancListInfoCnstwk"], server.calls["getScsbidListSttusCnstwk"]) == calls_after_collect
         # 3) discover — 시설 3개(가상군/다른군 문화예술회관, 가상시 야외공연장), 유지보수는 '제외' 기본값, 잡음 없음

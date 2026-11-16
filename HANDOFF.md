@@ -1,6 +1,6 @@
 # HANDOFF.md — g2b_costdb 진행 상황
 
-> 매 세션 시작 시 이 파일을 먼저 읽는다. 갱신일: 2026-09-10
+> 매 세션 시작 시 이 파일을 먼저 읽는다. 갱신일: 2026-11-17
 
 ## 0. 2026-09-08 진행 (사용자 PC, C:\DB_WORK\g2b_costdb)
 - 전용 저장소 github.com/seio0701/g2b_costdb 생성·클론, Python 3.14, 패키지 설치, `doctor`·두 테스트 통과, 인증키 설정 완료.
@@ -519,6 +519,45 @@
      '관급자재(무대기계 제작설치) 선정 제안서 제출 안내'(제작·설치가 있어 발주로 봄), 지구 이름에 '건설' 이 든 시설('○○ 주택건설사업지구')의 부지조성 + 무관한 소규모 공사(한 세부사업).
   ⑦ `중복_제외권장` 은 대표 공고 집합만 보고 정한다. 두 시설 후보의 사업유형·연면적 추출값이 다를 수 있으므로 남길 행이 마땅한지는 검수에서 확인(F4850-R-01 과 F0162-N-01 은 같은 수영장 공고를 리모델링/신축으로 달리 분류).
 - 사용자 PC 순서: `git pull` → `research` → `dedup` → `attach` → `extract --batch`(견적) → `extract --batch --yes` → `extract --batch`(수거) → `extract-trades --batch --yes` → `extract-trades --batch` → `excel`.
+
+## 0-30. 2026-11-17 — 용역 공고 조회가 '항목 없음' 으로 나온 원인: 조회 기간 제한(7일) + 오류 응답을 빈 결과로 읽던 결함
+- 증상(사용자 PC): `probe --servc --ym 2026-08` → `totalCount=None 표본 0건 / 항목 없음 — 다른 달로 다시 시도`.
+- 원인 ①(코드 결함, 가짜 응답으로 재현 확인): 조달청 서비스는 요청 조건 오류를 HTTP 200 에 `{"nkoneps.com.response.ResponseError": {"header": {"resultCode": "07",
+  "resultMsg": "입력범위값 초과 에러"}}}` 처럼 **최상위 키가 `response` 가 아닌 모양**으로 돌려준다. `api_client._interpret` 는 `response` 가 없으면 코드 00·빈 본문으로 넘겨
+  '자료 없음' 과 구별하지 못했다(`totalCount=None` 이 그 흔적 — 정말 0건이면 `totalCount=0`). 같은 경로가 수집에도 있었다: 읽지 못한 쪽·잘린 쪽(totalCount>0 인데 0건)이 나오면
+  그 달을 0행 또는 쪽 경계까지만 저장하고 완료 표시하며, 다시 받을 때는 기존 jsonl 을 먼저 지웠다. 빈 본문은 캐시에도 들어가 다음 실행 때 되풀이됐다.
+- 원인 ②(서비스 쪽 변경 — **출처는 data.go.kr 서비스 페이지의 검색 색인과 다른 개발자들의 2026-11-11 실측 기록. 샌드박스에서 공식 페이지를 직접 읽지 못했으므로 사용자 PC 의
+  probe 재실행으로 확인할 것**): 2026-11-10 부터 입찰공고정보서비스 전 오퍼레이션의 조회 기간이 1개월 → 7일(달력 날짜)로 줄었다. 한 달 조회는 07 로 거절된다. 용역만의 문제가 아니라
+  공사 공고도 같으며, 공사 수집이 됐던 것은 2026-09-10 에 끝났기 때문이다.
+- 고친 것
+  · `api_client`: 응답 모양 판정을 다시 씀 — 오류 코드는 어느 키 아래 있든(표준 header / 다른 이름의 오류 응답 / JSON·XML cmmMsgHeader / XML resultCode) 코드대로 처리
+    (03 = 빈 결과, 22 = 일일 한도, 01·02·04·05·23·99 = 재시도, 그 밖 = 재시도 없는 `ApiError` — 06 날짜 형식·07 조회 범위·08 필수값). 읽을 수 없는 모양과 '정상 코드인데 body 에
+    totalCount·items 가 없음' 은 `UnexpectedResponse`(코드 XX, 응답 앞부분을 인증키 가려서 실음). 잘린 쪽은 재시도 뒤 실패. 검증을 통과한 본문만 캐시에 넣고, 캐시에서 꺼낼 때도
+    같은 검증을 해 예전 버전이 넣어 둔 `{}` 는 없는 것으로 보고 다시 호출한다. `iter_all` 은 받은 건수 < totalCount 로 끝나면 `IncompleteResult`.
+  · 조회 구간: `G2BClient.split_window` 로 한 달을 `api.max_window_days`(기본 7) 이하 구간(1~7, 8~14, 15~21, 22~28, 29~말일)으로 나눠 조회. `_collect_monthly` 는 구간이 하나라도
+    실패하면 그 달을 실패로 두고(완료 표시 없음, 기존 파일 유지, 받은 구간은 캐시에 남아 이어받기), 연속 3개월 실패면 멈춘다(예산 보호). 새 결과는 임시 파일에 쓴 뒤 바꾸고,
+    기존보다 적으면 기존 파일을 `.prev` 로 남긴다. 달마다 `data/raw/<prefix>months.json` 에 서버 건수·받은 건수·저장 건수·쪽수·구간 수를 기록(용역은 캐시를 비우므로 이 기록이 유일한 근거).
+  · probe: 표본을 그 달의 첫 구간(7일)으로 받는다(첫 구간이 정말 0건이면 다음 구간). `probe --servc` 는 표본을 받지 못하면 조건을 바꿔 가며(①설정 구간 ②하루 ③한 달 ④10건 ⑤검색
+    ⑥공사 대조) 서버의 코드·문구를 그대로 출력하고(`G2BClient.diagnose` — 캐시·재시도 없음), 정상일 때도 '한 달 전체 조회' 결과 한 줄을 남겨 7일 제한이 지금 적용되는지 보여 준다.
+    면허제한·낙찰 probe 는 모든 조회구분이 오류면 '없음' 이라고 결론 내지 않는다.
+  · `check-raw`(새 명령, `g2b_costdb/selfcheck.py`): API 호출 없이 `data/raw` 의 줄 수·완료 표시와 `cache.sqlite` 의 쪽별 totalCount·항목 수를 대조해
+    '비었거나 짧게 저장되고 완료 표시된 달' 을 찾는다(표시: EMPTY_DONE·SHORT_VS_TOTAL·BAD_CACHE_BODY·CACHE_SUM_LT_TOTAL·PAGE_MULTIPLE·DONE_NO_FILE = 다시 받을 달,
+    LOW_VS_NEIGHBOURS·RATIO_OUTLIER·NOT_DONE·NEVER_COLLECTED = 눈으로 확인). `--reopen` 은 다시 받을 달의 완료 표시만 지운다(원문 파일은 그대로).
+  · 가짜 서버(`tests/mock_g2b.py`)가 조회 기간으로 걸러 돌려주고 7일 넘는 기간을 07 로 거절하도록, 오류 주입(`faults`)·자료 없음 모양(`nodata_style`) 추가.
+    회귀 테스트 `test_api_response_shapes_and_windows`, 통합 테스트에 용역 probe 의 새 출력·구간별 호출 수·check-raw 추가.
+- 검증: 점검자가 만든 응답 모양 38가지(오류 응답·빈 본문·잘린 쪽·숫자 코드·XML·HTML 등)에서 빈 결과로 넘어가는 것 0, 죽는 것 0. 세 테스트 묶음 통과.
+- **아직 모르는 것(사용자 PC 결과가 있어야 확정)**
+  · 7일 제한이 실제로 적용되는지 → `git pull` 뒤 `probe --servc --ym 2026-08` 출력의 `[조회 기간] 한 달 전체 … 코드 07` 줄.
+  · 이미 받은 공사 공고 93개월에 같은 결함으로 비거나 짧은 달이 있는지 → `check-raw` 출력. 2026-09 는 수집 당시 진행 중이던 달이라 완료 표시가 없다(부분 수집) → `collect` 로 마저 받아야 한다.
+  · 0절의 '면허제한 조회는 항목 없음' 결론이 같은 결함 탓이었는지 → `check-raw` 의 '읽지 못한 응답 행' 목록에 `getBidPblancListInfoLicenseLimit` 이 있으면 그렇다.
+  · 받은 건수 < totalCount 를 실패로 보는 규칙이 실제 API 에서 지나친지 → `check-raw` 에서 거의 모든 달이 '서버 건수보다 적게 저장' 이면 totalCount 가 실제 건수와 다른 것이므로 완화가 필요.
+  · 용역 응답에 조달분류명(`pubPrcrmntClsfcNm` 등)이 실제로 채워지는지 → probe 의 `[조달분류 분포]`·`[매핑]` 줄.
+- 예정된 서비스 변경(여러 공개 저장소의 기록, 공식 공지 본문은 읽지 못함): 2026-11-03 공지로 새 주소 `…/1230000/ad/BidPublicInfoService02` 와 이름 끝에 `02` 가 붙은 오퍼레이션
+  (`getBidPblancListInfoCnstwk02`, `getBidPblancListInfoServcPPSSrch02` …)이 생겼고 첨부파일 등 일부 항목이 별도 오퍼레이션(`getBidPblancListInfoAtchFileInfo02`)으로 나뉘었다고 한다.
+  옛 주소는 공지 뒤 약 90일(2027-02 초)까지라고 한다. **2027-01 전에 공공데이터포털 서비스 페이지에서 End Point·오퍼레이션명·응답 항목을 확인하고 `config.yaml api.base_url`·`api.ops` 와
+  첨부 URL 수집 방식을 옮길 것.**
+- 사용자 PC 순서: `git pull` → `probe --servc --ym 2026-08`(출력 전달) → `check-raw`(출력 전달) → 필요하면 `check-raw --reopen` → `collect` → `collect --servc`(여러 날).
+  **이 수정 전 버전으로는 `collect`·`collect --servc` 를 실행하지 말 것**(한 달 조회가 거절되면 그 달이 빈 파일로 바뀌고 완료 표시됨).
 
 ## 1. 현재 단계
 - **세션 0(코드 정비) 완료 / 세션 1(환경 점검 + probe)의 사용자 PC 실행 대기**

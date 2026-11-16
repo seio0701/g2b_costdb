@@ -3,6 +3,7 @@
 python -m g2b_costdb.pipeline doctor                     # 환경 점검(파이썬·패키지·키 존재 여부·네트워크)
 python -m g2b_costdb.pipeline probe --ym 2026-08          # 필드명 확인 + config.yaml 매핑 대조
 python -m g2b_costdb.pipeline collect                     # S1 전량수집(공고+기초금액)
+python -m g2b_costdb.pipeline check-raw                   # (점검) 받은 원문에 비었거나 짧게 저장된 달이 없는지 — API 호출 없음. --reopen: 그 달만 다시 받게 완료 표시 삭제
 python -m g2b_costdb.pipeline discover                    # S2 후보 시설 검수용 Excel 생성
 #  → output/facility_candidates.xlsx 검수(노란 셀) 후
 python -m g2b_costdb.pipeline research                    # S3 시설명 재검색 + 면허제한 조회
@@ -1537,7 +1538,7 @@ def main(argv=None):
         except (AttributeError, ValueError):
             pass
     ap = argparse.ArgumentParser(description="나라장터 공사비 DB 파이프라인 (g2b_costdb 폴더에서 실행)")
-    ap.add_argument("stage", choices=["doctor", "probe", "collect", "discover", "research", "dedup", "attach", "extract", "extract-trades", "extract-extra", "excel"])
+    ap.add_argument("stage", choices=["doctor", "probe", "collect", "check-raw", "discover", "research", "dedup", "attach", "extract", "extract-trades", "extract-extra", "excel"])
     ap.add_argument("--config", default=None)
     ap.add_argument("--ym", default="2026-08", help="probe 대상 월(YYYY-MM)")
     ap.add_argument("--fresh", action="store_true", help="discover: 이전 검수 파일의 시설ID 만 이어받고 검수 칸은 새 기본값으로(검수 시작 전 규칙이 바뀌었을 때)")
@@ -1550,6 +1551,8 @@ def main(argv=None):
     ap.add_argument("--batch", action="store_true", help="extract: Message Batches 로 제출/수거 (50%% 할인, 최대 24시간)")
     ap.add_argument("--export", action="store_true", help="extract: 공고별 작업지시 txt 를 data/llm_in 에 내보내기 (Cowork·사람이 채움)")
     ap.add_argument("--import", dest="import_", action="store_true", help="extract: data/llm_out 의 JSON 을 가져와 반영")
+    ap.add_argument("--reopen", action="store_true", help="check-raw: 다시 받아야 할 달의 완료 표시(done.txt)를 지워 collect 가 그 달만 다시 받게 함(원문 파일은 그대로)")
+    ap.add_argument("--verbose", action="store_true", help="check-raw: 문제없는 달도 모두 출력")
     ap.add_argument("--servc", action="store_true", help="probe/collect: 용역 입찰공고(폐기물처리 용역·건설사업관리·설계용역) 시험 호출·수집")
     ap.add_argument("--only", default=None, help="extract-extra: 공종을 한정(쉼표 구분, 예: 전기,건축). 생략하면 대표 공고 전체")
     ap.add_argument("--trades", action="store_true", help="extract 와 함께 2차 추출(내역서 집계표의 공종별 금액)도 같은 방식(--yes/--batch/--limit)으로 실행")
@@ -1566,9 +1569,13 @@ def main(argv=None):
         except DailyBudgetExceeded as e:
             print(f"[중단] 오늘 API 호출 예산을 다 썼습니다({e}). 내일 같은 명령으로 다시 실행하세요.")
         except RuntimeError as e:
-            print(f"[중단] API 에 연결하지 못했습니다: {str(e)[:300]}\n  네트워크 상태를 확인하고 잠시 뒤 다시 실행하세요(python -m g2b_costdb.pipeline doctor 로 점검).")
+            print(f"[중단] API 호출이 재시도 끝에 실패했습니다(연결 실패이거나, 서버가 해석할 수 없는 응답을 줌): {str(e)[:400]}\n"
+                  f"  'JSON 아님'·'API NN' 이 보이면 서버는 응답한 것이므로 위 문구를 확인하고, 연결 오류면 네트워크를 확인하세요(python -m g2b_costdb.pipeline doctor 로 점검).")
     elif a.stage == "collect" and a.servc:
         collect.collect_servc(cfg)
+    elif a.stage == "check-raw":
+        from . import selfcheck
+        selfcheck.run(cfg, do_reopen=a.reopen, verbose=a.verbose)
     elif a.stage == "extract":
         stage_extract(cfg, yes=a.yes, batch=a.batch, export=a.export, import_=a.import_, limit=a.limit, redo_low=a.redo_low, refetch=a.refetch)
         if a.trades and not (a.export or a.import_):

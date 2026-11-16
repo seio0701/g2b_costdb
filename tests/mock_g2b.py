@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import threading
 import zipfile
 from collections import Counter
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -205,6 +207,12 @@ def _xml_error(code: str, msg: str) -> bytes:
 class MockG2B:
     def __init__(self):
         self.calls: Counter = Counter()
+        # 오류 주입: faults[(오퍼레이션명, 'YYYYMMDD'(조회 시작일) 또는 'YYYYMM' 또는 공고번호, pageNo)] = (HTTP 상태, 본문 bytes, Content-Type)
+        # 예: 표준 형식이 아닌 오류 {"nkoneps.com.response.ResponseError": …}, 잘린 쪽(totalCount>0, items []), XML 오류
+        self.faults: Dict = {}
+        self.nodata_style = "03"      # "03": resultCode 03 + body {} / "zero": resultCode 00 + items [] + totalCount 0
+        # 조회 기간 제한(2026-11-10 부터의 실제 서비스처럼): 달력 날짜로 이보다 긴 기간은 HTTP 200 + ResponseError 07. 0 이면 제한 없음
+        self.max_span_days = 7
         self.httpd = None
         self.base = ""
         self.data: Dict = {}
@@ -244,18 +252,29 @@ class MockG2B:
                     return self._send(403, json.dumps(body).encode("utf-8"))
                 rows = 999 if not q.get("numOfRows") else int(q["numOfRows"])
                 page = int(q.get("pageNo", "1"))
+                b0, e0 = q.get("inqryBgnDt", ""), q.get("inqryEndDt", "")
+                fault = (mock.faults.get((op, b0[:8], page)) if b0 else None) or mock.faults.get((op, b0[:6] or q.get("bidNtceNo", ""), page))
+                if fault:
+                    return self._send(fault[0], fault[1], fault[2] if len(fault) > 2 else "application/json; charset=utf-8")
+                if b0 and e0 and mock.max_span_days and (date(int(e0[:4]), int(e0[4:6]), int(e0[6:8])) - date(int(b0[:4]), int(b0[4:6]), int(b0[6:8]))).days + 1 > mock.max_span_days:
+                    body = {"nkoneps.com.response.ResponseError": {"header": {"resultCode": "07", "resultMsg": "입력범위값 초과 에러"}}}
+                    return self._send(200, json.dumps(body, ensure_ascii=False).encode("utf-8"))
+
+                def in_range(dt: str) -> bool:           # dt 'YYYY-MM-DD HH:MM[:SS]' 가 조회 기간(YYYYMMDDHHMM, 분 단위 포함) 안인지
+                    k = re.sub(r"[^0-9]", "", dt)[:12]
+                    return b0 <= k <= e0
                 if op == "getBidPblancListInfoCnstwk":
-                    items = [n for n in mock.data["notices"] if n["bidNtceDt"][:7].replace("-", "") == q.get("inqryBgnDt", "")[:6]]
+                    items = [n for n in mock.data["notices"] if in_range(n["bidNtceDt"])]
                 elif op == "getBidPblancListInfoCnstwkBsisAmount":
-                    items = [b for b in mock.data["bsis"] if b["bidNtceDt"][:7].replace("-", "") == q.get("inqryBgnDt", "")[:6]]
+                    items = [b for b in mock.data["bsis"] if in_range(b["bidNtceDt"])]
                 elif op == "getScsbidListSttusCnstwk":
                     if parts[0] != "ScsbidInfoService":        # 낙찰정보서비스는 별도 End Point — 입찰공고 경로로 부르면 없는 오퍼레이션
                         return self._send(200, _xml_error("12", "NO_OPENAPI_SERVICE_ERROR"), "application/xml")
                     if q.get("inqryDiv") != "1":
                         return self._send(200, _xml_error("10", "INVALID_REQUEST_PARAMETER_ERROR"), "application/xml")
-                    items = [w for w in mock.data["awards"] if w["opengDt"][:7].replace("-", "") == q.get("inqryBgnDt", "")[:6]]
+                    items = [w for w in mock.data["awards"] if in_range(w["opengDt"])]
                 elif op in ("getBidPblancListInfoServc", "getBidPblancListInfoServcPPSSrch"):
-                    items = [n for n in mock.data["servc"] if n["bidNtceDt"][:7].replace("-", "") == q.get("inqryBgnDt", "")[:6]]
+                    items = [n for n in mock.data["servc"] if in_range(n["bidNtceDt"])]
                     if op.endswith("PPSSrch") and q.get("bidNtceNm"):
                         items = [n for n in items if q["bidNtceNm"] in n["bidNtceNm"]]
                 elif op == "getBidPblancListInfoLicenseLimit":
@@ -264,7 +283,10 @@ class MockG2B:
                     items = [dict(it, bidNtceNo=q["bidNtceNo"], bidNtceOrd="00") for it in mock.data["license"].get(q["bidNtceNo"], [])]
                 else:
                     return self._send(200, _xml_error("12", "NO_OPENAPI_SERVICE_ERROR"), "application/xml")
-                if not items:
+                if not items and mock.nodata_style == "zero":
+                    body = {"response": {"header": {"resultCode": "00", "resultMsg": "정상"},
+                                         "body": {"items": [], "numOfRows": rows, "pageNo": page, "totalCount": 0}}}
+                elif not items:
                     body = {"response": {"header": {"resultCode": "03", "resultMsg": "NODATA_ERROR"}, "body": {}}}
                 else:
                     chunk = items[(page - 1) * rows: page * rows]
