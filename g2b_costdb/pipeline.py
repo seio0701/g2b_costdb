@@ -302,7 +302,7 @@ def stage_dedup(cfg):
     n_split = int((hist.drop_duplicates("프로젝트ID")["세부사업수"] > 1).sum()) if len(hist) else 0
     n_base = hist.loc[hist["세부사업수"] > 1, "시설ID"].astype(str).add(hist.loc[hist["세부사업수"] > 1, "사업유형"].astype(str)).nunique() if len(hist) else 0
     warn = [l for l in logs if l.get("판정") == "경고"]
-    print(f"전체 {len(hist)}건 → 대표 {len(latest)}건 (고유 공고 {latest['공고키'].nunique() if len(latest) else 0}건, "
+    print(f"전체 {len(hist)}건 → 대표 {len(latest)}건 (고유 공고 {latest['공고번호'].map(dedup._no).nunique() if len(latest) else 0}건, "
           f"프로젝트 {latest['프로젝트ID'].nunique() if len(latest) else 0}개, 경고 {len(warn)}건, 복수 시설 배정 {len(multi)}건)")
     if n_split:
         print(f"  - 세부사업 분리: 시설 후보 {n_base}개를 세부사업 {n_split}개로 나눔(프로젝트ID 끝 -01, -02 …). 06_검증로그 '세부사업 분리'·'같은 공종 합산' 에서 확인")

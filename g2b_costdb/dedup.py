@@ -117,7 +117,7 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
     # 이전공고번호는 차수마다 채워지지 않을 수 있다(변경 차수에서 빠짐) → 같은 (시설, 공고번호)의 어느 차수에든 있으면 모든 차수에 채운다
     pv = d["이전공고번호"].map(_no)
     # 차수마다 값이 다르면 판정에는 가장 늦은 차수의 값을 쓴다(입력 행 순서와 무관). 보이는 열은 빈 차수만 채우고 API 가 준 값은 그대로 둔다
-    _o = d.assign(_pv=pv)[pv != ""].sort_values(["_ord", "_dt"])
+    _o = d.assign(_pv=pv)[(pv != "") & (pv != d["공고번호"].map(_no))].sort_values(["_ord", "_dt", "_pv"])
     _last = _o.groupby([_o["시설ID"].astype(str), _o["공고번호"].astype(str)])["_pv"].last().to_dict()
     d["_pv_eff"] = [_last.get((str(f), str(n)), "") for f, n in zip(d["시설ID"], d["공고번호"])]
     d["이전공고번호"] = pv.where(pv != "", d["_pv_eff"])
@@ -250,7 +250,7 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
             d.at[i, "대표선정사유"] = "취소공고"
             # 취소공고가 처음 난 날보다 먼저 난 공고는 그 공고를 '대체한 공고'가 될 수 없다(이전공고번호로 이어진 원 공고는 예외) → 없으면 비워 둔다
             first = first_dt.get((str(d.at[i, "시설ID"]), d.at[i, "_no"]), d.at[i, "_dt"])
-            later = [j for j in cnt if d.at[j, "_dt"] >= first or d.at[j, "_no"] == d.at[i, "_prev"]]
+            later = [j for j in cnt if first_dt.get((str(d.at[j, "시설ID"]), d.at[j, "_no"]), d.at[j, "_dt"]) >= first or d.at[j, "_no"] == d.at[i, "_prev"]]
             if later:
                 key = works.title_key(d.at[i, "공고명"])
                 d.at[i, "대체공고번호"] = str(d.at[max(later, key=lambda j: works.similarity(key, works.title_key(d.at[j, "공고명"]))), "공고번호"])
@@ -298,11 +298,21 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
         if t is not None and d.at[t, "최신여부"]:
             d.at[i, "대체공고번호"] = str(d.at[t, "공고번호"]).strip()
     # 대표가 빠진 프로젝트·공종에 남은 대표 공고의 사유('합산(같은 공종 N건)'/'단독 공고')를 남은 건수에 맞춘다
-    for pid, trade in demoted:
+    for pid, trade in sorted(demoted):
         left = d.index[d["최신여부"] & (d["프로젝트ID"] == pid) & (d["공종"] == trade)]
         head = "단독 공고" if len(left) == 1 else f"합산(같은 공종 {len(left)}건)"
         for j in left:
             d.at[j, "대표선정사유"] = re.sub(r"^(?:단독 공고|합산\(같은 공종 \d+건\))", head, str(d.at[j, "대표선정사유"]))
+        k = next((n for n, l in enumerate(logs) if l.get("항목") == "같은 공종 합산" and str(l.get("비고")).startswith(f"{pid}|{trade}: ")), None)
+        if k is not None:
+            if len(left) > 1:
+                keep = sorted(left, key=lambda j: (d.at[j, "_dt"], d.at[j, "_no"]))
+                parts = "; ".join(f"{d.at[j, '공고번호']} '{str(d.at[j, '공고명'])[:40]}' {(_num(d.at[j, '추정가격']) or 0) / 1e8:,.1f}억" for j in keep)
+                logs[k] = {"공고번호": str(d.at[keep[-1], "공고번호"]), "항목": "같은 공종 합산", "판정": "참고",
+                           "비고": f"{pid}|{trade}: 같은 세부사업·같은 공종의 공고 {len(keep)}건을 모두 합산(분야별·차수별 발주, 부대공사로 봄) — {parts}"[:700]
+                                   + " → 재공고가 섞여 이중계산이면 검수에서 확인"}
+            else:
+                del logs[k]
     latest = d[d["최신여부"]].copy()
     tmp_cols = ["_ord", "_dt", "_price", "_base", "_prop", "_no", "_prev", "_pv_eff"]
     d = d.drop(columns=tmp_cols)
@@ -332,7 +342,7 @@ def facility_summary(latest: pd.DataFrame, all_hist: pd.DataFrame) -> pd.DataFra
             "공사현장지역": _mode(g["공사현장지역"]) if "공사현장지역" in g.columns else "",
             "공고건수_전체": h["공고번호"].nunique(), "공고건수_최신": len(g),
             # 최종공고일(05 '공고연도'의 근거)은 합산 대상 공고 기준 — 유효 차수가 없는 취소공고가 다른 해에 붙어 있어도 연도가 밀리지 않게
-            "최초공고일": h["공고일시"].min(), "최종공고일": g["공고일시"].max(),
+            "최초공고일": h["공고일시"].min(), "최종공고일": g["공고일시"].max() if g["공고일시"].notna().any() else h["공고일시"].max(),
         }
         for t in trades:
             row[f"공종_{t}"] = "O" if (g["공종"] == t).any() else "X"
@@ -350,7 +360,8 @@ def cross_facility_duplicates(latest: pd.DataFrame) -> pd.DataFrame:
                       'X 를 포함(n/m건)' / 'X 와 일부 겹침(n/m건)'  (m = 이 프로젝트의 대표 공고 수, n = 그중 X 에도 있는 수) /
                       'X + Y 에 나뉘어 있음'(이 프로젝트의 공고가 다른 시설 후보 하나의 세부사업 X, Y 에 나뉘어 모두 들어 있음)
       중복_제외권장 — 'Y' = 이 행을 빼도 그 공고가 남는 프로젝트가 있다(다른 프로젝트의 일부이거나, 같은 사업 가운데 남길 한 행이 아닌 경우). Y 행을 모두 빼면
-        같은 공고가 두 번 합산되지 않는다 — 단, 서로 일부만 겹치는 프로젝트('와 일부 겹침')는 권장이 없어 그 공고는 두 번 남는다(pipeline.stage_dedup 이 남은 건수를 적는다).
+                      같은 공고가 두 번 합산되지 않는다 — 단, 서로 일부만 겹치는 프로젝트('와 일부 겹침')는 그것만으로는 Y 가 붙지 않으므로,
+                      다른 관계로 한쪽이 Y 가 되지 않으면 그 공고는 두 번 남는다(pipeline.stage_dedup 이 Y 행을 뺀 뒤에 남는 건수를 세어 적는다).
                       같은 사업끼리는 세부사업으로 나뉘지 않은(더 구체적인) 시설의 프로젝트를 남기고, 같으면 프로젝트ID 가 앞선 것을 남긴다.
                       일부만 겹치는 경우는 어느 쪽도 권장하지 않는다(검수에서 판단)."""
     cols = ["시설간_중복", "중복_제외권장"]
