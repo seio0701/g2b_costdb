@@ -160,7 +160,7 @@ def body_items(body) -> List[Dict[str, Any]]:
 def body_total(body) -> Optional[int]:
     try:
         return int(float(body.get("totalCount")))
-    except (TypeError, ValueError, AttributeError):
+    except (TypeError, ValueError, AttributeError, OverflowError):     # OverflowError: "Infinity"/1e999
         return None
 
 
@@ -176,6 +176,8 @@ def validate_body(body, page_no: int = 1, rows: int = 0) -> Optional[str]:
         return "body 에 totalCount 도 items 도 없음"
     if total == 0:
         return None
+    if total < 0:
+        return f"totalCount 가 음수({total})"
     if rows and page_no and (page_no - 1) * rows >= total:
         return None
     return f"TRUNCATED: totalCount={total} 인데 이 쪽(pageNo={page_no})의 items 가 0건"
@@ -300,12 +302,23 @@ class G2BClient:
             return
         raise ApiError(code, msg, op, p)
 
+    @staticmethod
+    def _cache_key(op: str, p: Dict[str, str], cache_salt: Optional[str] = None) -> str:
+        return hashlib.sha1((op + json.dumps(p, sort_keys=True, ensure_ascii=False) + (cache_salt or "")).encode()).hexdigest()
+
+    def forget(self, op: str, params: Dict[str, Any], cache_salt: Optional[str] = None) -> None:
+        """이 조회 1건의 캐시 행을 지운다. 쪽 하나하나는 정상인데 합쳐 보니 전량이 아닌 조회(IncompleteResult)의 쪽들이 캐시에 남으면
+        다음 실행 때 서버에 묻지도 않고 같은 실패를 되풀이하므로, 그런 조회는 다음에 서버에서 다시 받게 한다."""
+        p = {k: str(v) for k, v in params.items() if v is not None}
+        self.conn.execute("DELETE FROM cache WHERE k=?", (self._cache_key(op, p, cache_salt),))
+        self.conn.commit()
+
     # ── 단건 호출 ────────────────────────────────────────────────
     def call(self, op: str, params: Dict[str, Any], use_cache: bool = True, cache_salt: Optional[str] = None) -> Dict[str, Any]:
         """오퍼레이션 1회 호출 → response.body(dict). 캐시 우선.
         cache_salt: 캐시 키에 섞는 문자열(예: 오늘 날짜) — 진행 중인 달처럼 내용이 바뀌는 조회에 사용."""
         p = {k: str(v) for k, v in params.items() if v is not None}
-        key = hashlib.sha1((op + json.dumps(p, sort_keys=True, ensure_ascii=False) + (cache_salt or "")).encode()).hexdigest()
+        key = self._cache_key(op, p, cache_salt)
         try:
             page_no, rows = int(p.get("pageNo") or 1), int(p.get("numOfRows") or self.cfg.num_of_rows)
         except ValueError:
@@ -401,6 +414,7 @@ class G2BClient:
             n = len(self._items(body))
             out.update(status="ok" if n else "nodata", code="00", total=body.get("totalCount"), n=n, body=body)
         except DailyBudgetExceeded as e:
+            self._mark_budget_exhausted()               # 포털이 일일 한도(22)라고 답했으면 오늘은 더 부르지 않는다
             out.update(status="quota", code="22", msg=self._scrub(e)[:200])
         except UnexpectedResponse as e:
             out.update(status="unreadable", msg=self._scrub(e.why)[:200])
@@ -443,15 +457,21 @@ class G2BClient:
         page = 1
         seen = 0
         total = None
+
+        def drop_pages(upto: int) -> None:          # 전량을 받지 못한 조회: 이 조회의 쪽들을 캐시에서 지워 다음 실행 때 서버에서 다시 받는다
+            if use_cache:
+                for pg in range(1, upto + 1):
+                    self.forget(op, {**params, "pageNo": pg, "numOfRows": self.cfg.num_of_rows}, cache_salt)
         while True:
             body = self.call(op, {**params, "pageNo": page, "numOfRows": self.cfg.num_of_rows},
                              use_cache=use_cache, cache_salt=cache_salt)
             items = self._items(body)
             page_total = body_total(body)
             if page_total is not None:
-                total = page_total
+                total = page_total if total is None else max(total, page_total)     # 쪽마다 건수가 달라지면 큰 쪽을 믿는다(줄어든 값으로 일찍 끝내지 않는다)
             elif items:
                 if require_total:
+                    drop_pages(page)
                     raise UnexpectedResponse("응답에 totalCount 가 없어 전량 수신 여부를 확인할 수 없음", json.dumps(body, ensure_ascii=False)[:200], op, params)
                 if page == 1:
                     log.warning("%s: 응답에 totalCount 가 없어 페이지가 짧아질 때까지 계속 조회합니다(전량 여부 확인 불가)", op)
@@ -474,6 +494,7 @@ class G2BClient:
                 break
             page += 1
         if total is not None and seen < total:
+            drop_pages(page)
             raise IncompleteResult(f"{op}: 서버 totalCount={total:,} 인데 {seen:,}건만 받고 끝남(pageNo={page}) → 이 조회는 완료로 처리하지 않습니다")
 
     # ── 월 단위 기간 분할 ───────────────────────────────────────
@@ -492,19 +513,27 @@ class G2BClient:
         return out
 
     @staticmethod
-    def split_window(bgn: str, end: str, max_days: int) -> List[tuple]:
-        """한 달 안의 조회 기간 (YYYYMMDD0000, YYYYMMDD2359) 을 달력 날짜 max_days 일 이하의 구간으로 나눈다:
-        7일이면 1~7, 8~14, 15~21, 22~28, 29~말일. max_days 가 0 이하이거나 기간이 그보다 짧으면 그대로 한 구간."""
+    def split_window(bgn: str, end: str, max_days: int, overlap: bool = True) -> List[tuple]:
+        """한 달 안의 조회 기간 (YYYYMMDD0000, YYYYMMDD2359) 을 달력 날짜 max_days 일 이하의 구간으로 나눈다.
+        구간의 끝은 다음 구간의 시작과 같은 분(00:00)이다: 7일이면 1일 00:00~7일 00:00, 7일~13일, 13일~19일, 19일~25일, 25일 00:00~말일 23:59.
+        서버가 끝 시각의 그 1분을 포함하는지(23:59:30 같은 초 단위 시각)를 알 수 없으므로, 구간을 23:59 로 끊지 않고 경계의 1분을 두 구간에 걸치게 해
+        어느 쪽이든 빠지는 공고가 없게 한다(경계 1분의 공고는 두 번 올 수 있다 — 받는 쪽에서 같은 행을 한 번만 남긴다. 달의 마지막 1분은 예전과 같다).
+        max_days 가 1 이면 겹칠 수 없어 하루씩(00:00~23:59), 0 이하이거나 기간이 그보다 짧으면 그대로 한 구간.
+        overlap=False: 겹치지 않는 구간(1~7일 23:59, 8~14일 …) — 표본만 보는 probe 용(수집에는 쓰지 않는다)."""
         d0, d1 = int(bgn[6:8]), int(end[6:8])
         if not max_days or max_days <= 0 or bgn[:6] != end[:6] or d1 - d0 + 1 <= max_days:
             return [(bgn, end)]
-        out = []
-        d = d0
-        while d <= d1:
-            e = min(d + max_days - 1, d1)
-            out.append((f"{bgn[:6]}{d:02d}{bgn[8:] if d == d0 else '0000'}", f"{bgn[:6]}{e:02d}{end[8:] if e == d1 else '2359'}"))
-            d = e + 1
-        return out
+        ym, out, d = bgn[:6], [], d0
+        if max_days == 1 or not overlap:
+            return [(f"{ym}{k:02d}{bgn[8:] if k == d0 else '0000'}", f"{ym}{min(k + max_days - 1, d1):02d}{end[8:] if k + max_days - 1 >= d1 else '2359'}")
+                    for k in range(d0, d1 + 1, max_days)]
+        while True:
+            start = f"{ym}{d:02d}{bgn[8:] if d == d0 else '0000'}"
+            if d + max_days - 1 >= d1:                   # 남은 날이 한 구간에 들어간다 → 달의 끝까지
+                out.append((start, end))
+                return out
+            d += max_days - 1
+            out.append((start, f"{ym}{d:02d}0000"))
 
     def iter_period(self, op: str, start_ym: str, end_ym: str, extra: Optional[Dict[str, Any]] = None,
                     inqry_div: str = "1") -> Iterator[Dict[str, Any]]:

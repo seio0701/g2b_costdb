@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -51,7 +52,8 @@ def make_client(cfg: dict, base_url: str = None) -> G2BClient:
         ApiConfig(base_url=base_url or a["base_url"], service_key=key, num_of_rows=int(a["num_of_rows"]),
                   timeout_sec=int(a["timeout_sec"]), max_retries=int(a["max_retries"]),
                   sleep_between_calls_sec=float(a["sleep_between_calls_sec"]),
-                  daily_call_budget=int(a["daily_call_budget"]), max_window_days=int(a.get("max_window_days", 7))),
+                  daily_call_budget=int(a["daily_call_budget"]),
+                  max_window_days=7 if a.get("max_window_days") in (None, "") else int(a["max_window_days"])),
         cache_db=cfg["paths"]["cache_db"],
     )
 
@@ -100,6 +102,8 @@ def _record_month(raw_dir: str, prefix: str, ym: str, info: dict) -> None:
         meta = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {}
     except ValueError:
         meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
     meta[ym] = info
     with open(path + ".tmp", "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=0, sort_keys=True)
@@ -126,7 +130,13 @@ def _sample(client: G2BClient, op: str, params: dict, wins: List[tuple], rows: i
 
 
 def _read_done(path: str) -> set:
-    return set(open(path, encoding="utf-8").read().split()) if os.path.exists(path) else set()
+    """완료한 달(YYYYMM) 집합. 손으로 고친 파일에 BOM·UTF-16·메모가 섞여 있어도 달만 읽는다
+    (메모장·PowerShell 로 저장하면 BOM 이 붙는다 — 그대로 읽으면 첫 달을 완료하지 않은 달로 보고 다시 받게 된다)."""
+    if not os.path.exists(path):
+        return set()
+    raw = open(path, "rb").read()
+    text = raw.decode("utf-16", "replace") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig", "replace")
+    return {t for t in text.replace("\ufeff", " ").split() if re.fullmatch(r"(?:19|20)\d{2}(?:0[1-9]|1[0-2])", t)}
 
 
 def _write_done(path: str, done: set) -> None:
@@ -153,6 +163,7 @@ def _collect_monthly(cfg: dict, op_key: str, prefix: str, start: Optional[str], 
     today_ymd = date.today().strftime("%Y%m%d")
     skipped_future, collected, failed = [], [], []
     consecutive_fail = 0
+    stopped = False
     try:
         for bgn, endd in G2BClient.month_ranges(start, end):
             ym = bgn[:6]
@@ -189,11 +200,21 @@ def _collect_monthly(cfg: dict, op_key: str, prefix: str, start: Optional[str], 
                 consecutive_fail += 1
                 if consecutive_fail >= 3:
                     # 같은 종류의 실패가 이어지면 남은 달마다 호출을 태우지 않고 멈춘다(일일 예산 보호)
-                    log.error("%s: 연속 %d개월 수집 실패 → 중단합니다. 위 오류 문구를 확인한 뒤 같은 명령으로 재개하세요.", op, consecutive_fail)
+                    log.error("%s: 연속 %d개월 수집 실패 → 중단합니다(그 뒤의 달은 시도하지 않았습니다). 위 오류 문구를 확인한 뒤 같은 명령으로 재개하세요.", op, consecutive_fail)
+                    stopped = True
                     break
                 continue
             consecutive_fail = 0
             n_all = len(rows)
+            n_dup = 0
+            if stats["windows"] > 1:                    # 구간 경계의 1분은 두 구간에 걸쳐 조회하므로 같은 행이 두 번 올 수 있다 → 똑같은 행은 한 번만 남긴다
+                seen_rows, uniq = set(), []
+                for r in rows:
+                    k = hashlib.sha1(json.dumps(r, sort_keys=True, ensure_ascii=False).encode("utf-8")).digest()
+                    if k not in seen_rows:
+                        seen_rows.add(k)
+                        uniq.append(r)
+                n_dup, rows = n_all - len(uniq), uniq
             if row_filter is not None:
                 rows = [r for r in rows if row_filter(r)]
             n_old = _count_lines(path) if os.path.exists(path) else None
@@ -203,15 +224,20 @@ def _collect_monthly(cfg: dict, op_key: str, prefix: str, start: Optional[str], 
             n = _append_jsonl(tmp_path, rows)
             if n_old is not None and n < n_old:
                 # 다시 받은 결과가 기존보다 적으면 기존 파일을 .prev 로 남긴다(원문을 조용히 잃지 않게)
-                os.replace(path, path + ".prev")
-                log.warning("%s %s: 다시 받은 결과(%d건)가 기존 파일(%d건)보다 적습니다 → 기존 파일을 %s 로 남김", op, ym, n, n_old, os.path.basename(path) + ".prev")
+                prev, k = path + ".prev", 1
+                while os.path.exists(prev):          # 앞서 남긴 .prev 를 덮어쓰지 않는다(두 번째로 줄어들 때 더 큰 원본이 사라지지 않게) → .prev2, .prev3 …
+                    k += 1
+                    prev = f"{path}.prev{k}"
+                os.replace(path, prev)
+                log.warning("%s %s: 다시 받은 결과(%d건)가 기존 파일(%d건)보다 적습니다 → 기존 파일을 %s 로 남김", op, ym, n, n_old, os.path.basename(prev))
             os.replace(tmp_path, path)
-            _record_month(raw_dir, prefix, ym, {"total": stats.get("total"), "received": n_all, "saved": n, "pages": stats.get("pages"),
+            # total = 구간별 서버 건수의 합(경계에서 겹친 행은 두 번 셈), received = 받은 행 수, dup = 그중 겹쳐서 뺀 행 수, saved = 파일에 쓴 행 수
+            _record_month(raw_dir, prefix, ym, {"total": stats.get("total"), "received": n_all, "dup": n_dup, "saved": n, "pages": stats.get("pages"),
                                                 "windows": stats.get("windows"), "fetched": date.today().isoformat(), "current": bool(is_current)})
             if n_all == 0 and not is_current:
                 log.warning("%s %s: 서버가 0건(자료 없음)이라고 답했습니다 — 이 달에 정말 공고가 없는지 확인하세요(공사 공고는 매달 수천 건)", op, ym)
-            log.info("%s %s: %s%d건%s", op, ym, f"전체 {n_all:,}건 중 보존 " if row_filter is not None else "", n,
-                     " (진행 중인 달 — 완료 표시 안 함)" if is_current else "")
+            log.info("%s %s: %s%d건%s%s", op, ym, f"전체 {n_all - n_dup:,}건 중 보존 " if row_filter is not None else "", n,
+                     f" (구간 경계에서 겹친 {n_dup}건은 한 번만 저장)" if n_dup else "", " (진행 중인 달 — 완료 표시 안 함)" if is_current else "")
             collected.append(ym)
             if not is_current:
                 done.add(ym)
@@ -229,8 +255,9 @@ def _collect_monthly(cfg: dict, op_key: str, prefix: str, start: Optional[str], 
     if failed:
         log.warning("%s 수집 실패 월: %s (다음 실행 때 다시 시도)", op, ", ".join(failed))
     if remaining:
-        log.warning("[미완료] %s: 완료 %d개월, 미완료 %d개월 → %s%s  (내일 같은 명령으로 재개)", op, len(done), len(remaining),
-                    ", ".join(remaining[:12]), " …" if len(remaining) > 12 else "")
+        log.warning("[미완료] %s: 완료 %d개월, 미완료 %d개월 → %s%s  (%s)", op, len(done), len(remaining),
+                    ", ".join(remaining[:12]), " …" if len(remaining) > 12 else "",
+                    "연속 실패로 중단 — 위 오류 문구를 해결한 뒤 같은 명령으로 재개" if stopped else "내일 같은 명령으로 재개")
     else:
         log.info("[완료] %s: %d개월 수집 완료", op, len(done))
     df = _load_jsonl_dir(raw_dir, prefix)
@@ -343,6 +370,9 @@ def _probe_servc_diagnosis(cfg: dict, client: G2BClient, op: str, base: dict, fi
     ops = cfg["api"].get("ops") or {}
     bgn, end = base["inqryBgnDt"], base["inqryEndDt"]
     days = int(end[6:8]) - int(bgn[6:8]) + 1
+    if first.get("status") == "quota":                  # 일일 한도에 걸렸으면 조건을 바꿔 봐야 호출만 쓴다
+        print(f"\n=== {op} ({ym}) 오늘의 호출 한도에 도달했습니다({first.get('msg')}) → 내일 같은 명령으로 다시 실행하세요.")
+        return
     print(f"\n=== {op} ({ym}) 표본을 받지 못했습니다 — 조회 조건을 바꿔 가며 서버의 답을 확인합니다 ===")
     print(_diag_line(f"① {bgn[:8]}~{end[:8]}({days}일), 50건", first))
     tries = [("② 첫 1일, 50건", op, {**base, "inqryEndDt": bgn[:8] + "2359"}),
@@ -382,7 +412,8 @@ def probe_servc(cfg: dict, ym: str) -> None:
     표본을 받지 못하면 조회 조건을 바꿔 가며 서버의 답(코드·문구)을 그대로 보여 준다('항목 없음' 으로 뭉뚱그리지 않는다)."""
     client = make_client(cfg)
     month = G2BClient.month_ranges(ym, ym)[0]
-    wins = G2BClient.split_window(month[0], month[1], client.cfg.max_window_days)
+    wins = G2BClient.split_window(month[0], month[1], client.cfg.max_window_days, overlap=False)   # 표본용(겹치지 않는 구간)
+    n_win = len(G2BClient.split_window(month[0], month[1], client.cfg.max_window_days))            # 수집이 실제로 쓰는 구간 수
     bgn, end = wins[0]
     days = int(end[6:8]) - int(bgn[6:8]) + 1
     f = cfg["fields"]
@@ -410,10 +441,10 @@ def probe_servc(cfg: dict, ym: str) -> None:
     items = client._items(body)
     total = body.get("totalCount")
     print(f"\n=== {op} ({bgn[:8]}~{end[:8]}, {days}일) totalCount={total} 표본 {len(items)}건 ===")
-    if len(wins) > 1:                                   # 한 달 전체 조회가 지금도 되는지(안 되면 왜인지) 한 줄로 남긴다
+    if n_win > 1:                                       # 한 달 전체 조회가 지금도 되는지(안 되면 왜인지) 한 줄로 남긴다
         whole = client.diagnose(op, {**base, "inqryBgnDt": month[0], "inqryEndDt": month[1], "numOfRows": 1})
         print(_diag_line(f"[조회 기간] 한 달 전체({month[0][:8]}~{month[1][:8]}) 조회", whole))
-        print(f"  → 수집은 한 달을 {client.cfg.max_window_days}일 이하 {len(wins)}구간으로 나눠 조회합니다(config.yaml api.max_window_days).")
+        print(f"  → 수집은 한 달을 {client.cfg.max_window_days}일 이하 {n_win}구간으로 나눠 조회합니다(config.yaml api.max_window_days).")
     keys = sorted(set().union(*[it.keys() for it in items]))
     print("필드:", keys)
     print("표본:", json.dumps(items[0], ensure_ascii=False, indent=1)[:2500])
@@ -440,8 +471,8 @@ def probe_servc(cfg: dict, ym: str) -> None:
         pages = math.ceil(n / int(cfg["api"]["num_of_rows"]))
         s0, e0 = servc_period(cfg)
         months = len(G2BClient.month_ranges(s0, e0))
-        per_month = pages * len(wins)
-        print(f"[호출 수 추정] {bgn[:8]}~{end[:8]}({days}일) {n:,}건 = {pages}회 → 한 달({len(wins)}구간) 약 {per_month}회. "
+        per_month = pages * n_win
+        print(f"[호출 수 추정] {bgn[:8]}~{end[:8]}({days}일) {n:,}건 = {pages}회 → 한 달({n_win}구간) 약 {per_month}회. "
               f"수집 기간 {s0}~{e0}({months}개월)을 같은 규모로 보면 약 {per_month * months:,}회 "
               f"→ 일 {cfg['api']['daily_call_budget']}회 예산으로 약 {math.ceil(per_month * months / int(cfg['api']['daily_call_budget']))}일(공사 수집과 예산을 함께 씀)")
     except (TypeError, ValueError):
@@ -505,13 +536,16 @@ def collect_license_limits(cfg: dict, bid_nos: List[str]) -> pd.DataFrame:
     op = cfg["api"]["ops"]["license_limit"]
     out_path = os.path.join(cfg["paths"]["data_dir"], "license_all.parquet")
     rows: List[dict] = []
-    n_ok = 0
+    n_ok = n_err = 0
     try:
         for i, no in enumerate(bid_nos):
             try:
                 body = client.call(op, license_query_params(cfg, str(no)))
             except ApiError as e:
-                if e.code in ("10", "11", "12") and n_ok == 0:
+                n_err += 1
+                # 06·07·08 은 조달청 서비스의 요청 조건 오류(10·11·12 와 같은 성격). 그 밖의 오류도 한 건도 성공하지 못한 채 3건 이어지면 멈춘다
+                # (오류 응답은 캐시에 넣지 않으므로, 멈추지 않으면 실행할 때마다 공고 수만큼 호출을 쓴다)
+                if n_ok == 0 and (e.code in ("06", "07", "08", "10", "11", "12") or n_err >= 3):
                     log.error("면허제한 조회 파라미터가 맞지 않는 것으로 보입니다(%s). config.yaml의 api.license_query 를 probe 결과에 맞게 조정하세요.", e)
                     break
                 log.warning("면허제한 조회 실패 %s: %s", no, e)
@@ -565,7 +599,7 @@ def probe(cfg: dict, ym: str) -> None:
     (2026-11-10 부터 서버가 7일 넘는 기간을 07 오류로 거절하므로 한 달 전체로는 조회하지 않는다)"""
     client = make_client(cfg)
     month = G2BClient.month_ranges(ym, ym)[0]
-    wins = G2BClient.split_window(month[0], month[1], client.cfg.max_window_days)
+    wins = G2BClient.split_window(month[0], month[1], client.cfg.max_window_days, overlap=False)
     bgn, end = wins[0]
     f = cfg["fields"]
     first_bid_no = None
@@ -646,7 +680,7 @@ def probe_awards(cfg: dict, ym: str, sample_bid_no: Optional[str] = None) -> Non
         return
     client = make_client(cfg, base)
     month = G2BClient.month_ranges(ym, ym)[0]
-    wins = G2BClient.split_window(month[0], month[1], client.cfg.max_window_days)             # 조회 기간 제한(기본 7일) 안에서 시험
+    wins = G2BClient.split_window(month[0], month[1], client.cfg.max_window_days, overlap=False)             # 조회 기간 제한(기본 7일) 안에서 시험
     variants = [dict(a.get("award_query") or {"inqryDiv": "1"}), {"inqryDiv": "2"}, {"inqryDiv": "3"}]
     seen = []
     ok = None

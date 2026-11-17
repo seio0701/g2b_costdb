@@ -213,6 +213,8 @@ class MockG2B:
         self.nodata_style = "03"      # "03": resultCode 03 + body {} / "zero": resultCode 00 + items [] + totalCount 0
         # 조회 기간 제한(2026-11-10 부터의 실제 서비스처럼): 달력 날짜로 이보다 긴 기간은 HTTP 200 + ResponseError 07. 0 이면 제한 없음
         self.max_span_days = 7
+        # 끝 시각(YYYYMMDDHHMM)의 그 1분을 포함하는지: True = 23:59:59 까지 / False = 23:59:00 까지(실제 서비스가 어느 쪽인지 모른다 — 수집은 어느 쪽이어도 빠지지 않아야 한다)
+        self.end_inclusive = True
         self.httpd = None
         self.base = ""
         self.data: Dict = {}
@@ -260,9 +262,9 @@ class MockG2B:
                     body = {"nkoneps.com.response.ResponseError": {"header": {"resultCode": "07", "resultMsg": "입력범위값 초과 에러"}}}
                     return self._send(200, json.dumps(body, ensure_ascii=False).encode("utf-8"))
 
-                def in_range(dt: str) -> bool:           # dt 'YYYY-MM-DD HH:MM[:SS]' 가 조회 기간(YYYYMMDDHHMM, 분 단위 포함) 안인지
-                    k = re.sub(r"[^0-9]", "", dt)[:12]
-                    return b0 <= k <= e0
+                def in_range(dt: str) -> bool:           # dt 'YYYY-MM-DD HH:MM[:SS]' 가 조회 기간(YYYYMMDDHHMM) 안인지 — 끝 1분의 처리는 end_inclusive
+                    k = re.sub(r"[^0-9]", "", dt)[:14].ljust(14, "0")
+                    return bool(dt) and b0 + "00" <= k <= e0 + ("59" if mock.end_inclusive else "00")
                 if op == "getBidPblancListInfoCnstwk":
                     items = [n for n in mock.data["notices"] if in_range(n["bidNtceDt"])]
                 elif op == "getBidPblancListInfoCnstwkBsisAmount":

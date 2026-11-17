@@ -215,15 +215,19 @@ def test_api_response_shapes_and_windows(tmp):
         except UnexpectedResponse:
             pass
 
-    # ③ 조회 구간 나누기: 달력 날짜 7일 이하(1~7, 8~14, 15~21, 22~28, 29~말일)
+    # ③ 조회 구간 나누기: 달력 날짜 7일 이하, 구간의 끝 = 다음 구간의 시작(경계의 1분을 두 구간에 걸쳐 조회 — 끝 1분의 처리가 어느 쪽이어도 빠지지 않게)
     sw = G2BClient.split_window
-    assert sw("202608010000", "202608312359", 7) == [("202608010000", "202608072359"), ("202608080000", "202608142359"), ("202608150000", "202608212359"),
-                                                     ("202608220000", "202608282359"), ("202608290000", "202608312359")]
-    assert len(sw("202602010000", "202602282359", 7)) == 4 and sw("202402010000", "202402292359", 7)[-1] == ("202402290000", "202402292359")
+    assert sw("202608010000", "202608312359", 7) == [("202608010000", "202608070000"), ("202608070000", "202608130000"), ("202608130000", "202608190000"),
+                                                     ("202608190000", "202608250000"), ("202608250000", "202608312359")]
+    assert len(sw("202602010000", "202602282359", 7)) == 5 and sw("202402010000", "202402292359", 7)[-1] == ("202402250000", "202402292359")
     assert sw("202608010000", "202608312359", 0) == [("202608010000", "202608312359")] == sw("202608010000", "202608312359", 31)
     assert sw("202608010000", "202608072359", 7) == [("202608010000", "202608072359")]
-    for b, e in sw("202608010000", "202608312359", 7):
-        assert int(e[6:8]) - int(b[6:8]) + 1 <= 7 and b[8:] == "0000" and e[8:] == "2359"
+    assert sw("202608010000", "202608312359", 1)[:2] == [("202608010000", "202608012359"), ("202608020000", "202608022359")] and len(sw("202608010000", "202608312359", 1)) == 31
+    for last in (28, 29, 30, 31):
+        for n in (2, 3, 6, 7, 8, 10, 27):
+            w = sw("202601010000", f"202601{last:02d}2359", n)
+            assert w[0][0] == "202601010000" and w[-1][1] == f"202601{last:02d}2359" and all(e1 == b2 for (_, e1), (b2, _) in zip(w, w[1:])), (last, n, w)
+            assert all(int(e[6:8]) - int(b[6:8]) + 1 <= n for b, e in w), (last, n, w)
 
     # ④ 수집(가짜 서버: 7일 넘는 기간은 07 로 거절, 조회 기간으로 걸러 돌려줌)
     import yaml
@@ -279,7 +283,7 @@ def test_api_response_shapes_and_windows(tmp):
             assert sqlite3.connect(cfg["paths"]["cache_db"]).execute("SELECT COUNT(*) FROM cache").fetchone()[0] == 0, "오류 응답은 캐시에 넣지 않는다"
             # 한 구간의 응답이 읽을 수 없는 모양이면 그 달만 실패: 완료 표시 없음·파일 없음. 다음 실행 때 받은 구간은 캐시에서, 실패한 구간만 다시 받는다
             cfg = make_cfg("fault")
-            server.faults[(OPN, "20240215", 1)] = (200, b"{}")
+            server.faults[(OPN, "20240213", 1)] = (200, b"{}")
             c0 = server.calls[OPN]
             collect.collect_notices(cfg)
             done, files = state(cfg)
@@ -292,7 +296,7 @@ def test_api_response_shapes_and_windows(tmp):
             assert "202402" in done and files["202402"] == by_month["202402"] and server.calls[OPN] - c0 == 3, (done, files, server.calls[OPN] - c0)
             # 잘린 쪽(totalCount>0 인데 0건)도 같은 처리
             cfg = make_cfg("trunc")
-            server.faults[(OPN, "20240108", 1)] = (200, OKB([], 4).encode("utf-8"))
+            server.faults[(OPN, "20240107", 1)] = (200, OKB([], 4).encode("utf-8"))
             collect.collect_notices(cfg)
             done, files = state(cfg)
             assert "202401" not in done and "202401" not in files, (done, files)
@@ -387,22 +391,190 @@ def test_api_response_shapes_and_windows(tmp):
     # 캐시가 없으면 줄 수만으로: 0행 완료·쪽 배수·이웃 달보다 적음
     rep2, _, meta2 = selfcheck.analyse(d, page_size=5, use_cache=False, ops=dict(selfcheck.DEFAULT_OPS), today_ym="202611")
     assert not meta2["have_cache"] and "PAGE_MULTIPLE" in {f for r in rep2["notices_"]["rows"] for f in r["flags"]}
-    # 7일 구간으로 받은 달: 구간별 건수의 합으로 대조하고, 서버가 0건이라고 답한 달은 빈 달이어도 정상
+    # 7일 구간으로 받은 달: 수집 기록(months.json)과 대조하고, 서버가 0건이라고 답한 달은 빈 달이어도 정상. 기록이 없으면 캐시의 구간별 쪽만 본다
     d2 = os.path.join(tmp, "selfcheck_win")
     raw2 = os.path.join(d2, "raw")
     os.makedirs(raw2)
     con = sqlite3.connect(os.path.join(d2, "cache.sqlite"))
     con.execute("CREATE TABLE cache (k TEXT PRIMARY KEY, op TEXT, params TEXT, body TEXT, fetched_at TEXT)")
-    for ym, per in (("202301", [3, 2, 4, 1, 2]), ("202302", [0, 0, 0, 0])):
+    for ym, per in (("202301", [3, 2, 4, 1, 2]), ("202302", [0, 0, 0, 0, 0]), ("202303", [2, 2, 2, 2, 2])):
         for i, (b, e) in enumerate(G2BClient.split_window(ym + "010000", f"{ym}{last[ym]:02d}2359", 7)):
             put(OPN, ym, 1, {"items": [{"x": 1}] * per[i], "totalCount": per[i]}, bgn=b, end=e)
+    put(OPN, "202304", 1, {"items": [{"x": 1}] * 5, "totalCount": 9}, bgn="202304010000", end="202304070000")       # 받다 만 달(완료 표시 없음): 쪽이 모자란 것이 정상
+    put("getBidPblancListInfoServc", "202303", 1, "{}", bgn="202303010000", end="202303312359", rows=50)             # 예전 probe 가 남긴 행(쪽 크기가 다름)
     con.commit(); con.close()
-    open(os.path.join(raw2, "notices_202301.jsonl"), "w", encoding="utf-8").write('{"x": 1}\n' * 11)       # 서버 합 12 보다 1 적다
+    open(os.path.join(raw2, "notices_202301.jsonl"), "w", encoding="utf-8").write('{"x": 1}\n' * 11)       # 수집 때 12행을 저장했다고 기록돼 있는데 11행
     open(os.path.join(raw2, "notices_202302.jsonl"), "w", encoding="utf-8").write("")
-    open(os.path.join(raw2, "notices_done.txt"), "w", encoding="utf-8").write("202301\n202302")
-    rep3, bad3, _ = selfcheck.analyse(d2, page_size=5, use_cache=True, ops=dict(selfcheck.DEFAULT_OPS), today_ym="202611")
-    r3 = {r["ym"]: r for r in rep3["notices_"]["rows"]}
-    assert r3["202301"]["cache_total"] == 12 and r3["202301"]["flags"] == ["SHORT_VS_TOTAL"] and r3["202302"]["flags"] == [] and not bad3, r3
+    open(os.path.join(raw2, "notices_202303.jsonl"), "w", encoding="utf-8").write('{"x": 1}\n' * 10)
+    open(os.path.join(raw2, "notices_done.txt"), "wb").write("\ufeff202301\r\n202302\r\n202303\r\n메모\r\n".encode("utf-8"))      # 메모장이 붙인 BOM·CRLF·메모
+    json.dump({"202301": {"total": 12, "received": 12, "dup": 0, "saved": 12}, "202302": {"total": 0, "received": 0, "dup": 0, "saved": 0},
+               "202303": {"total": 10, "received": 10, "dup": 0, "saved": 10}}, open(os.path.join(raw2, "notices_months.json"), "w", encoding="utf-8"))
+    for fast in (True, False):                                         # SQLite 의 JSON 함수로 읽는 빠른 길과 파이썬으로 읽는 길의 결과가 같다
+        keep_sql = selfcheck._FAST_SQL
+        if not fast:
+            selfcheck._FAST_SQL = "SELECT nosuchfunc(body) FROM cache"
+        try:
+            rep3, bad3, meta3 = selfcheck.analyse(d2, page_size=5, use_cache=True, ops=dict(selfcheck.DEFAULT_OPS), today_ym="202611", period=("202301", "202304"))
+        finally:
+            selfcheck._FAST_SQL = keep_sql
+        r3 = {r["ym"]: r for r in rep3["notices_"]["rows"]}
+        assert r3["202301"]["flags"] == ["SHORT_VS_SAVED"] and r3["202302"]["flags"] == [] and r3["202303"]["flags"] == [] and r3["202303"]["confirmed"], (fast, r3)
+        assert r3["202304"]["flags"] == ["NEVER_COLLECTED"] and selfcheck.hard_months(rep3) == {"notices_": ["202301"]}, r3["202304"]     # 받는 중인 달의 모자란 쪽은 문제가 아니다
+        assert rep3["notices_"]["junk"] == ["메모"] and rep3["notices_"]["done"] == 3 and len(bad3) == 1, (rep3["notices_"]["junk"], bad3)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        selfcheck.print_report(rep3, bad3, meta3)
+    out = buf.getvalue()
+    assert "달(YYYYMM)이 아닌 글자가 있어 무시했습니다" in out and "참고: 캐시에 남아 있는 '읽지 못한 응답' 행 1개" in out and "위의 달 판정과는 별개" in out, out
+    assert selfcheck.reopen(raw2, rep3) == {"notices_": ["202301"]} and collect._read_done(os.path.join(raw2, "notices_done.txt")) == {"202302", "202303"}
+    # 걸러서 저장하는 수집(용역): 줄 수는 수집 기록의 '저장 건수' 와 대조 — 한 건도 남기지 않은 달은 정상, 파일이 줄어든 달은 다시 받는다
+    open(os.path.join(raw2, "servc_202301.jsonl"), "w", encoding="utf-8").write("")
+    open(os.path.join(raw2, "servc_202302.jsonl"), "w", encoding="utf-8").write('{"x": 1}\n' * 3)
+    open(os.path.join(raw2, "servc_done.txt"), "w", encoding="utf-8").write("202301\n202302")
+    json.dump({"202301": {"total": 20000, "received": 20000, "dup": 0, "saved": 0}, "202302": {"total": 18000, "received": 18000, "dup": 2, "saved": 900}},
+              open(os.path.join(raw2, "servc_months.json"), "w", encoding="utf-8"))
+    rep4, bad4, meta4 = selfcheck.analyse(d2, page_size=5, use_cache=True, ops=dict(selfcheck.DEFAULT_OPS), today_ym="202611")
+    r4 = {r["ym"]: r["flags"] for r in rep4["servc_"]["rows"]}
+    assert r4["202301"] == [] and r4["202302"] == ["SHORT_VS_SAVED"] and "202303" not in r4, r4          # 202303 의 예전 probe 행은 달 판정에 쓰지 않는다
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        selfcheck.print_report(rep4, bad4, meta4)
+    assert "pipeline collect --servc" in buf.getvalue() and "걸러서 저장하는 수집" in buf.getvalue(), buf.getvalue()
+    # 캐시 파일을 읽을 수 없으면(빈 파일·깨진 파일) 죽지 않고 캐시 없이 점검한다 / 달이 아닌 글자만 든 done.txt 에도 멈추지 않는다
+    d3 = os.path.join(tmp, "selfcheck_bad")
+    os.makedirs(os.path.join(d3, "raw"))
+    open(os.path.join(d3, "cache.sqlite"), "wb").write(b"not a database, just text" * 50)
+    open(os.path.join(d3, "raw", "notices_202301.jsonl"), "w", encoding="utf-8").write('{"x": 1}\n' * 7)
+    open(os.path.join(d3, "raw", "notices_done.txt"), "wb").write("\ufeffdone 메모 2026-09".encode("utf-8"))
+    rep5, bad5, meta5 = selfcheck.analyse(d3, page_size=5, use_cache=True, ops=dict(selfcheck.DEFAULT_OPS), today_ym="202611")
+    assert not meta5["have_cache"] and meta5["cache_error"] and [r["flags"] for r in rep5["notices_"]["rows"] if r["ym"] == "202301"] == [["NOT_DONE"]], (meta5, rep5)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        selfcheck.print_report(rep5, bad5, meta5)
+    assert "읽지 못했습니다" in buf.getvalue() and selfcheck.month_seq("\ufeff202301", "202303") == [], buf.getvalue()
+
+
+def test_collector_review(tmp):
+    """수집기 수정분(7일 구간·전량 확인) 독립 검토에서 나온 결함: ① 전량을 받지 못한 조회의 쪽이 캐시에 남아 서버가 정상이 된 뒤에도 같은 실패를 되풀이
+    ② 다시 받은 결과가 두 번 줄면 .prev 가 덮여 가장 큰 원본이 사라짐 ③ 면허제한 조회가 모두 08(필수값)로 거절돼도 공고 수만큼 호출
+    ④ max_window_days 가 빈 값이면 TypeError ⑤ totalCount 음수·무한대."""
+    import requests
+    import yaml
+    from g2b_costdb import collect
+    from g2b_costdb.api_client import IncompleteResult, UnexpectedResponse, validate_body, body_total
+    J = lambda o: json.dumps(o, ensure_ascii=False)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def make_cfg(name, **api):
+        cfg = yaml.safe_load(open(os.path.join(root, "config.yaml"), encoding="utf-8"))
+        d = os.path.join(tmp, name)
+        cfg["api"].update(base_url="http://x/BidPublicInfoService", sleep_between_calls_sec=0, max_retries=2, num_of_rows=5, use_awards=False, **api)
+        cfg["period"] = {"start": "2024-01", "end": "2024-01"}
+        cfg["paths"] = {"data_dir": d, "raw_dir": os.path.join(d, "raw"), "cache_db": os.path.join(d, "cache.sqlite"), "text_dir": os.path.join(d, "text"),
+                        "files_dir": os.path.join(d, "files"), "out_dir": os.path.join(d, "out"), "excel_name": "x.xlsx"}
+        os.makedirs(cfg["paths"]["raw_dir"], exist_ok=True)
+        return cfg
+
+    rows = [{"bidNtceNo": f"R{i:03d}", "bidNtceOrd": "000", "bidNtceNm": "가상 공사", "bidNtceDt": "2024-01-03 10:00:00", "presmptPrce": "1"} for i in range(12)]
+    state = {"rows": rows, "skip": 7, "calls": 0}
+
+    def server(url, params=None, timeout=None):                       # 조회 기간으로 걸러 돌려주는 가짜 서버(skip: 건수에는 들어가지만 내려 주지 않는 행)
+        state["calls"] += 1
+        b, e, pg, n = params["inqryBgnDt"], params["inqryEndDt"], int(params["pageNo"]), int(params["numOfRows"])
+        hit = [r for r in state["rows"] if b <= r["bidNtceDt"].replace("-", "").replace(" ", "").replace(":", "")[:12] <= e]
+        give = [r for i, r in enumerate(hit) if i != state["skip"]]
+        return _Resp(J({"response": {"header": {"resultCode": "00"}, "body": {"items": give[(pg - 1) * n: pg * n] or "", "totalCount": len(hit)}}}))
+
+    old_env = os.environ.get("G2B_SERVICE_KEY")
+    os.environ["G2B_SERVICE_KEY"] = "k"
+    try:
+        with mock.patch.object(requests.Session, "get", side_effect=server), mock.patch("time.sleep"):
+            # ① 서버가 건수(12)보다 적게(11) 내려 준 달은 실패 — 그 조회의 쪽은 캐시에 남기지 않아, 서버가 정상이 되면 다음 실행에서 끝난다
+            cfg = make_cfg("sticky")
+            raw = cfg["paths"]["raw_dir"]
+            collect.collect_notices(cfg)
+            assert not os.path.exists(os.path.join(raw, "notices_done.txt")) and not os.path.exists(os.path.join(raw, "notices_202401.jsonl"))
+            state["skip"], c0 = None, state["calls"]
+            collect.collect_notices(cfg)
+            assert open(os.path.join(raw, "notices_done.txt")).read().split() == ["202401"] and state["calls"] - c0 == 7, state["calls"] - c0   # 3쪽 + 빈 구간 4개
+            assert sum(1 for _ in open(os.path.join(raw, "notices_202401.jsonl"), encoding="utf-8")) == 12
+            # ② 두 번 줄어도 처음 남긴 .prev(가장 큰 원본)는 그대로, 두 번째는 .prev2
+            for keep in (10, 6):
+                os.remove(os.path.join(raw, "notices_done.txt"))
+                state["rows"] = rows[:keep]
+                with mock.patch.object(collect, "date") as d:        # 받은 날이 달라야 캐시를 다시 쓰지 않는다
+                    d.today.return_value = __import__("datetime").date(2030, 1, keep)
+                    collect.collect_notices(cfg)
+            n = lambda fn: sum(1 for _ in open(os.path.join(raw, fn), encoding="utf-8"))
+            assert (n("notices_202401.jsonl"), n("notices_202401.jsonl.prev"), n("notices_202401.jsonl.prev2")) == (6, 12, 10)
+            state["rows"] = rows
+            # ④ max_window_days 가 빈 값(YAML 'max_window_days:')이면 기본 7
+            cfg = make_cfg("nullwin")
+            cfg["api"]["max_window_days"] = None
+            assert collect.make_client(cfg).cfg.max_window_days == 7
+        # ③ 면허제한 조회가 모두 요청 조건 오류(08)면 첫 건에서 멈춘다(오류 응답은 캐시에 넣지 않으므로 실행 때마다 공고 수만큼 호출하게 된다)
+        e08 = J({"nkoneps.com.response.ResponseError": {"header": {"resultCode": "08", "resultMsg": "필수값 입력 에러"}}})
+        cfg = make_cfg("lic")
+        with mock.patch.object(requests.Session, "get", return_value=_Resp(e08)) as g, mock.patch("time.sleep"):
+            assert collect.collect_license_limits(cfg, [f"R{i}" for i in range(30)]).empty and g.call_count == 1, g.call_count
+        with mock.patch.object(requests.Session, "get", return_value=_Resp("{}")) as g, mock.patch("time.sleep"):
+            assert collect.collect_license_limits(cfg, [f"R{i}" for i in range(30)]).empty and g.call_count == 3, g.call_count
+    finally:
+        if old_env is None:
+            os.environ.pop("G2B_SERVICE_KEY", None)
+        else:
+            os.environ["G2B_SERVICE_KEY"] = old_env
+    # ⑤ totalCount 음수는 '마지막 쪽을 지난 빈 쪽'이 아니고, 무한대는 예외 없이 '없음'
+    assert validate_body({"items": "", "totalCount": -1}, 1, 5) and body_total({"totalCount": "Infinity"}) is None and body_total({"totalCount": 1e999}) is None
+    # iter_all: 전량이 아닌 채 끝난 조회의 쪽은 캐시에서 지운다(쪽 자체는 정상이어도)
+    c = _client(tmp); c.cfg.num_of_rows = 5
+    with mock.patch.object(c.session, "get", side_effect=lambda url, params=None, timeout=None: _Resp(J({"response": {"header": {"resultCode": "00"}, "body": {
+            "items": [{"i": 1}] if params["pageNo"] == "1" else "", "totalCount": 3}}}))) as g, mock.patch("time.sleep"):
+        for _ in range(2):                                              # 1쪽(1건) + 2쪽(마지막 쪽을 지난 빈 쪽으로 보이는 응답) — 두 번 다 서버에 다시 묻는다
+            try:
+                list(c.iter_all("op", {"a": "1"}))
+                raise AssertionError("IncompleteResult 기대")
+            except IncompleteResult:
+                pass
+        assert g.call_count == 4, g.call_count
+    assert c.conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0] == 0
+    # ⑥ 구간 경계: 서버가 끝 시각의 1분을 포함하든(23:59:59 까지) 아니든(00초까지), 경계에 걸린 공고가 빠지지도 두 번 저장되지도 않는다
+    from mock_g2b import KEY, MockG2B
+    srv = MockG2B()
+    base = srv.start()
+    old_env = {k: os.environ.get(k) for k in ("G2B_SERVICE_KEY", "NO_PROXY")}
+    os.environ.update(G2B_SERVICE_KEY=KEY, NO_PROXY="127.0.0.1,localhost")
+    try:
+        tmpl = srv.data["notices"][0]
+        edge = [dict(tmpl, bidNtceNo=f"EDGE{i}", bidNtceOrd="000", bidNtceDt=dt) for i, dt in enumerate((
+            "2024-01-06 23:59:30", "2024-01-07 00:00:00", "2024-01-07 00:00:30", "2024-01-12 23:59:59", "2024-01-13 00:00:59", "2024-01-25 00:00:10", "2024-01-31 23:58:59"))]
+        srv.data["notices"] = srv.data["notices"] + edge
+        want = sorted(f'{n["bidNtceNo"]}-{n["bidNtceOrd"]}' for n in srv.data["notices"] if n["bidNtceDt"].startswith("2024-01"))
+        for inclusive in (True, False):
+            srv.end_inclusive = inclusive
+            cfg = make_cfg(f"edge{int(inclusive)}")
+            cfg["api"].update(base_url=base + "/BidPublicInfoService", num_of_rows=999)
+            with mock.patch("time.sleep"):
+                collect.collect_notices(cfg)
+            raw = cfg["paths"]["raw_dir"]
+            got = sorted(f'{r["bidNtceNo"]}-{r["bidNtceOrd"]}' for r in map(json.loads, open(os.path.join(raw, "notices_202401.jsonl"), encoding="utf-8")))
+            assert got == want, (inclusive, sorted(set(want) - set(got)), [x for x in got if got.count(x) > 1])
+            meta = json.load(open(os.path.join(raw, "notices_months.json"), encoding="utf-8"))["202401"]
+            # 경계 1분에 걸린 행: 끝 1분을 포함하는 서버는 4건(7일 00:00:00·00:00:30, 13일 00:00:59, 25일 00:00:10)을, 아닌 서버는 정각의 1건만 두 번 준다
+            assert meta["saved"] == len(want) and meta["received"] - meta["dup"] == len(want) and meta["dup"] == (4 if inclusive else 1), (inclusive, meta)
+    finally:
+        srv.stop()
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    # ⑦ 완료 표시 파일을 메모장·PowerShell 로 고쳐 BOM·CRLF·메모가 섞여도 달만 읽는다(첫 달을 다시 받지 않는다)
+    dp = os.path.join(tmp, "done_bom.txt")
+    open(dp, "wb").write("\ufeff202401\r\n202402\r\n# 메모\r\n2024-03\r\n".encode("utf-8"))
+    assert collect._read_done(dp) == {"202401", "202402"}
+    open(dp, "wb").write("202401\n202402".encode("utf-16"))
+    assert collect._read_done(dp) == {"202401", "202402"}
 
 
 def test_classify():
@@ -2403,6 +2575,7 @@ def run():
     with tempfile.TemporaryDirectory() as tmp:
         test_api_client(tmp)
         test_api_response_shapes_and_windows(tmp)
+        test_collector_review(tmp)
         test_classify()
         test_discover_and_dedup(tmp)
         test_institution_prefix()
