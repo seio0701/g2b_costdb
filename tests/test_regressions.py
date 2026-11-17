@@ -231,7 +231,7 @@ def test_api_response_shapes_and_windows(tmp):
 
     # ④ 수집(가짜 서버: 7일 넘는 기간은 07 로 거절, 조회 기간으로 걸러 돌려줌)
     import yaml
-    from mock_g2b import KEY, MockG2B
+    from tests.mock_g2b import KEY, MockG2B
     server = MockG2B()
     base = server.start()
     old_env = {k: os.environ.get(k) for k in ("G2B_SERVICE_KEY", "NO_PROXY")}
@@ -518,7 +518,7 @@ def test_collector_review(tmp):
         with mock.patch.object(requests.Session, "get", return_value=_Resp(e08)) as g, mock.patch("time.sleep"):
             assert collect.collect_license_limits(cfg, [f"R{i}" for i in range(30)]).empty and g.call_count == 1, g.call_count
         with mock.patch.object(requests.Session, "get", return_value=_Resp("{}")) as g, mock.patch("time.sleep"):
-            assert collect.collect_license_limits(cfg, [f"R{i}" for i in range(30)]).empty and g.call_count == 3, g.call_count
+            assert collect.collect_license_limits(cfg, [f"R{i}" for i in range(30)]).empty and g.call_count == 10, g.call_count
     finally:
         if old_env is None:
             os.environ.pop("G2B_SERVICE_KEY", None)
@@ -539,7 +539,7 @@ def test_collector_review(tmp):
         assert g.call_count == 4, g.call_count
     assert c.conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0] == 0
     # ⑥ 구간 경계: 서버가 끝 시각의 1분을 포함하든(23:59:59 까지) 아니든(00초까지), 경계에 걸린 공고가 빠지지도 두 번 저장되지도 않는다
-    from mock_g2b import KEY, MockG2B
+    from tests.mock_g2b import KEY, MockG2B
     srv = MockG2B()
     base = srv.start()
     old_env = {k: os.environ.get(k) for k in ("G2B_SERVICE_KEY", "NO_PROXY")}
@@ -2598,6 +2598,8 @@ def run():
         test_work_split_review3(tmp)
         test_trade_run_feedback(tmp)
         test_attachments(tmp)
+    from tests import test_api_review          # 수집기·응답 해석·check-raw·probe 독립 검토의 확인 항목(가짜 응답만 사용)
+    test_api_review.run()
     print("OK: 회귀 테스트 통과")
 
 

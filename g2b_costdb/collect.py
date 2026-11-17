@@ -3,7 +3,7 @@
 - collect_notices(): 공사 공고목록을 월 단위로 전량 수집 → data/raw/notices_YYYYMM.jsonl + data/notices_all.parquet
 - collect_bsis_amounts(): 공사 기초금액을 월 단위로 전량 수집 → data/bsis_all.parquet
 - collect_license_limits(bid_nos): 공고번호별 면허제한 업종 → data/license_all.parquet
-- probe(): 1개월 표본으로 실제 응답 필드명 확인 + config.yaml fields 매핑 자동 대조
+- probe(): 그 달의 첫 구간(api.max_window_days, 기본 7일) 표본으로 실제 응답 필드명 확인 + config.yaml fields 매핑 자동 대조
 
 진행 중인 달(오늘이 속한 달)은 완료 표시를 하지 않고 매 실행 시 다시 받는다(캐시 키에 날짜를 섞음).
 미래 달은 건너뛴다. 원문 JSONL은 절대 덮어쓰지 않는 것이 원칙이지만, 완료되지 않은 달의 파일은 재수집 시 교체한다.
@@ -181,14 +181,30 @@ def _collect_monthly(cfg: dict, op_key: str, prefix: str, start: Optional[str], 
                 client.purge_cache(op, f'"inqryBgnDt": "{ym}', before=date.today().isoformat())
             stats: dict = {"total": 0, "pages": 0, "windows": 0}
             rows: list = []
+            n_all = n_dup = 0
+            prev_keys: dict = {}
             try:
                 # require_total: totalCount 없는 응답은 오류. 받은 건수 < totalCount 이면 IncompleteResult(RuntimeError) → 아래에서 '실패한 달'
                 for wb, we in G2BClient.split_window(bgn, endd, client.cfg.max_window_days):
                     if wb[:8] > today_ymd:              # 진행 중인 달의 아직 오지 않은 구간
                         continue
                     st: dict = {}
-                    rows.extend(client.iter_all(op, {**(extra or {"inqryDiv": "1"}), "inqryBgnDt": wb, "inqryEndDt": we},
-                                                cache_salt=(date.today().isoformat() if refresh else None), require_total=True, stats=st))
+                    got = list(client.iter_all(op, {**(extra or {"inqryDiv": "1"}), "inqryBgnDt": wb, "inqryEndDt": we},
+                                               cache_salt=(date.today().isoformat() if refresh else None), require_total=True, stats=st))
+                    # 구간 경계의 1분은 앞 구간과 이 구간에 걸쳐 조회하므로 같은 행이 두 번 올 수 있다 → 바로 앞 구간이 이미 준 행(똑같은 행)만 뺀다.
+                    # 한 구간 안에서 서버가 똑같은 행을 두 번 준 것은 서버 건수 그대로 남긴다(월 단위로 받던 때와 같게)
+                    keys = [hashlib.sha1(json.dumps(r, sort_keys=True, ensure_ascii=False).encode("utf-8")).digest() for r in got]
+                    left = dict(prev_keys)
+                    for r, k in zip(got, keys):
+                        if left.get(k, 0) > 0:
+                            left[k] -= 1
+                            n_dup += 1
+                        else:
+                            rows.append(r)
+                    prev_keys = {}
+                    for k in keys:
+                        prev_keys[k] = prev_keys.get(k, 0) + 1
+                    n_all += len(got)
                     stats["total"] += st.get("total") or 0
                     stats["pages"] += st.get("pages") or 0
                     stats["windows"] += 1
@@ -205,16 +221,6 @@ def _collect_monthly(cfg: dict, op_key: str, prefix: str, start: Optional[str], 
                     break
                 continue
             consecutive_fail = 0
-            n_all = len(rows)
-            n_dup = 0
-            if stats["windows"] > 1:                    # 구간 경계의 1분은 두 구간에 걸쳐 조회하므로 같은 행이 두 번 올 수 있다 → 똑같은 행은 한 번만 남긴다
-                seen_rows, uniq = set(), []
-                for r in rows:
-                    k = hashlib.sha1(json.dumps(r, sort_keys=True, ensure_ascii=False).encode("utf-8")).digest()
-                    if k not in seen_rows:
-                        seen_rows.add(k)
-                        uniq.append(r)
-                n_dup, rows = n_all - len(uniq), uniq
             if row_filter is not None:
                 rows = [r for r in rows if row_filter(r)]
             n_old = _count_lines(path) if os.path.exists(path) else None
@@ -326,7 +332,7 @@ def servc_keep_filter(cfg: dict):
 
 def collect_servc(cfg: dict, start: str = None, end: str = None) -> pd.DataFrame:
     """용역 입찰공고 목록을 월 단위로 받아 관련 공고(폐기물·건설사업관리·설계)만 data/raw/servc_YYYYMM.jsonl + data/servc_all.parquet 에 저장.
-    공사 수집과 같은 서비스·같은 인증키. 호출량이 크므로(월 15~26회, 전 기간 약 1,300~2,400회) 일일 예산 안에서 여러 날에 걸쳐 이어받는다."""
+    공사 수집과 같은 서비스·같은 인증키. 호출량이 크므로(월 약 20~30회, 전 기간 약 2,000~2,900회) 일일 예산 안에서 여러 날에 걸쳐 이어받는다."""
     if "servc_list" not in (cfg["api"].get("ops") or {}):
         raise SystemExit("config.yaml api.ops.servc_list 가 없습니다(용역 입찰공고 목록 오퍼레이션명).")
     s0, e0 = servc_period(cfg)
@@ -373,6 +379,13 @@ def _probe_servc_diagnosis(cfg: dict, client: G2BClient, op: str, base: dict, fi
     if first.get("status") == "quota":                  # 일일 한도에 걸렸으면 조건을 바꿔 봐야 호출만 쓴다
         print(f"\n=== {op} ({ym}) 오늘의 호출 한도에 도달했습니다({first.get('msg')}) → 내일 같은 명령으로 다시 실행하세요.")
         return
+    if first.get("status") == "nodata":                 # 그 달의 모든 구간이 0건: 조건을 바꿔 물어도 호출만 쓴다(답은 이미 나왔다)
+        n_all = len(G2BClient.split_window(month[0], month[1], client.cfg.max_window_days, overlap=False))
+        print(f"\n=== {op} ({ym}) 표본이 없습니다 — {month[0][:8]}~{month[1][:8]} 을 {n_all}개 구간으로 모두 조회했습니다 ===")
+        print(_diag_line(f"마지막 구간 {bgn[:8]}~{end[:8]}({days}일)", first))
+        print("[판단]\n  서버가 이 기간은 0건이라고 답했습니다(오류가 아님) → 다른 달(--ym)로 다시 시도하세요.")
+        print(f"\n오늘 API 호출 {client.calls_today()}회 (예산 {cfg['api']['daily_call_budget']})")
+        return
     print(f"\n=== {op} ({ym}) 표본을 받지 못했습니다 — 조회 조건을 바꿔 가며 서버의 답을 확인합니다 ===")
     print(_diag_line(f"① {bgn[:8]}~{end[:8]}({days}일), 50건", first))
     tries = [("② 첫 1일, 50건", op, {**base, "inqryEndDt": bgn[:8] + "2359"}),
@@ -389,13 +402,21 @@ def _probe_servc_diagnosis(cfg: dict, client: G2BClient, op: str, base: dict, fi
 
     def accepted(k) -> bool:                             # 서버가 요청을 받아 준 경우(항목이 있든 0건이든) — 거절·읽을 수 없는 응답과 구별
         return (got.get(k) or {}).get("status") in ("ok", "nodata")
+    rejected = first.get("status") == "error"           # 서버가 코드를 붙여 거절했을 때만 '조회 조건' 문제로 본다(일시 오류·읽을 수 없는 응답은 조건 탓이 아닐 수 있다)
+    quota = any(d.get("status") == "quota" for d in got.values())
     print("[판단]")
     if first.get("status") == "nodata":
         print("  서버가 이 기간은 0건이라고 답했습니다(오류가 아님) → 다른 달(--ym)로 다시 시도하세요.")
-    elif accepted("②"):
+    elif rejected and accepted("②") and not accepted("④"):
         print(f"  하루는 조회되는데 {days}일은 안 됩니다 → 한 번에 조회할 수 있는 기간이 {days}일보다 짧습니다. config.yaml api.max_window_days 를 줄여야 합니다(이 출력을 알려 주세요).")
-    elif accepted("④"):
+    elif rejected and accepted("④"):
         print("  건수를 줄이면 조회됩니다 → 한 번에 받는 건수(numOfRows) 제한 문제입니다(이 출력을 알려 주세요).")
+    elif quota:
+        print("  조건을 바꿔 보는 도중 오늘의 호출 한도에 도달해 원인을 가리지 못했습니다 → 내일 같은 명령으로 다시 실행하세요.")
+    elif accepted("④"):
+        print(f"  같은 {days}일을 다시 물으니 응답이 왔습니다 → 처음 조회의 실패는 일시적인 것으로 보입니다(조회 기간 문제가 아님). 잠시 뒤 같은 명령을 다시 실행하세요.")
+    elif accepted("②"):
+        print(f"  하루는 조회되는데 {days}일 조회는 서버가 코드 없이 실패했습니다(일시 오류·읽을 수 없는 응답) → 잠시 뒤 같은 명령을 다시 실행해 보고, 되풀이되면 이 출력을 알려 주세요.")
     elif accepted("⑥"):
         print("  공사 공고는 조회되는데 용역 공고만 안 됩니다 → 위 ①~⑤ 의 코드·서버 문구가 원인입니다. 코드 12·20·30 이면 공공데이터포털 마이페이지에서 "
               "「조달청_나라장터 입찰공고정보서비스」 활용신청 상세기능에 용역 조회가 들어 있는지, 오퍼레이션명(config api.ops.servc_list)이 맞는지 확인하고, "
@@ -445,6 +466,10 @@ def probe_servc(cfg: dict, ym: str) -> None:
         whole = client.diagnose(op, {**base, "inqryBgnDt": month[0], "inqryEndDt": month[1], "numOfRows": 1})
         print(_diag_line(f"[조회 기간] 한 달 전체({month[0][:8]}~{month[1][:8]}) 조회", whole))
         print(f"  → 수집은 한 달을 {client.cfg.max_window_days}일 이하 {n_win}구간으로 나눠 조회합니다(config.yaml api.max_window_days).")
+        cw = G2BClient.split_window(month[0], month[1], client.cfg.max_window_days)[0]       # 수집이 실제로 쓰는 구간(끝 = 다음 구간의 시작 분)도 서버가 받는지
+        if cw != (bgn, end):
+            print(_diag_line(f"[수집 구간] 수집에 쓰는 첫 구간({cw[0][:8]} {cw[0][8:10]}:{cw[0][10:]}~{cw[1][:8]} {cw[1][8:10]}:{cw[1][10:]}) 조회",
+                             client.diagnose(op, {**base, "inqryBgnDt": cw[0], "inqryEndDt": cw[1], "numOfRows": 1})))
     keys = sorted(set().union(*[it.keys() for it in items]))
     print("필드:", keys)
     print("표본:", json.dumps(items[0], ensure_ascii=False, indent=1)[:2500])
@@ -543,9 +568,9 @@ def collect_license_limits(cfg: dict, bid_nos: List[str]) -> pd.DataFrame:
                 body = client.call(op, license_query_params(cfg, str(no)))
             except ApiError as e:
                 n_err += 1
-                # 06·07·08 은 조달청 서비스의 요청 조건 오류(10·11·12 와 같은 성격). 그 밖의 오류도 한 건도 성공하지 못한 채 3건 이어지면 멈춘다
+                # 06·07·08 은 조달청 서비스의 요청 조건 오류(10·11·12 와 같은 성격). 그 밖의 오류도 한 건도 성공하지 못한 채 10건 이어지면 멈춘다(앞의 몇 건만 읽지 못한 경우에 뒤의 정상 공고까지 버리지 않게)
                 # (오류 응답은 캐시에 넣지 않으므로, 멈추지 않으면 실행할 때마다 공고 수만큼 호출을 쓴다)
-                if n_ok == 0 and (e.code in ("06", "07", "08", "10", "11", "12") or n_err >= 3):
+                if n_ok == 0 and (e.code in ("06", "07", "08", "10", "11", "12") or n_err >= 10):
                     log.error("면허제한 조회 파라미터가 맞지 않는 것으로 보입니다(%s). config.yaml의 api.license_query 를 probe 결과에 맞게 조정하세요.", e)
                     break
                 log.warning("면허제한 조회 실패 %s: %s", no, e)
@@ -553,6 +578,10 @@ def collect_license_limits(cfg: dict, bid_nos: List[str]) -> pd.DataFrame:
             except RuntimeError as e:                   # 재시도 끝에 실패한 한 건 때문에 전체를 멈추지 않는다(DailyBudgetExceeded 는 바깥에서 처리)
                 if isinstance(e, DailyBudgetExceeded):
                     raise
+                n_err += 1
+                if n_ok == 0 and n_err >= 3:            # 한 건도 성공하지 못한 채 재시도 끝 실패가 이어지면 서버·연결 문제 — 공고 수만큼 예산을 태우지 않는다
+                    log.error("면허제한 조회가 계속 실패합니다(%s). 서버·네트워크 상태를 확인한 뒤 research 를 다시 실행하세요.", client._scrub(e)[:200])
+                    break
                 log.warning("면허제한 조회 실패 %s: %s", no, client._scrub(e)[:200])
                 continue
             n_ok += 1
@@ -617,6 +646,8 @@ def probe(cfg: dict, ym: str) -> None:
             print(f"\n=== {op} ({span}) 실패: {api_failure_text(err)}")
             if err.code in ("20", "30", "31", "32"):
                 print(f"  → {explain_code(err.code)}")
+            elif err.code in ("06", "07", "08"):
+                print(f"  → 조회 조건을 서버가 거절했습니다. python -m g2b_costdb.pipeline probe --servc --ym {ym} 가 조건을 바꿔 가며 원인을 보여 줍니다.")
             continue
         items = client._items(body)
         print(f"\n=== {op} ({span}) totalCount={body.get('totalCount')} 표본 {len(items)}건 ===")
@@ -681,7 +712,7 @@ def probe_awards(cfg: dict, ym: str, sample_bid_no: Optional[str] = None) -> Non
     client = make_client(cfg, base)
     month = G2BClient.month_ranges(ym, ym)[0]
     wins = G2BClient.split_window(month[0], month[1], client.cfg.max_window_days, overlap=False)             # 조회 기간 제한(기본 7일) 안에서 시험
-    variants = [dict(a.get("award_query") or {"inqryDiv": "1"}), {"inqryDiv": "2"}, {"inqryDiv": "3"}]
+    variants = [dict(a.get("award_query") or {"inqryDiv": "1"}), {"inqryDiv": "1"}, {"inqryDiv": "2"}, {"inqryDiv": "3"}]
     seen = []
     ok = None
     n_err = 0
@@ -693,7 +724,7 @@ def probe_awards(cfg: dict, ym: str, sample_bid_no: Optional[str] = None) -> Non
         if e is not None:
             print(f"\n=== {op} params={v} 실패: {api_failure_text(e)}")
             n_err += 1
-            if e.code in ("20", "30", "31", "32"):
+            if e.code in ("12", "20", "30", "31", "32"):
                 print("→ 「조달청_나라장터 낙찰정보서비스」 활용신청이 승인되었는지, api.award_base_url 이 포털 페이지의 End Point 와 같은지 확인")
                 return
             continue

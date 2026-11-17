@@ -4,7 +4,7 @@
 - 공공데이터포털 오류 응답(JSON 헤더 또는 XML cmmMsgHeader) 해석
   · 키 미등록(30)·기간만료(31)·IP 미등록(32)·서비스 접근거부(20) 등 → 재시도 없이 한국어 안내와 함께 중단
   · 일일 트래픽 초과(22) → DailyBudgetExceeded (다음 날 재개)
-  · 일시 오류(01/02/04/05/99, HTTP 5xx, 네트워크) → 지수 백오프 재시도
+  · 일시 오류(01/02/04/05/23/99, 오류코드를 읽을 수 없는 HTTP 4xx·5xx, JSON 이 아닌 본문, 잘린 쪽, 네트워크) → 지수 백오프 재시도
   · 데이터 없음(03) → 정상(빈 결과)
   · 조달청 서비스 자체의 요청 오류(06 날짜 형식·07 조회 범위 초과·08 필수값 누락)는 HTTP 200 에 다른 모양으로 온다:
     {"nkoneps.com.response.ResponseError": {"header": {"resultCode": "07", "resultMsg": "입력범위값 초과 에러"}}} → 재시도 없이 ApiError
@@ -203,7 +203,8 @@ class G2BClient:
             self.cfg.service_key = unquote(cfg.service_key)
             log.info("서비스키가 URL 인코딩 형태(%s 포함)로 보여 Decoding 키로 변환하여 사용합니다.", "%")
         os.makedirs(os.path.dirname(cache_db) or ".", exist_ok=True)
-        self.conn = sqlite3.connect(cache_db)
+        # timeout: check-raw 가 큰 캐시를 읽는 동안(1~2분) 쓰기가 막혀도 'database is locked' 로 죽지 않고 기다린다(기본 5초)
+        self.conn = sqlite3.connect(cache_db, timeout=600)
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS cache (k TEXT PRIMARY KEY, op TEXT, params TEXT, body TEXT, fetched_at TEXT)"
         )
@@ -242,10 +243,12 @@ class G2BClient:
         raise RuntimeError(f"API {code}: {msg}")
 
     @staticmethod
-    def _interpret(r: requests.Response, op: str, p: Dict[str, str], page_no: int = 1, rows: int = 0) -> Dict[str, Any]:
+    def _interpret(r: requests.Response, op: str, p: Dict[str, str], page_no: int = 1, rows: int = 0, scrub=None) -> Dict[str, Any]:
         """HTTP 응답 → body(dict). 재시도 대상은 RuntimeError, 비재시도는 ApiError(해석 불가는 UnexpectedResponse), 트래픽 초과는 DailyBudgetExceeded.
         정상(00)으로 인정하는 조건: response(dict).header.resultCode 가 00(또는 header 없음) 이고 body 가 validate_body 를 통과."""
         text = r.text or ""
+        if scrub is not None:
+            text = scrub(text)                          # 문구를 자르기 전에 가린다(잘린 인증키 앞부분이 남지 않게). 판정에는 r.json() 을 쓴다
         if r.status_code != 200:
             err = parse_portal_error(text)
             if err and err["code"] not in RETRYABLE_CODES:
@@ -354,7 +357,7 @@ class G2BClient:
                 self._bump_calls()
                 r = self.session.get(url, params=q, timeout=self.cfg.timeout_sec)
                 time.sleep(self.cfg.sleep_between_calls_sec)
-                body = self._interpret(r, op, p, page_no, rows)
+                body = self._interpret(r, op, p, page_no, rows, self._scrub)
                 self.conn.execute(
                     "INSERT OR REPLACE INTO cache VALUES(?,?,?,?,?)",
                     (key, op, json.dumps(p, ensure_ascii=False), json.dumps(body, ensure_ascii=False),
@@ -362,12 +365,15 @@ class G2BClient:
                 )
                 self.conn.commit()
                 return body
-            except DailyBudgetExceeded:
+            except DailyBudgetExceeded as e:
                 self._mark_budget_exhausted()
+                e.args = (self._scrub(e.args[0]),) if e.args else e.args      # 서버 문구(returnAuthMsg)에 인증키가 섞여 있어도 가린다
                 raise
             except ApiError as e:
                 e.args = (self._scrub(e.args[0]),) if e.args else e.args      # 응답 앞부분에 인증키가 섞여 있어도 화면·로그에 남지 않게
                 e.msg = self._scrub(e.msg)
+                if isinstance(e, UnexpectedResponse):
+                    e.why, e.raw = self._scrub(e.why), self._scrub(e.raw)
                 raise
             except (requests.RequestException, RuntimeError, ValueError) as e:
                 last_err = e
@@ -410,7 +416,7 @@ class G2BClient:
         except ValueError:
             page_no, rows = 1, 0
         try:
-            body = self._interpret(r, op, p, page_no, rows)
+            body = self._interpret(r, op, p, page_no, rows, self._scrub)
             n = len(self._items(body))
             out.update(status="ok" if n else "nodata", code="00", total=body.get("totalCount"), n=n, body=body)
         except DailyBudgetExceeded as e:
@@ -428,7 +434,9 @@ class G2BClient:
         """오류 문구에서 인증키를 가린다. 연결 오류 메시지에는 요청 URL(serviceKey=… 포함)이 그대로 들어 있어, 화면·로그에 키가 찍히지 않게 한다."""
         s = str(text)
         k = self.cfg.service_key or ""
-        for v in {k, quote(k, safe=""), quote_plus(k)}:
+        forms = {k, quote(k, safe=""), quote_plus(k), k.replace("/", "\\/"), k.replace("+", " "), quote(quote(k, safe=""), safe="")}
+        forms |= {re.sub(r"%[0-9A-F]{2}", lambda m: m.group(0).lower(), v) for v in forms}       # %2B 와 %2b
+        for v in sorted(forms, key=len, reverse=True):
             if v:
                 s = s.replace(v, "***")
         return re.sub(r"(serviceKey=)[^&\s'\")]+", r"\1***", s, flags=re.I)
@@ -534,18 +542,3 @@ class G2BClient:
                 return out
             d += max_days - 1
             out.append((start, f"{ym}{d:02d}0000"))
-
-    def iter_period(self, op: str, start_ym: str, end_ym: str, extra: Optional[Dict[str, Any]] = None,
-                    inqry_div: str = "1") -> Iterator[Dict[str, Any]]:
-        """기간 조회 오퍼레이션을 월 단위(그 안에서 max_window_days 구간)로 분할 호출하여 전체 항목을 순회."""
-        for bgn, end in self.month_ranges(start_ym, end_ym):
-            n = 0
-            for wb, we in self.split_window(bgn, end, self.cfg.max_window_days):
-                params = {"inqryDiv": inqry_div, "inqryBgnDt": wb, "inqryEndDt": we}
-                if extra:
-                    params.update(extra)
-                for it in self.iter_all(op, params):
-                    it["_inqry_month"] = bgn[:6]
-                    n += 1
-                    yield it
-            log.info("%s %s: %d건", op, bgn[:6], n)

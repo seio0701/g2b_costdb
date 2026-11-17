@@ -203,7 +203,8 @@ def scan_cache(cache_db: str, ops, page_size: Optional[int] = None) -> Tuple[Dic
             bgn, end = str(p.get("inqryBgnDt") or ""), str(p.get("inqryEndDt") or "")
             ym = bgn[:6]
             try:
-                page_no, rows = int(p.get("pageNo") or 1), int(p.get("numOfRows") or 0)
+                # numOfRows 가 요청 조건에 없으면 수집기는 설정값(api.num_of_rows)으로 호출한다 → 설정한 쪽 크기의 행으로 본다
+                page_no, rows = int(p.get("pageNo") or 1), int(p.get("numOfRows") or page_size or 0)
             except (TypeError, ValueError):
                 page_no, rows = 1, 0
             kind, total, n = _kind(is_dict, total, n, page_no, rows)
@@ -296,7 +297,7 @@ def analyse(data_dir: str, page_size: int, use_cache: bool, ops: dict, period=No
                 confirmed = empty_ok = False
                 tot, rcv, sav = (_int(rec.get("total")), _int(rec.get("received")), _int(rec.get("saved"))) if rec else (None, None, None)
                 if rec and tot is not None and rcv is not None and sav is not None:
-                    r["server"] = tot
+                    r["server"] = tot - (_int(rec.get("dup")) or 0)          # 화면에는 경계에서 두 번 센 행을 뺀 건수를 보인다(판정은 total·received 그대로)
                     if rcv < tot:
                         f.append("SHORT_VS_TOTAL")
                     if r["lines"] < sav:
@@ -327,7 +328,8 @@ def analyse(data_dir: str, page_size: int, use_cache: bool, ops: dict, period=No
             if len(nb) >= 4:
                 med = statistics.median(nb)
                 r["nb_median"] = med
-                if med > 0 and r["lines"] < low_ratio * med and "EMPTY_DONE" not in r["flags"] and not r["confirmed"]:
+                # 서버 건수와 맞는 달은 적어도 정상으로 본다. 다만 서버가 0건이라고 답한 달은(잘못된 '자료 없음' 응답일 수 있다) 이웃 달에 자료가 있으면 눈으로 확인하게 남긴다
+                if med > 0 and r["lines"] < low_ratio * med and "EMPTY_DONE" not in r["flags"] and (not r["confirmed"] or r["server"] == 0):
                     r["flags"].append("LOW_VS_NEIGHBOURS")
         report[prefix] = {"op": op, "rows": rows, "done": len(done), "files": len(files), "junk": junk, "filtered": filtered}
     if "notices_" in report and "bsis_" in report:                           # 기초금액 ÷ 공고 비율(같은 달): 한쪽만 짧으면 비율이 튄다
@@ -338,7 +340,8 @@ def analyse(data_dir: str, page_size: int, use_cache: bool, ops: dict, period=No
             med = statistics.median(ratios.values())
             for ym, q in ratios.items():
                 if (q < 0.6 * med or q > 1.6 * med) and not (a[ym]["confirmed"] and b[ym]["confirmed"]):
-                    (b[ym] if q < med else a[ym])["flags"].append("RATIO_OUTLIER")
+                    tgt, other = (b[ym], a[ym]) if q < med else (a[ym], b[ym])
+                    (other if tgt["confirmed"] else tgt)["flags"].append("RATIO_OUTLIER")      # 서버 건수와 맞는 쪽에는 붙이지 않는다(어긋난 것은 다른 쪽)
             report["_ratio_median"] = round(med, 3)
     return report, bad_rows, {"have_cache": have_cache, "n_cache": n_cache, "cache_db": cache_db, "raw_dir": raw_dir, "cache_error": cache_error}
 
@@ -406,8 +409,8 @@ def print_report(report, bad_rows, meta, verbose: bool = False) -> int:
     elif not n_done and not [p for p in report if not p.startswith("_")]:
         print("\n[판정] 수집된 원문 파일이 없습니다(data/raw 가 비어 있음) — 점검할 것이 없습니다.")
     elif n_confirmed:
-        print(f"\n[판정] 다시 받아야 할 달이 없습니다 — 완료 표시된 {n_done}개 달·종류 가운데 {n_confirmed}개는 저장된 줄 수가 서버가 알려 준 건수와 맞는 것을 확인했고"
-              + ("," if n_confirmed < n_done else ".") + (f" 나머지 {n_done - n_confirmed}개는 대조할 기록이 없어 줄 수만 살폈습니다." if n_confirmed < n_done else ""))
+        print(f"\n[판정] 다시 받아야 할 달이 없습니다 — 완료 표시된 {n_done}개 달·종류 가운데 {n_confirmed}개는 저장된 줄 수가 서버가 알려 준 건수와 맞는 것을 확인했"
+              + (f"고, 나머지 {n_done - n_confirmed}개는 대조할 기록이 없어 줄 수만 살폈습니다." if n_confirmed < n_done else "습니다."))
     else:
         print("\n[판정] 다시 받아야 할 달이 없습니다 — 다만 서버 건수와 대조할 기록(응답 캐시·수집 기록)이 없어 줄 수·쪽 배수·이웃 달 비교만 했습니다.")
     return hard_total

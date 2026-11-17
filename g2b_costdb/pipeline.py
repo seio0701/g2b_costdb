@@ -3,7 +3,7 @@
 python -m g2b_costdb.pipeline doctor                     # 환경 점검(파이썬·패키지·키 존재 여부·네트워크)
 python -m g2b_costdb.pipeline probe --ym 2026-08          # 필드명 확인 + config.yaml 매핑 대조
 python -m g2b_costdb.pipeline collect                     # S1 전량수집(공고+기초금액)
-python -m g2b_costdb.pipeline check-raw                   # (점검) 받은 원문에 비었거나 짧게 저장된 달이 없는지 — API 호출 없음. --reopen: 그 달만 다시 받게 완료 표시 삭제
+python -m g2b_costdb.pipeline check-raw                   # (점검) 받은 원문에 비었거나 짧게 저장된 달이 없는지 — API 호출 없음. --reopen: 다시 받아야 할 달의 완료 표시 삭제
 python -m g2b_costdb.pipeline discover                    # S2 후보 시설 검수용 Excel 생성
 #  → output/facility_candidates.xlsx 검수(노란 셀) 후
 python -m g2b_costdb.pipeline research                    # S3 시설명 재검색 + 면허제한 조회
@@ -1551,7 +1551,7 @@ def main(argv=None):
     ap.add_argument("--batch", action="store_true", help="extract: Message Batches 로 제출/수거 (50%% 할인, 최대 24시간)")
     ap.add_argument("--export", action="store_true", help="extract: 공고별 작업지시 txt 를 data/llm_in 에 내보내기 (Cowork·사람이 채움)")
     ap.add_argument("--import", dest="import_", action="store_true", help="extract: data/llm_out 의 JSON 을 가져와 반영")
-    ap.add_argument("--reopen", action="store_true", help="check-raw: 다시 받아야 할 달의 완료 표시(done.txt)를 지워 collect 가 그 달만 다시 받게 함(원문 파일은 그대로)")
+    ap.add_argument("--reopen", action="store_true", help="check-raw: 다시 받아야 할 달의 완료 표시(done.txt)를 지운다(원문 파일은 그대로). 다음 collect(용역은 collect --servc)가 완료 표시 없는 달을 모두 받는다")
     ap.add_argument("--verbose", action="store_true", help="check-raw: 문제없는 달도 모두 출력")
     ap.add_argument("--servc", action="store_true", help="probe/collect: 용역 입찰공고(폐기물처리 용역·건설사업관리·설계용역) 시험 호출·수집")
     ap.add_argument("--only", default=None, help="extract-extra: 공종을 한정(쉼표 구분, 예: 전기,건축). 생략하면 대표 공고 전체")
