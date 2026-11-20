@@ -426,9 +426,61 @@ def research_by_facility(std: pd.DataFrame, reviewed: pd.DataFrame, max_hits_war
         n_fac += 1
     df = pd.concat(out, ignore_index=True) if out else pd.DataFrame()
     if not df.empty:
+        matched = set(zip(df["시설ID"].astype(str), df["공고키"].astype(str)))     # 이름으로 찾은 행(아래에서 유지보수로 빠지는 행 포함)
         # 유지보수 성격 공고는 시설 재검색에서도 제외 (신축·증축·리모델링 프로젝트 공사비만)
         df = df[~df["사업유형"].isin(["유지보수"])].copy()
         df = df.drop_duplicates(["시설ID", "공고키"])
+        n_found = len(df)
+        df, n_sib, newer = add_other_orders(df, std, matched)
+        # 보충한 행은 뒤에 붙는다. dedup 이 사업 묶음에는 검색으로 찾은 차수의 공고명을 쓰도록 표시해 둔다(보충은 금액·일정·취소 여부만 바꾼다)
+        df["차수보충"] = [""] * n_found + ["Y"] * (len(df) - n_found)
+        if n_sib:
+            # 건수는 (시설, 공고) 기준이다(한 공고가 세 시설에 걸리면 3건). 목록은 뒤에서 다시 볼 수 없으므로 줄이지 않고 적는다(아주 많을 때만 앞 60건)
+            log.info("같은 공고의 다른 차수 %d건 보충(시설 이름 검색에 잡히지 않은 차수 — 변경공고에서 공고명이 바뀐 경우 등). "
+                     "그중 더 늦은 차수가 있어 최신 차수가 바뀌는 공고 %d건(시설별로 셈)%s",
+                     n_sib, len(newer), (": " + ", ".join(newer[:60]) + (f" … 외 {len(newer) - 60}건" if len(newer) > 60 else "")) if newer else "")
     log.info("시설 재검색: %d개 시설 → %d건 공고 (예비 검색으로 찾은 시설 %d개)",
              reviewed["시설ID"].nunique() if not reviewed.empty else 0, len(df), n_loose)
     return df
+
+
+FACILITY_COLS = ["시설ID", "시설명", "사업유형", "표2_대분류", "표2_중분류", "검색어", "수요기관_대표"]
+_BLANK_NO = {"", "nan", "NaN", "None", "<NA>", "NaT"}
+
+
+def add_other_orders(df: pd.DataFrame, std: pd.DataFrame, matched: Optional[set] = None):
+    """같은 공고번호의 다른 차수 가운데 시설 이름으로 찾지 못한 행을 보충한다. 반환 (df, 보충한 행 수, 최신 차수가 바뀐 공고 설명 목록).
+    변경공고에서 공고명이 바뀌면(오타 수정·사업명 변경) 그 차수만 이름 검색에서 빠진다. 뒤 차수가 빠지면 옛 차수가 최신으로 남아 고치기 전 금액·일정이 실리고,
+    취소공고 차수가 빠지면 취소된 공고가 합산된다. 앞 차수가 빠지면 원 공고문 첨부(변경공고에는 정정 내용만 있는 경우)를 쓰지 못한다.
+    - 보충한 행의 시설 정보와 사업유형은 같은 (시설, 공고번호)에서 이름으로 찾아 **남은**(유지보수로 빠지지 않은) 가장 늦은 차수의 것을 그대로 쓴다 — 어느 시설·사업유형에 넣을지는 바꾸지 않는다.
+      (이름으로 찾은 가장 늦은 차수가 유지보수라 빠졌으면 그보다 앞의 남은 차수를 따른다. 보충 행 자기 공고명이 유지보수 꼴이어도 물려받은 사업유형으로 들어간다.)
+    - matched = 이름으로 찾았던 (시설ID, 공고키). 유지보수라서 뺀 차수를 다시 넣지 않기 위한 것이다."""
+    if df.empty or std.empty or "공고번호" not in std.columns or "공고키" not in std.columns:
+        return df, 0, []
+    text = lambda s: s.astype(str).fillna("")                # 빈 값은 판다스 판에 따라 'nan' 문자열 또는 결측으로 남는다 → 둘 다 빈 것으로
+    nos = set(text(df["공고번호"])) - _BLANK_NO                # 공고번호가 빈 행끼리는 같은 공고가 아니다
+    cand = std[text(std["공고번호"]).isin(nos)]
+    if cand.empty:
+        return df, 0, []
+    order = lambda s: pd.to_numeric(s, errors="coerce").fillna(0)
+    fac_cols = [c for c in FACILITY_COLS if c in df.columns]
+    base = df.assign(_no=text(df["공고번호"]), _base_ord=order(df["공고차수"])).sort_values("_base_ord", kind="stable")
+    base = base[base["_no"].isin(nos)].drop_duplicates(["시설ID", "_no"], keep="last")[["_no", "_base_ord"] + fac_cols]
+    cand = cand.drop(columns=[c for c in fac_cols if c in cand.columns]).drop_duplicates("공고키")
+    add = cand.assign(_no=text(cand["공고번호"])).merge(base, on="_no", how="inner")
+    have = set(zip(df["시설ID"].astype(str), df["공고키"].astype(str))) | set(matched or ())
+    add = add[[(f, k) not in have for f, k in zip(add["시설ID"].astype(str), add["공고키"].astype(str))]]
+    if add.empty:
+        return df, 0, []
+    add = add.assign(_ord=order(add["공고차수"]))
+    top = add[add["_ord"] > add["_base_ord"]].sort_values("_ord").drop_duplicates(["시설ID", "_no"], keep="last")
+    num3 = lambda x: f"{int(x):03d}" if abs(x) != float("inf") else str(x)      # 차수가 'inf' 로 읽히는 값이어도 로그 문구 때문에 멈추지 않게
+    newer = [f"{n}({f}: {num3(a)}→{num3(b)})" for f, n, a, b in zip(top["시설ID"], top["_no"], top["_base_ord"], top["_ord"])]
+    for c in df.columns:                                     # 전량 표에 없는 열(이미 붙어 있는 '차수보충' 등)은 빈 값으로, 열 자료형은 그대로
+        if c not in add.columns:
+            try:
+                add[c] = pd.Series([None] * len(add), index=add.index, dtype=df[c].dtype)
+            except (TypeError, ValueError):
+                add[c] = None
+    out = pd.concat([df, add[list(df.columns)]], ignore_index=True).drop_duplicates(["시설ID", "공고키"])
+    return out, len(out) - len(df), sorted(newer)

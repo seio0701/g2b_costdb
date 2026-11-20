@@ -694,6 +694,117 @@ def extract_with_claude(text: str, api_hint: Dict, cfg_llm: Dict, max_tokens: Op
     return data
 
 
+def _doc_base_in_04(p, b, bd, v=None, vd=None) -> str:
+    """04 시트의 부가세(수식)·금액합계 가운데 '문서' 기초금액을 따르는 부분(build_excel 의 04 수식과 같은 조건·같은 순서). 따르는 것이 없으면 ''.
+    p = 04 추정가격(수식)에 쓰이는 값, b·bd = API·문서 기초금액, v·vd = API·문서 부가세.
+    ① API 기초금액이 없고 문서 기초금액이 추정가격의 100~110.5% → 기초금액 기준 합계 = 문서 기초금액
+    ② 부가세_출처가 '기초금액(문서)-추정가격'(API·문서 부가세를 못 쓰고 API 기초금액이 범위 밖) → 부가세·추정가격 기준 합계 = 문서 기초금액
+    반환: 'both' = ①+② 부가세(수식)와 두 합계 모두 / 'base' = ①만: 기초금액 기준 합계만 / 'vat' = ②만: 부가세(수식)와 추정가격 기준 합계(기초금액 기준 합계는 API 기초금액).
+    추정가격이 API·문서 어디에도 없는 행(합계 = 문서 기초금액)은 다루지 않는다 — 그런 행에는 _gap_hint 가 비고를 쓰지 않는다."""
+    if not p or p <= 0 or bd is None:
+        return ""
+    okd = lambda x: x is not None and 0 <= x - p <= p * 0.105
+    bb = b if b is not None else bd
+    okv = lambda x: x is not None and 0 <= x <= p * 0.105 and not (x < p * 0.099 and bb is not None and abs(bb - p * 1.1) <= p * 0.011)
+    vat_doc = not okv(v) and not okv(vd) and not okd(b) and okd(bd)       # 부가세_출처 = '기초금액(문서)-추정가격'
+    if not (b is not None and b > 0) and okd(bd):
+        return "both" if vat_doc else "base"
+    return "vat" if vat_doc else ""
+
+
+def _ratio_txt(x: float) -> str:
+    """비고에 적는 비율: 1,000 이상은 쉼표, 0.001 미만은 1/n 로 적는다('.3g' 는 1,000 부터 1e+03 처럼 지수 표기가 된다)."""
+    if x >= 999.5:
+        return f"{x:,.0f}"
+    if 0 < x < 0.001:
+        return f"1/{1 / x:,.0f}"
+    return f"{x:.3g}"
+
+
+def _gap_hint(a: float, d: float, vat: float = 0.10, item: str = "", sib: Optional[Dict] = None) -> str:
+    """API값과 문서값이 5% 넘게 다를 때, 비율과 같은 공고의 다른 금액으로 알 수 있는 흔한 원인을 비고에 적는다(판정은 바꾸지 않는다 — 검수자가 볼 순서를 정하는 단서).
+    04 시트의 추정가격·기초금액 칸은 API값을 먼저 쓰므로 문서값이 그 칸을 바꾸지는 않는다. 그래서 API값 쪽이 어긋난 경우(문서값이 같은 공고의 다른 금액과 맞는 경우)는
+    '문서 오독' 으로 적지 않고 04 를 확인하라고 적고, 04 의 부가세·합계가 문서 기초금액을 따르는 경우(_doc_base_in_04)도 그렇게 적는다.
+    item = '추정가격'/'기초금액', sib = 같은 공고의 다른 금액 {api_p, api_b, api_v, doc_p, doc_b, doc_v}(없으면 비율만 본다)."""
+    if not a or not d or a < 0 or d < 0:
+        return ""
+    sib = sib or {}
+    api_p, api_b, api_v, doc_p, doc_b, doc_v = (sib.get(x) for x in ("api_p", "api_b", "api_v", "doc_p", "doc_b", "doc_v"))
+    q, k = d / a, 1 + vat
+    near = lambda x: abs(q - x) <= x * 0.002
+    same = lambda x, y: bool(x) and bool(y) and x > 0 and y > 0 and abs(x / y - 1) <= 0.002
+    use = "04 는 API값 사용"
+    p04 = api_p if (api_p and api_p > 0) else doc_p              # 04 추정가격(수식): API값(0 보다 클 때) → 문서값
+    how = _doc_base_in_04(*((a, api_b, doc_b) if item == "추정가격" else (p04, a, d) if item == "기초금액" else (None, None, None)), api_v, doc_v)
+    if how:                                                      # 무엇이 문서 기초금액을 따르는지 그대로 적는다(없는 API 기초금액을 'API값' 이라 적지 않는다)
+        use = {"both": "API 기초금액이 없어 04 부가세(수식)·금액합계(두 기준 모두)가 문서 기초금액을 따름 → 04 합계 확인",
+               "base": "API 기초금액이 없어 04 금액합계_기초금액기준이 문서 기초금액을 따름 → 04 합계 확인",
+               "vat": "04 금액합계_기초금액기준은 API값이지만 부가세(수식)·금액합계_추정가격기준은 문서 기초금액을 따름 → 04 합계 확인"}[how]
+    tail = f" ({use})" if how else ""                            # '04 는 API값 사용' 을 적지 않는 문구에도, 문서 기초금액을 따르는 것이 있으면 그것은 적는다
+    more = lambda x: f"{use}, {x}" if how else f"{use} → {x}"    # use 가 이미 '→ 04 합계 확인' 으로 끝나면 화살표를 겹쳐 쓰지 않는다
+    # API 추정가격이 같은 공고의 기초금액과 맞는가 — '기초금액≈추정가격×1.1' 행과 같은 값을 본다(기초금액: API → 문서, 부가세: API → 문서).
+    # 맞으면 'API 추정가격이 어긋남' 이라고 적지 않는다(그 행이 정상·'공고에 적힌 부가세와 일치' 인데 추정가격 행이 API 를 의심하면 서로 엇갈린다)
+    v_any = api_v if api_v is not None else doc_v
+    has_api_b = bool(api_b) and api_b > 0
+    b_any, bsrc = (api_b, "API") if has_api_b else (doc_b, "문서")
+    api_fit = ""
+    if item == "추정가격" and same(b_any, a * k):
+        api_fit = f"API 추정가격×{k:g} = {bsrc} 기초금액" + ("(API 쪽은 서로 맞음)" if has_api_b else "(API 추정가격이 기초금액과 맞음)")
+    exempt = item == "추정가격" and not api_fit and v_any is not None and v_any >= 0 and same(b_any, a + v_any)
+    if exempt and same(b_any, d * k):
+        # 같은 기초금액이 API 추정가격+부가세(면세·부분면세)로도, 문서 추정가격×1.1(과세)로도 나온다(실자료 20230734989) → 어느 쪽도 '다른 금액' 이 아니다
+        return (f"문서값×{k:g} = {bsrc} 기초금액이고 API 추정가격 + 부가세 = {bsrc} 기초금액 — 두 쪽 모두 같은 기초금액과 맞음(면세·부분면세면 API 추정가격이, 과세면 문서 추정가격이 맞는 금액): "
+                f"과세 여부를 공고문에서 확인({use})")
+    if item == "추정가격" and same(api_b, d * k) and not api_fit and not exempt:
+        # 문서 추정가격×1.1 = API 기초금액인데 API 추정가격은 그렇지 않다 → 어긋난 쪽은 API(부가세액·부가세 포함 금액을 추정가격 칸에 넣은 공고).
+        # API 추정가격+부가세 = API 기초금액이면(면세·부분면세로 API 쪽이 서로 맞음) 여기에 넣지 않는다(위)
+        return (f"문서값×{k:g} = API 기초금액 — 문서 추정가격은 기초금액과 맞고 API 추정가격은 맞지 않음(API 쪽이 부가세액·부가세 포함 금액 등 다른 값일 수 있음). "
+                f"04 추정가격(수식)은 API값을 쓰므로 04 의 추정가격·부가세·과세구분과 추정가격 기준 합계 확인{tail}")
+    if item == "추정가격" and not has_api_b and same(a, doc_v) and same(doc_v, d * vat) and same(doc_b, d * k):
+        # API 기초금액이 없어 위 규칙을 쓸 수 없지만, 문서는 추정가격×1.1 = 기초금액으로 서로 맞고 API 추정가격이 문서 부가세(= 문서 추정가격의 10%)와 같다 → 어긋난 쪽은 API
+        return (f"API 추정가격 = 문서 부가세 — 문서는 추정가격×{k:g} = 기초금액으로 서로 맞음: API 추정가격 칸에 부가세액이 들어간 것으로 보임. "
+                f"04 추정가격(수식)은 API값을 쓰므로 04 합계 확인{tail}")
+    if item == "기초금액" and same(d, (api_p or 0) * k):
+        if same(a, api_p):               # API 기초금액 = API 추정가격 → 04 는 부가세 0(면세)으로 계산한다
+            return f"문서값 = 추정가격×{k:g}, API 기초금액 = API 추정가격 — 면세 공사이거나 API 기초금액에 부가세가 빠진 것으로 보임({more('04 과세구분이 맞는지 확인')})"
+        if not 0.75 <= a / d <= 1.35:    # 조사금액·관급 차이로 볼 수 없는 크기(실자료 34행은 0.83~1.19) → API 기초금액 쪽을 확인하게 한다
+            return (f"문서값 = 추정가격×{k:g}(추정가격+부가세) — API 기초금액이 이와 크게 다름(API값÷문서값 = {_ratio_txt(a / d)}): API 기초금액 쪽이 다른 값일 수 있음. "
+                    f"04 기초금액 기준 합계는 API값을 쓰므로 기초금액 기준 합계 확인{tail}")
+        if v_any is not None and v_any >= 0 and same(a, api_p + v_any):     # API 추정가격 + 부가세 = API 기초금액 → 조사금액·관급 차이가 아니라 면세·부분면세('×1.1' 행의 참고와 같은 판단)
+            return (f"문서값 = 추정가격×{k:g}, API 기초금액 = API 추정가격 + 부가세(부가세율 {v_any / api_p:.1%}) — API 쪽은 면세·부분면세로 서로 맞음: "
+                    f"문서 기초금액이 부가세 {vat:.0%} 를 더한 금액으로 보임({more('04 과세구분이 맞는지 확인')})")
+        return f"문서값 = 추정가격×{k:g}(추정가격+부가세) — API 기초금액이 이와 다름: 조달청 조사금액 기준이거나 관급 포함 여부 차이로 보임({use})"
+    if item == "기초금액" and api_p and api_p > 0 and doc_v is not None and doc_v > 0 and same(d, api_p + doc_v):
+        # 문서 기초금액 = 추정가격 + 문서 부가세(10% 가 아닌 부가세 — 10% 면 위 규칙) → 문서는 면세·부분면세로 서로 맞는다(실자료 20190301453·20190301633·20190819618)
+        return (f"문서값 = 추정가격 + 문서 부가세(부가세율 {doc_v / api_p:.1%}) — 문서 쪽은 면세·부분면세로 서로 맞음: API 기초금액이 이와 다름"
+                f"(부가세 {vat:.0%} 를 더한 금액이거나 조달청 조사금액 기준일 수 있음. {use}, 과세 여부를 공고문에서 확인)")
+    if near(k):
+        if item == "기초금액" and same(a, (api_p or 0) * k):      # API 기초금액 = API 추정가격×1.1 → API 기초금액은 부가세 포함 금액이 맞다
+            return f"문서값 = API값×{k:g} — API 기초금액 = API 추정가격×{k:g}(API 쪽은 서로 맞음): 문서에서 부가세를 한 번 더 더한 금액을 읽은 것으로 보임({use}, 공고문 확인)"
+        if item == "기초금액":           # 기초금액은 원래 부가세 포함 금액이다 → '부가세 포함 금액을 읽음' 은 설명이 되지 않는다
+            return f"문서값 = API값×{k:g} — API 기초금액이 부가세를 뺀 금액이거나 문서에서 부가세를 한 번 더 더한 금액을 읽은 것으로 보임({use}, 공고문 확인)"
+        return f"문서값 = API값×{k:g} — 문서에서 부가세 포함 금액을 읽은 것으로 보임({use})"
+    if near(1 / k):
+        if item == "추정가격" and (api_fit or exempt):    # API 추정가격이 기초금액과 맞는다(×1.1, 또는 추정가격+부가세) → API 추정가격은 부가세를 뺀 금액이 맞다
+            why = api_fit or f"API 추정가격 + 부가세 = {bsrc} 기초금액" + ("(API 쪽은 면세·부분면세로 서로 맞음)" if has_api_b else "(면세·부분면세로 서로 맞음)")
+            return f"문서값 = API값÷{k:g} — {why}: 문서에서 부가세를 한 번 더 뺀 금액을 읽은 것으로 보임({use})"
+        if item == "추정가격":           # 추정가격은 원래 부가세를 뺀 금액이다 → 어긋난 쪽은 API
+            return f"문서값 = API값÷{k:g} — API 추정가격이 부가세 포함 금액으로 보임({more('추정가격 기준 합계 확인')})"
+        if item == "기초금액":           # 같은 공고의 추정가격을 알고 그것이 문서값과 다르면 '(추정가격)' 이라고 적지 않는다
+            known = [x for x in (api_p, doc_p) if x and x > 0]
+            what = "" if known and not any(same(d, x) for x in known) else "(추정가격)"
+            return f"문서값 = API값÷{k:g} — 문서에서 부가세를 뺀 금액{what}을 기초금액으로 읽은 것으로 보임({use})"
+        return f"문서값 = API값÷{k:g} — 문서에서 부가세를 뺀 금액을 읽었거나 API값이 부가세 포함 금액({use})"
+    for m, txt, why in ((10, "10배", "자릿수"), (100, "100배", "자릿수"), (1000, "1,000배", "단위(원/천원)"),
+                        (0.1, "1/10", "자릿수"), (0.01, "1/100", "자릿수"), (0.001, "1/1,000", "단위(원/천원)")):
+        if near(m):
+            return f"문서값이 API값의 {txt} — {why} 오독 의심({use})"
+    if same(doc_p, (api_p or 0) * q) and same(doc_b, (api_b or 0) * q):
+        return (f"API값과 문서값이 5% 넘게 다름 — 추정가격·기초금액이 같은 비율(×{_ratio_txt(q)})로 다름: 문서가 이 공고와 다른 금액(일부 공구·차수분·변경 전후 금액)을 "
+                f"적고 있을 수 있음({use}, 공고문 확인)")
+    return f"API값과 문서값이 5% 넘게 다름 — 변경공고로 금액이 바뀌었거나 문서에서 다른 금액을 읽었을 수 있음({use}, 공고문 확인)"
+
+
 def cross_verify(bid_no: str, api_row: Dict, doc: Dict, warn_ratio: float = 0.005, vat: float = 0.10) -> List[Dict]:
     """API 값과 문서 추출값 비교 → 검증로그 rows. 숫자가 문자열/NaN 이어도 안전."""
     logs: List[Dict] = []
@@ -709,6 +820,9 @@ def cross_verify(bid_no: str, api_row: Dict, doc: Dict, warn_ratio: float = 0.00
         diff = d - a
         r = diff / a if a else (0.0 if diff == 0 else 1.0)
         verdict = "정상" if abs(r) <= ratio_warn else ("경고" if abs(r) <= 0.05 else "오류")
+        if verdict == "오류" and not note:
+            note = _gap_hint(a, d, vat, item, {"api_p": api_p, "api_b": api_b, "api_v": _num(api_row.get("부가세_API")),
+                                               "doc_p": doc_p, "doc_b": doc_b, "doc_v": _num(doc.get("부가가치세_원"))})
         logs.append({"공고번호": bid_no, "항목": item, "API값": a, "문서값": d, "차이": diff,
                      "차이율": round(r, 5), "판정": verdict, "비고": note})
 
@@ -732,6 +846,8 @@ def cross_verify(bid_no: str, api_row: Dict, doc: Dict, warn_ratio: float = 0.00
                 verdict, note = "참고", f"부가세율 {max(rate, 0):.1%} — 공고에 적힌 부가세와 일치(면세·부분면세 공사, 조세특례제한법 제106조 등)"
             elif "조달청" in str(api_row.get("공고기관") or "") and 0.9 <= b / exp < 1.0:
                 verdict, note = "참고", "조달청 공고: 기초금액이 조사금액 기준이라 추정가격×1.1 보다 낮음(면세 아님일 수 있음) → 04 의 추정가격 기준 합계 참조"
+                if any(l["항목"] == "추정가격" and "추정가격 기준 합계 확인" in str(l.get("비고")) for l in logs):
+                    note += " (단, 추정가격 행 비고대로 API 추정가격이 어긋난 것이면 04 의 추정가격·부가세나 추정가격 기준 합계가 틀린 쪽 — 공고문 확인)"
             elif low and str(api_row.get("표2_대분류") or "") == "공동주택":
                 verdict, note = "참고", f"부가세율 {max(rate, 0):.1%} — 공동주택: 국민주택규모 이하 면세·부분면세(조세특례제한법 제106조) 가능"
         logs.append({"공고번호": bid_no, "항목": "기초금액≈추정가격×1.1", "API값": round(exp), "문서값": b, "차이": round(b - exp),

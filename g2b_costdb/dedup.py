@@ -78,8 +78,10 @@ def inherit_work_type(d: pd.DataFrame, max_days: int = 730) -> pd.Series:
     """'미분류' 공고에 같은 시설의 가장 가까운(±max_days) 건축 공고 사업유형을 상속. 없으면 시설 내 최빈 유형, 그것도 없으면 '신축'."""
     out = d["사업유형"].copy()
     dt = _parse_dt(d["공고일시"])
+    # research 가 공고번호로 보충한 차수(차수보충 = Y)는 기준에서 뺀다 — 차수가 늘었다고 다른 공고가 물려받는 유형(가까운 건축 공고·최빈 유형)이 달라지지 않게
+    extra = (d["차수보충"].astype(str) == "Y") if "차수보충" in d.columns else pd.Series(False, index=d.index)
     for fid, g in d.groupby("시설ID"):
-        typed = g[~g["사업유형"].isin(["미분류"])]
+        typed = g[~g["사업유형"].isin(["미분류"]) & ~extra.loc[g.index]]
         anchors = typed[typed["공종"] == "건축"] if (typed["공종"] == "건축").any() else typed
         for i in g.index[g["사업유형"] == "미분류"]:
             if anchors.empty:
@@ -102,15 +104,36 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
         return df, df, []
     d = df.copy().reset_index(drop=True)              # 아래에서 행 라벨로 값을 쓰므로 라벨이 겹치지 않게
     d["공종"] = [t if (t is not None and str(t).strip() not in ("", "nan", "None")) else "기타" for t in d["공종"]]   # 공종이 빈 공고가 집계에서 빠지지 않게
-    d["단계토큰"] = d["공고명"].map(_phase_token)
-    d["사업유형_원분류"] = d["사업유형"]
-    d["사업유형"] = inherit_work_type(d)
     d["_ord"] = pd.to_numeric(d["공고차수"], errors="coerce").fillna(0)
     d["_dt"] = _parse_dt(d["공고일시"])
     if d["_dt"].isna().any():
         n_bad = int(d["_dt"].isna().sum())
         log.warning("공고일시를 해석할 수 없는 공고 %d건 — 가장 오래된 것으로 취급", n_bad)
     d["_dt"] = d["_dt"].fillna(pd.Timestamp("1900-01-01"))
+    # research 가 공고번호로 보충한 차수(차수보충 = Y: 시설 이름 검색에 잡히지 않은 차수 — 변경공고에서 공고명이 바뀐 경우)의 공고명은 시설 이름과 맞지 않는다.
+    # 그 공고명으로 사업을 묶으면 같은 시설의 다른 공고와 갈리므로, 이 함수 안의 모든 판정(단계·세부사업·재공고·취소공고 배치)에는 같은 공고에서 검색으로 찾은
+    # 가장 늦은 차수의 공고명을 쓴다 → 보충은 금액·일정·취소 여부만 바꾸고 사업 묶음은 보충 전과 같다. 표시 공고명은 끝에서 되돌린다.
+    # (검색으로 찾은 행의 공고명은 건드리지 않는다 — 별칭으로 잡힌 새 이름의 공고는 그 이름으로 묶여야 한다)
+    d["_shown"] = d["공고명"]
+    sup = (d["차수보충"].astype(str) == "Y") if "차수보충" in d.columns else pd.Series(False, index=d.index)
+    sup_base: dict = {}
+    if sup.any():
+        m = d[~sup].sort_values(["_ord", "_dt"], kind="stable").drop_duplicates(["시설ID", "공고번호"], keep="last")
+        found = {(str(f), str(n)): j for f, n, j in zip(m["시설ID"], m["공고번호"], m.index)}
+        sup_base = {i: found[(str(f), str(n))] for i, f, n in zip(d.index[sup], d.loc[sup, "시설ID"], d.loc[sup, "공고번호"]) if (str(f), str(n)) in found}
+        d["공고명"] = [d.at[sup_base[i], "_shown"] if i in sup_base else t for i, t in zip(d.index, d["_shown"])]
+        # 보충 행의 공종이 자기 공고명에서 나온 것이면(주공종명·면허제한 근거가 아님) 검색으로 찾은 차수의 공종을 따른다 —
+        # 바뀐 공고명에서 '(전기)' 꼬리표가 빠졌다고 그 공고의 공종이 달라져 재공고 판정·같은 공종 합산이 달라지지 않게
+        if "공종근거" in d.columns:
+            for i, j in sup_base.items():
+                if str(d.at[i, "공종근거"]) not in ("주공종명", "면허제한"):
+                    d.at[i, "공종"], d.at[i, "공종근거"] = d.at[j, "공종"], d.at[j, "공종근거"]
+    d["단계토큰"] = d["공고명"].map(_phase_token)
+    d["사업유형_원분류"] = d["사업유형"]
+    d["사업유형"] = inherit_work_type(d)
+    for i, j in sup_base.items():                     # 보충 행의 사업유형은 검색으로 찾은 차수가 물려받은 것 그대로(보충 차수의 공고일시로 다시 고르지 않는다)
+        if d.at[i, "사업유형_원분류"] == "미분류" and d.at[j, "사업유형_원분류"] == "미분류":
+            d.at[i, "사업유형"] = d.at[j, "사업유형"]
     d["_price"] = pd.to_numeric(d["추정가격"], errors="coerce")
     if "이전공고번호" not in d.columns:
         d["이전공고번호"] = ""
@@ -138,6 +161,14 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
     logs: List[dict] = []
     d["_prop"] = d["공고명"].map(works.is_proposal)     # 공법·자재 선정용 제안서 제출 안내 공고: 공사 발주가 아니므로 합산하지 않는다
     valid = d["최신차수여부"] & (d["공고종류"] != "취소") & ~d["_prop"]
+    for i in d.index[d["최신차수여부"] & sup.reindex(d.index)]:      # 어느 공고의 최신 차수가 보충으로 바뀌었는지 06 에 남긴다(금액·일정이 바뀌었는지 볼 단서)
+        j = sup_base.get(i)
+        base_txt = f"검색으로 찾은 가장 늦은 차수는 {d.at[j, '공고차수']} '{str(d.at[j, '_shown'])[:60]}'" if j is not None else "검색으로 찾은 차수 없음"
+        tail = " 이 차수가 취소공고라 이 공고는 합산하지 않음" if d.at[i, "공고종류"] == "취소" else \
+            (" 검색으로 찾은 차수의 공고명이 제안 안내 공고라 합산하지 않음" if d.at[i, "_prop"] else " 변경공고에서 금액이 바뀌었는지 확인")
+        logs.append({"공고번호": str(d.at[i, "공고번호"]), "항목": "최신 차수 보충", "판정": "참고",
+                     "비고": f"{d.at[i, '시설ID']}: 최신 차수 {d.at[i, '공고차수']} '{str(d.at[i, '_shown'])[:60]}' 은 시설 이름 검색에 잡히지 않아 공고번호로 보충한 차수({base_txt}). "
+                             f"사업 묶음은 보충 전과 같게 두고 금액·일정·표시 공고명만 최신 차수 것을 씀 —{tail}"})
     # 이전공고번호가 유효하지 않은 공고(취소된 재공고 등)를 가리키면 그 공고의 이전공고번호를 따라 올라간다: A ← B(취소) ← C 이면 C 가 대체하는 공고는 A
     d["_no"] = d["공고번호"].map(_no)
     valid_nos = set(zip(d.loc[valid, "시설ID"].astype(str), d.loc[valid, "_no"]))
@@ -230,7 +261,7 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
             reason = "단독 공고" if len(cnt) == 1 else f"합산(같은 공종 {len(cnt)}건)"
             d.at[i, "대표선정사유"] = reason + (f", 재공고로 {n_rep}건 대체" if n_rep else "") + (f", 취소 {n_cancel}건 제외" if n_cancel else "")
         if len(cnt) > 1:
-            parts = "; ".join(f"{d.at[i, '공고번호']} '{str(d.at[i, '공고명'])[:40]}' {(_num(d.at[i, '추정가격']) or 0) / 1e8:,.1f}억" for i in cnt)
+            parts = "; ".join(f"{d.at[i, '공고번호']} '{str(d.at[i, '_shown'])[:40]}' {(_num(d.at[i, '추정가격']) or 0) / 1e8:,.1f}억" for i in cnt)
             logs.append({"공고번호": str(d.at[cnt[-1], "공고번호"]), "항목": "같은 공종 합산", "판정": "참고",
                          "비고": f"{pid}|{trade}: 같은 세부사업·같은 공종의 공고 {len(cnt)}건을 모두 합산(분야별·차수별 발주, 부대공사로 봄) — {parts}"[:700]
                                  + " → 재공고가 섞여 이중계산이면 검수에서 확인"})
@@ -307,14 +338,15 @@ def dedup_latest(df: pd.DataFrame, price_change_warn_ratio: float = 0.30,
         if k is not None:
             if len(left) > 1:
                 keep = sorted(left, key=lambda j: (d.at[j, "_dt"], d.at[j, "_no"]))
-                parts = "; ".join(f"{d.at[j, '공고번호']} '{str(d.at[j, '공고명'])[:40]}' {(_num(d.at[j, '추정가격']) or 0) / 1e8:,.1f}억" for j in keep)
+                parts = "; ".join(f"{d.at[j, '공고번호']} '{str(d.at[j, '_shown'])[:40]}' {(_num(d.at[j, '추정가격']) or 0) / 1e8:,.1f}억" for j in keep)
                 logs[k] = {"공고번호": str(d.at[keep[-1], "공고번호"]), "항목": "같은 공종 합산", "판정": "참고",
                            "비고": f"{pid}|{trade}: 같은 세부사업·같은 공종의 공고 {len(keep)}건을 모두 합산(분야별·차수별 발주, 부대공사로 봄) — {parts}"[:700]
                                    + " → 재공고가 섞여 이중계산이면 검수에서 확인"}
             else:
                 del logs[k]
+    d["공고명"] = d["_shown"]                          # 묶음에 쓴 공고명 → 그 차수의 공고명으로 되돌린다
     latest = d[d["최신여부"]].copy()
-    tmp_cols = ["_ord", "_dt", "_price", "_base", "_prop", "_no", "_prev", "_pv_eff"]
+    tmp_cols = ["_ord", "_dt", "_price", "_base", "_prop", "_no", "_prev", "_pv_eff", "_shown"]
     d = d.drop(columns=tmp_cols)
     latest = latest.drop(columns=tmp_cols)
     return d, latest, logs
@@ -342,7 +374,8 @@ def facility_summary(latest: pd.DataFrame, all_hist: pd.DataFrame) -> pd.DataFra
             "공사현장지역": _mode(g["공사현장지역"]) if "공사현장지역" in g.columns else "",
             "공고건수_전체": h["공고번호"].nunique(), "공고건수_최신": len(g),
             # 최종공고일(05 '공고연도'의 근거)은 합산 대상 공고 기준 — 유효 차수가 없는 취소공고가 다른 해에 붙어 있어도 연도가 밀리지 않게
-            "최초공고일": h["공고일시"].min(), "최종공고일": g["공고일시"].max() if g["공고일시"].notna().any() else h["공고일시"].max(),
+            # 빈 값(None)은 빼고 견준다 — 문자열과 결측이 섞인 열의 min/max 는 판다스 2.x 에서 TypeError 가 난다
+            "최초공고일": h["공고일시"].dropna().min(), "최종공고일": g["공고일시"].dropna().max() if g["공고일시"].notna().any() else h["공고일시"].dropna().max(),
         }
         for t in trades:
             row[f"공종_{t}"] = "O" if (g["공종"] == t).any() else "X"

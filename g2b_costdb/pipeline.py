@@ -286,7 +286,7 @@ def stage_dedup(cfg):
         g = latest.groupby(nos)["시설ID"].agg(lambda x: sorted(set(map(str, x))))
         for key, ids in g[g.map(len) > 1].items():
             r = latest[nos == key].iloc[0]
-            multi.append({"공고번호": str(r["공고번호"]), "프로젝트키": "/".join(ids), "항목": "복수 시설 배정",
+            multi.append({"공고번호": str(r["공고번호"]), "프로젝트키": "/".join(ids), "항목": "복수 시설 배정", "판정": "참고",
                           "비고": f"'{r['공고명']}' 이 시설 {len(ids)}개({', '.join(ids)})의 대표 공고 — 05 시트에 시설마다 집계됨. 한 시설만 남기려면 검수에서 다른 시설을 제외"})
     dup = dedup.cross_facility_duplicates(latest)
     n_drop = int((dup["중복_제외권장"] == "Y").sum()) if len(dup) else 0
