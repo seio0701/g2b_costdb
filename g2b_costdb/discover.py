@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import difflib
 import logging
 import os
 import re
@@ -27,6 +28,8 @@ HEADER_FILL = PatternFill("solid", fgColor="DDEBF7")
 FONT = Font(name="Arial", size=10)
 BOLD = Font(name="Arial", size=10, bold=True)
 REVIEW_COLS = ["검수_포함여부", "검수_시설명", "검수_별칭(;구분)", "검수_수요기관", "검수_메모"]
+STATUS_COL = "갱신_표시"            # discover 를 다시 돌렸을 때 이전 검수 파일과 달라진 점(신규·확인·후보 이름 바뀜·이번 후보에 없음). 검수 칸이 아니다
+PREV_MARK = "지난번: "               # 이전 실행 때 붙은 표시가 아직 확인되지 않은 것으로 보여 그대로 넘긴 것
 _EMPTY_STRS = {"", "nan", "none", "null", "nat", "<na>"}
 
 
@@ -185,9 +188,12 @@ def _facility_work_type(s: pd.Series) -> str:
     return _mode(s, "미분류")
 
 
-def discover_candidates(std: pd.DataFrame, previous_review: Optional[pd.DataFrame] = None, ids_only: bool = False) -> pd.DataFrame:
+def discover_candidates(std: pd.DataFrame, previous_review: Optional[pd.DataFrame] = None, ids_only: bool = False,
+                        recalc: bool = False) -> pd.DataFrame:
     """공고명에 표2 검색어가 포함된 공고 → 시설명 후보 + 분류 (검수용).
-    previous_review: 이전 facility_candidates.xlsx 내용(있으면 시설ID·검수 컬럼을 (시설키, 수요기관) 기준으로 이어받음).
+    previous_review: 이전 facility_candidates.xlsx 내용. 있으면 기본은 **검수 유지**(_keep_review) — 이전 행의 시설ID·검수 칸을 그대로 두고
+    새 시설만 더하며, 달라진 점은 `갱신_표시` 열에 적는다(검수를 마친 뒤 공고가 늘어 다시 돌릴 때).
+    recalc: 손대지 않은 검수 칸은 새 규칙의 기본값으로 다시 계산(`discover --recalc` — 검수를 시작하기 전 규칙이 바뀌었을 때).
     ids_only: 시설ID만 이어받고 검수 컬럼은 모두 새 기본값으로(`discover --fresh`)."""
     kw = load_keywords()
     rows = []
@@ -224,9 +230,41 @@ def discover_candidates(std: pd.DataFrame, previous_review: Optional[pd.DataFram
     agg["검수_별칭(;구분)"] = ""
     agg["검수_수요기관"] = agg["수요기관"]
     agg["검수_메모"] = ""
-    agg = _carry_over_review(agg, previous_review, ids_only=ids_only)
-    cols = ["시설ID"] + [c for c in agg.columns if c != "시설ID"]
+    own_cols = list(agg.columns)
+    usable = previous_review is not None and not previous_review.empty and {"시설키", "시설ID"} <= set(previous_review.columns)
+    if ids_only or recalc or not usable:      # 시설키·시설ID 열이 없는 파일은 맞출 기준이 없다 → 새로 만든다(pipeline 은 그 전에 review_file_problem 으로 멈춘다)
+        if review_file_problem(previous_review):
+            log.warning("이전 검수 파일의 %s → 시설ID·검수 내용을 이어받지 못합니다", review_file_problem(previous_review))
+        agg = _carry_over_review(agg, previous_review, ids_only=ids_only)
+        agg[STATUS_COL] = ""
+    else:
+        agg = _keep_review(agg, previous_review)
+    head = [c for c in own_cols if c not in ["시설ID", STATUS_COL] + REVIEW_COLS]
+    extra = [c for c in agg.columns if c not in own_cols + ["시설ID", STATUS_COL]]          # 검수자가 더한 열은 노란 칸 뒤(원래 있던 자리)에
+    cols = ["시설ID"] + head + [STATUS_COL] + REVIEW_COLS + extra
     return agg[cols].reset_index(drop=True)
+
+
+def review_file_problem(prev: Optional[pd.DataFrame]) -> str:
+    """이전 검수 파일을 이어받을 수 없는 까닭(이전 파일이 없거나 이어받을 수 있으면 '').
+    첫 줄(머리글)에서 맞추는 기준(시설ID·시설키·수요기관)이나 검수 열을 찾지 못하면 그 내용을 이어받을 수 없다 — 열을 지웠거나 이름을 고쳤을 때,
+    첫 줄 위에 줄을 넣었을 때, 정렬하다 머리글 줄이 자료 사이로 들어갔을 때. 같은 이름의 열이 둘이면(열을 복사) 어느 쪽이 검수 값인지 알 수 없다.
+    검수자가 더한 열은 이름이 있어야 옮길 수 있으므로, 이름 없는 열에 글이 있을 때도 알린다(말없이 빼지 않는다).
+    그대로 다시 만들면 검수 칸이 기본값으로 돌아가므로 부르는 쪽(pipeline.stage_discover)이 덮어쓰기 전에 멈춘다."""
+    if prev is None or prev.empty:
+        return ""
+    names = [str(c) for c in prev.columns]
+    miss = [c for c in ["시설ID", "시설키", "수요기관"] + REVIEW_COLS if c not in names]
+    dup = sorted({c for c in names if c != "None" and names.count(c) > 1})
+    why = []
+    if miss:
+        why.append("첫 줄(머리글)에 " + ", ".join(f"'{c}'" for c in miss) + " 열이 없습니다")
+    if dup:
+        why.append("첫 줄(머리글)에 " + ", ".join(f"'{c}'" for c in dup) + " 열이 두 번 있습니다")
+    orphan = sum(1 for k, c in enumerate(names) if c == "None" for v in prev.iloc[:, k] if not _blank(v))
+    if orphan and not miss:                          # 이름 없는 열은 새 파일로 옮길 수 없다(머리글 줄 자체가 밀린 경우는 위에서 이미 알렸다)
+        why.append(f"첫 줄(머리글)에 이름이 없는 열에 글이 {orphan}칸 있습니다(그 열의 첫 줄에 이름을 적어 주세요. 이름이 있어야 새 파일로 옮겨집니다)")
+    return " / ".join(why)
 
 
 def default_include(work_type: str) -> str:
@@ -250,6 +288,26 @@ def _user_edited(prev_row, col: str) -> bool:
     if col == "검수_수요기관" and not _blank(prev_row.get("수요기관")):
         return v != str(prev_row.get("수요기관")).strip()
     return True          # 별칭·메모(기본값 공란)와, 비교 기준 컬럼이 없는 옛 형식 파일
+
+
+def _pending_notes(old_flag: str, untouched: bool, include_now: str) -> List[str]:
+    """이전 파일의 갱신_표시 가운데 **아직 확인하지 않았을 수 있는** 표시만 PREV_MARK 를 붙여 돌려준다(discover 를 한 번 더 돌려도 볼 행이 사라지지 않게).
+    · '신규…'(+ '비슷한 기존 시설'·'이름이 같은 기존 시설' 단서): 검수 칸이 기본값 그대로일 때만(하나라도 고쳤으면 본 것이다)
+    · '확인: …(지금 'X' 그대로 둠)': 검수_포함여부가 아직 그 X 일 때만
+    · '후보 이름 바뀜'·'시설키 바뀜'·'이번 후보에 없음': 결정할 것이 없거나 매번 새로 붙으므로 넘기지 않는다"""
+    parts = [x.strip() for x in str(old_flag or "").split(" / ") if x.strip()]
+    parts = [x[len(PREV_MARK):] if x.startswith(PREV_MARK) else x for x in parts]
+    was_new = any(x.startswith("신규") for x in parts)
+    out = []
+    for x in parts:
+        if x.startswith("신규") or (x.startswith(("비슷한 기존 시설", "이름이 같은 기존 시설")) and was_new):
+            if untouched:
+                out.append(PREV_MARK + x)
+        elif x.startswith("확인:"):
+            m = re.search(r"\(지금 '(.*?)' 그대로 둠\)", x)
+            if m and (m.group(1) if m.group(1) != "빈칸" else "") == include_now:
+                out.append(PREV_MARK + x)
+    return out
 
 
 def _carry_over_review(agg: pd.DataFrame, prev: Optional[pd.DataFrame], ids_only: bool = False) -> pd.DataFrame:
@@ -284,6 +342,172 @@ def _carry_over_review(agg: pd.DataFrame, prev: Optional[pd.DataFrame], ids_only
     return agg
 
 
+def _keep_review(agg: pd.DataFrame, prev: pd.DataFrame) -> pd.DataFrame:
+    """검수를 마친 파일을 지키는 이어받기(discover 의 기본 동작). 이전 파일에 있던 행은
+      · 시설ID 와 검수 칸(REVIEW_COLS)을 **적혀 있던 그대로** 둔다(기본값과 같아 보여도 다시 계산하지 않는다 — 검수자가 확인하고 둔 값일 수 있다. 빈칸도 빈칸 그대로)
+      · 이번 후보에 없어도 지우지 않고 끝에 그대로 남긴다(재검색은 이 파일의 '포함' 행을 읽으므로, 지우면 그 시설이 말없이 DB 에서 빠진다)
+      · 규칙이 바뀌어 시설키가 달라졌으면 이전 행의 공고명_예시로 지금의 시설키를 다시 내어 맞춘다(같은 시설이 새 번호의 새 행으로 한 번 더 생기지 않게)
+    새 시설에는 이어지는 번호와 기본값을 준다. 달라진 점은 STATUS_COL 에 적는다: '신규' / '확인: …'(사업유형이 달라져 기본값이 지금 값과 다름) /
+    '후보 이름 바뀜: …' / '이번 후보에 없음'. 나머지 열(공고건수·사업유형·예시 등)은 새로 계산한 값이다.
+    맞추는 순서: ① (표2 분류, 검색어, 시설키, 수요기관) ② (시설키, 수요기관) ③ 공고명_예시로 다시 낸 시설키 — 이전 행 하나는 새 행 하나에만 쓴다.
+    그래도 남은 새 행 가운데 (시설키, 수요기관)이 같은 이전 행이 있는 것은 그 시설의 다른 검색어 행이므로 시설ID·검수 값을 그 행과 같게 둔다
+    (기본값 '포함' 이 붙어, 검수자가 제외한 시설이 다시 들어가지 않게)."""
+    agg = agg.copy().reset_index(drop=True)
+    agg["시설ID"] = ""
+    agg[STATUS_COL] = ""
+    txt = lambda v: "" if _blank(v) else str(v).strip()
+    p = prev.copy().reset_index(drop=True)
+    have = [c for c in REVIEW_COLS if c in p.columns]                 # 이전 파일에 없는 검수 열(옛 형식)은 새 기본값을 쓴다
+    for c in ("시설ID", "시설키", "수요기관", "표2_대분류", "표2_중분류", "검색어", "시설명_후보", "사업유형", "공고명_예시"):
+        if c not in p.columns:
+            p[c] = None
+    p_org = list(_s(p["수요기관"]))
+    p_key = [txt(v) for v in p["시설키"]]
+    p_id = [txt(v) for v in p["시설ID"]]
+    p5 = [(txt(a), txt(b), txt(w), k, o) for a, b, w, k, o in zip(p["표2_대분류"], p["표2_중분류"], p["검색어"], p_key, p_org)]
+    live = [j for j in range(len(p)) if p_id[j] or p_key[j] or any(txt(p.at[j, c]) for c in have + ["시설명_후보"])]   # 통째로 빈 행(엑셀 끝의 서식만 있는 줄)은 버린다
+    by5: Dict[tuple, list] = {}
+    by2: Dict[tuple, list] = {}
+    for j in live:
+        by5.setdefault(p5[j], []).append(j)
+        by2.setdefault((p_key[j], p_org[j]), []).append(j)
+    a_org = list(agg["수요기관"])
+    a_key = [txt(v) for v in agg["시설키"]]
+    a5 = [(txt(a), txt(b), txt(w), k, o) for a, b, w, k, o in zip(agg["표2_대분류"], agg["표2_중분류"], agg["검색어"], a_key, a_org)]
+    match: Dict[int, int] = {}          # 새 행 → 이전 행
+    how: Dict[int, str] = {}
+    used: set = set()
+
+    def take(i: int, cands: list, kind: str) -> bool:
+        for j in cands:
+            if j not in used:
+                match[i], how[i] = j, kind
+                used.add(j)
+                return True
+        return False
+    for i in range(len(agg)):                                           # ① 묶음 열쇠가 모두 같은 행
+        take(i, by5.get(a5[i], []), "same")
+    for i in range(len(agg)):                                           # ② (시설키, 수요기관)이 같은 행(표2 분류·검색어만 달라진 경우)
+        if i not in match:
+            take(i, by2.get((a_key[i], a_org[i]), []), "key")
+    free: Dict[tuple, list] = {}                                        # ③ 규칙이 바뀌어 시설키가 달라진 이전 행 → 예시 공고명으로 지금의 시설키를 다시 낸다
+    for i in range(len(agg)):
+        if i not in match:
+            free.setdefault((a_key[i], a_org[i]), []).append(i)
+    for j in live:
+        if j in used or not txt(p.at[j, "공고명_예시"]) or not txt(p.at[j, "검색어"]):
+            continue
+        w = txt(p.at[j, "검색어"])
+        try:
+            k2 = normalize_facility_key(prefix_institution(extract_facility_name(txt(p.at[j, "공고명_예시"]), w), w, p_org[j]))
+        except Exception:  # noqa: BLE001 — 사람이 고친 셀에서 나온 값이라 무엇이든 올 수 있다. 맞추지 못하면 그 행은 그대로 남긴다
+            continue
+        cands = [i for i in free.get((k2, p_org[j]), []) if i not in match]
+        cands = [i for i in cands if a5[i][2] == w] or cands
+        if cands and k2 != p_key[j]:
+            match[cands[0]], how[cands[0]] = j, "rekey"
+            used.add(j)
+    nums = [int(d) for d in (re.sub(r"\D", "", x) for x in p_id) if d and len(d) <= 6]   # 번호 칸에 날짜 같은 긴 숫자가 들어가 있어도 다음 번호가 그 뒤로 튀지 않게
+    nxt = (max(nums) if nums else 0) + 1                                 # 이전 파일의 모든 번호 뒤부터(남겨 둔 행의 번호를 새 시설에 다시 쓰지 않는다)
+    prev_last = max((txt(v) for v in p["최종공고일"]), default="") if "최종공고일" in p.columns else ""   # 이전 파일을 만들 때 가장 늦은 공고일
+    by_org: Dict[str, list] = {}
+    by_key: Dict[str, list] = {}
+    for j in live:
+        if p_key[j]:
+            by_org.setdefault(p_org[j], []).append(j)
+            by_key.setdefault(p_key[j], []).append(j)
+
+    def similar(i: int) -> str:
+        """새 행과 이름이 비슷한 기존 시설(같은 수요기관), 이름이 같은데 수요기관 이름만 다른 기존 시설 — 같은 시설이 한 번 더 잡힌 것인지 볼 단서. 없으면 ''."""
+        best, bj = 0.0, None
+        for j in by_org.get(a_org[i], []):
+            r = 1.0 if (a_key[i] in p_key[j] or p_key[j] in a_key[i]) and min(len(a_key[i]), len(p_key[j])) >= 3 \
+                else difflib.SequenceMatcher(None, a_key[i], p_key[j]).ratio()
+            if r > best:
+                best, bj = r, j
+        hints = [f"비슷한 기존 시설: {p_id[bj] or '?'} '{txt(p.at[bj, '시설명_후보']) or p_key[bj]}'"] if bj is not None and best >= 0.6 else []
+        other = [j for j in by_key.get(a_key[i], []) if p_org[j] != a_org[i]]   # 기관 이름이 바뀌었거나(강원도→강원특별자치도), 지자체·공사로 나뉜 같은 시설
+        if other:
+            hints.append(f"이름이 같은 기존 시설: {p_id[other[0]] or '?'} (수요기관 '{p_org[other[0]] or '빈칸'}')")
+        return ", ".join(hints)
+    owner: Dict[tuple, int] = {}                                         # 지금의 (시설키, 수요기관) → 그 시설의 이전 행(먼저 맞춘 것)
+    for i in sorted(match):
+        owner.setdefault((a_key[i], a_org[i]), match[i])
+    n_same = n_rekey = n_new = n_share = n_check = n_old_new = 0
+    for i in range(len(agg)):
+        j = match.get(i)
+        share = None
+        if j is None:
+            share = owner.get((a_key[i], a_org[i]))                       # 같은 시설의 다른 검색어 행
+        src = j if j is not None else share
+        notes = []
+        if src is None:
+            agg.at[i, "시설ID"] = f"F{str(nxt).zfill(4)}"
+            nxt += 1
+            n_new += 1
+            old_notice = bool(prev_last) and bool(txt(agg.at[i, "최초공고일"])) and txt(agg.at[i, "최초공고일"]) <= prev_last
+            n_old_new += old_notice
+            notes.append("신규(예전 공고가 있음: 뒤늦게 수집된 공고이거나, 지웠던 줄이거나, 이름 정리 규칙이 바뀌어 새로 잡힌 후보일 수 있음)" if old_notice else "신규")
+            hint = similar(i)
+            if hint:
+                notes.append(hint + " → 같은 시설이면 '제외' 하거나 시설ID 를 그 번호로")
+        else:
+            if p_id[src]:
+                agg.at[i, "시설ID"] = p_id[src]
+            else:
+                agg.at[i, "시설ID"] = f"F{str(nxt).zfill(4)}"
+                nxt += 1
+            old_name, new_name = txt(p.at[src, "시설명_후보"]), txt(agg.at[i, "시설명_후보"])
+            for c in have:
+                agg.at[i, c] = txt(p.at[src, c])
+            if "검수_시설명" in have and not txt(p.at[src, "검수_시설명"]) and old_name and old_name != new_name:
+                agg.at[i, "검수_시설명"] = old_name                       # 빈칸 = '시설명_후보를 쓴다' 였으므로, 후보 이름이 달라졌으면 쓰이던 이름을 적어 둔다(새 검색어 행도 그 시설의 이름으로)
+            if j is None:
+                n_share += 1
+                notes.append(f"신규 행(같은 시설 {p_id[src] or '?'} 의 다른 검색어: 검수 값은 그 행과 같게 둠)")
+            else:
+                n_same += how[i] != "rekey"
+                n_rekey += how[i] == "rekey"
+                if how[i] == "rekey":
+                    notes.append(f"후보 이름 바뀜: '{old_name}' → '{new_name}'(이전 줄의 공고명_예시로 다시 맞춤. 다른 시설로 보이면 검수 칸 확인)" if old_name != new_name
+                                 else "시설키 바뀜(이름 정리 규칙)")
+                old_t, new_t = txt(p.at[src, "사업유형"]), txt(agg.at[i, "사업유형"])
+                if "검수_포함여부" in have and old_t and default_include(new_t) != default_include(old_t) \
+                        and txt(p.at[src, "검수_포함여부"]) != default_include(new_t):
+                    n_check += 1
+                    notes.append(f"확인: 사업유형 {old_t}→{new_t}, 새 기본값 '{default_include(new_t)}'(지금 '{txt(p.at[src, '검수_포함여부']) or '빈칸'}' 그대로 둠)")
+                if STATUS_COL in p.columns and txt(p.at[src, STATUS_COL]):        # 지난 실행의 표시 가운데 아직 확인하지 않았을 수 있는 것은 남긴다
+                    notes += [x for x in _pending_notes(txt(p.at[src, STATUS_COL]), not any(_user_edited(p.loc[src], c) for c in have),
+                                                        txt(p.at[src, "검수_포함여부"]) if "검수_포함여부" in have else "")
+                              if x[len(PREV_MARK):].split(":")[0] not in {n.split(":")[0] for n in notes}]
+        agg.at[i, STATUS_COL] = " / ".join(notes)
+    gone = [j for j in live if j not in used]
+    if gone:
+        rest = pd.DataFrame({c: ([p.at[j, c] for j in gone] if c in p.columns else [""] * len(gone)) for c in agg.columns})
+        rest["시설ID"], rest["시설키"], rest["수요기관"] = [p_id[j] for j in gone], [p_key[j] for j in gone], [p_org[j] for j in gone]
+        for c in REVIEW_COLS:
+            rest[c] = [txt(p.at[j, c]) for j in gone] if c in have else ""
+        rest[STATUS_COL] = "이번 후보에 없음(이전 내용 그대로 둠)"
+        agg = pd.concat([agg.astype(object), rest.astype(object)], ignore_index=True)
+    src_of = [match.get(i) for i in range(len(a_key))] + gone             # 출력 행 → 이전 파일의 행(새로 생긴 행은 None)
+    for c in [c for c in prev.columns if c not in agg.columns and str(c) != "None" and list(prev.columns).count(c) == 1]:
+        agg[c] = [prev[c].iloc[j] if j is not None else None for j in src_of]   # 검수자가 직접 더한 열(확인 표시·비고 등)도 그 행에 그대로 둔다
+    # 같은 시설ID 를 가진 행들(검수자가 합친 시설, 검색어가 여럿인 시설)은 묶음의 첫 행 자리에 모아 이전 파일에 있던 순서대로 둔다. 재검색은 묶음의 첫 '포함' 행에서
+    # 대표 이름·표2 분류·검색어를 읽으므로, 줄 순서가 달라지면(정렬해 둔 파일, 끝으로 옮긴 '이번 후보에 없음' 행, 앞에 끼어든 새 검색어 행) 손대지 않은 시설의 이름·분류가 바뀐다
+    ids = list(agg["시설ID"])
+    first: Dict[str, int] = {}
+    for r, fid in enumerate(ids):
+        if fid:
+            first.setdefault(fid, r)
+    order = sorted(range(len(agg)), key=lambda r: (first.get(ids[r], r), src_of[r] is None, src_of[r] or 0, r))
+    if order != list(range(len(agg))):
+        agg = agg.iloc[order].reset_index(drop=True)
+    log.info("이전 검수 파일 %d행을 그대로 이어받음(시설ID·검수 칸은 적혀 있던 그대로): 같은 시설키 %d, 시설키가 바뀌어 예시 공고명으로 맞춘 행 %d, 이번 후보에 없어 남겨 둔 행 %d. "
+             "새 시설 %d개(그중 예전 공고로 새로 잡힌 후보 %d개. 같은 시설의 다른 검색어 행 %d개 별도), 사업유형이 달라져 확인할 행 %d개 → '%s' 열",
+             len(live), n_same, n_rekey, len(gone), n_new, n_old_new, n_share, n_check, STATUS_COL)
+    return agg
+
+
 def write_review_workbook(agg: pd.DataFrame, path: str) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     wb = Workbook()
@@ -295,7 +519,7 @@ def write_review_workbook(agg: pd.DataFrame, path: str) -> None:
         ws.cell(row=1, column=c).font = BOLD
         ws.cell(row=1, column=c).fill = HEADER_FILL
     for row in agg.itertuples(index=False):
-        ws.append([None if _blank(v) and not isinstance(v, (int, float)) else (v.item() if hasattr(v, "item") else v) for v in row])
+        ws.append([None if _blank(v) else (v.item() if hasattr(v, "item") else v) for v in row])      # NaN 도 빈 셀로(openpyxl 은 NaN 을 값이 빈 숫자 셀로 쓴다)
     edit_cols = [i + 1 for i, c in enumerate(cols) if c.startswith("검수_")]
     for r in range(2, ws.max_row + 1):
         for c in range(1, len(cols) + 1):
@@ -307,7 +531,8 @@ def write_review_workbook(agg: pd.DataFrame, path: str) -> None:
     ws.freeze_panes = "B2"
     ws.auto_filter.ref = ws.dimensions
     legend = wb.create_sheet("범례")
-    for line in ["노란색 셀만 수정하세요. (다른 열은 수정해도 반영되지 않습니다)",
+    for line in ["노란색 셀만 수정하세요. (다른 열은 수정해도 반영되지 않습니다. 예외: 시설ID 는 두 줄을 한 시설로 합칠 때 같은 번호로 고칩니다 — 맨 아래 줄 참고)",
+                 "첫 줄(머리글)의 이름과 시트 이름은 바꾸지 말고, 열·줄을 지우지 마세요(빼려는 시설은 줄을 지우지 말고 '제외' — 지운 줄은 다음 discover 때 '신규' 로 다시 생깁니다). 정렬·필터·숨기기는 괜찮습니다.",
                  "검수_포함여부: '포함' → DB 수집 대상 / '제외' → 제외 / '검토필요' → 판단 후 둘 중 하나로 바꾸기",
                  "기본값: 신축·증축·리모델링(증축·리모델링 포함)은 '포함', 유지보수(방수·도색·교체 등)는 '제외', 미분류는 '검토필요'",
                  "같은 시설에 신축과 리모델링이 모두 있으면 한 줄로 보입니다(사업유형_분포 참고). '포함'이면 두 사업이 각각 별도 프로젝트로 DB에 들어갑니다.",
@@ -315,9 +540,26 @@ def write_review_workbook(agg: pd.DataFrame, path: str) -> None:
                  "검수_별칭(;구분): 재검색 보조어를 ';'로 구분 (예: 수원시립미술관;수원시 미술관;수원미술관)",
                  "검수_수요기관: 재검색 시 이 수요기관의 공고만 찾습니다(같은 이름의 시설이 다른 지자체에 있어도 섞이지 않게). 비우면 이름만으로 찾습니다.",
                  "사업유형이 '유지보수'로 잡혔지만 실제 리모델링·신축이면 '포함'으로 바꾸고 메모를 남기세요.",
-                 "discover 를 다시 실행해도 이 파일의 검수 내용과 시설ID는 (시설키, 수요기관)이 같은 행에 그대로 이어집니다."]:
+                 "discover 를 다시 실행해도 이 파일에 있던 행의 시설ID 와 노란 칸은 적혀 있던 그대로 남습니다(덮어쓰기 전 사본도 같은 폴더에 남깁니다). "
+                 "이번 후보에 없는 행도 지우지 않습니다.",
+                 f"{STATUS_COL}: 다시 실행했을 때 이전 파일과 달라진 점 — '신규'(새 시설: 기본값을 확인. 비슷한 이름이나 같은 이름의 기존 시설이 있으면 그 번호를 함께 적음) / "
+                 "'확인: …'(사업유형이 달라져 기본값이 지금 값과 다름. 값은 바꾸지 않았음) / '후보 이름 바뀜'·'시설키 바뀜'(이름 정리 규칙이 바뀜. 검수_시설명은 그대로) / "
+                 "'신규 행(같은 시설의 다른 검색어)'(검수 값은 그 시설과 같게 둠) / '이번 후보에 없음'(이전 내용 그대로 둠). 빈칸이면 달라진 것이 없는 행입니다.",
+                 f"'{PREV_MARK.strip()} …' 로 시작하는 표시는 지난 실행 때 붙었는데 그 뒤 노란 칸이 그대로인 행입니다(이미 확인했으면 그냥 두거나 {STATUS_COL} 칸의 글을 지우세요 — 지워도 결과는 같습니다).",
+                 "같은 시설이 두 줄로 잡혔으면 시설ID 칸에 같은 번호를 적어 한 시설로 합칠 수 있습니다(재검색이 한 시설로 묶고, 그 가운데 파일에서 가장 위에 있는 '포함' 줄의 "
+                 "시설명·검색어·분류를 대표로 씁니다. 다시 실행해도 합친 줄끼리의 위아래 순서는 그대로 둡니다).",
+                 "같은 폴더의 'facility_candidates.이전_날짜_시각.xlsx' 는 덮어쓰기 전 사본입니다. 검수는 사본이 아니라 facility_candidates.xlsx 에 하세요(사본을 고쳐도 반영되지 않습니다)."]:
         legend.append([line])
-    wb.save(path)
+    tmp = path + ".tmp"                          # 임시 파일에 다 쓴 뒤 바꿔치기 → 쓰다가 멈춰도 검수 파일이 깨지지 않는다
+    try:
+        wb.save(tmp)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
     log.info("검수용 워크북 저장: %s (%d개 시설)", path, len(agg))
 
 
@@ -326,6 +568,10 @@ def read_review_file(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         return pd.DataFrame()
     wb = load_workbook(path, data_only=True, read_only=True)
+    if "시설후보_검수" not in wb.sheetnames:
+        names = ", ".join(wb.sheetnames)
+        wb.close()
+        raise SystemExit(f"[중단] '{path}' 에 '시설후보_검수' 시트가 없습니다(있는 시트: {names}). 시트 이름을 바꿨다면 '시설후보_검수' 로 되돌린 뒤 다시 실행하세요.")
     ws = wb["시설후보_검수"]
     rows = list(ws.values)
     wb.close()

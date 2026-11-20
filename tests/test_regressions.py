@@ -648,9 +648,11 @@ def test_discover_and_dedup(tmp):
     prev.loc[prev["수요기관"] == "가상군", "사업유형"] = "유지보수"
     prev.loc[prev["수요기관"] == "가상군", "검수_포함여부"] = "제외"
     prev = prev[prev["수요기관"] != "셋째군"]            # 셋째군은 이전 파일에 없던 새 시설 → 이어지는 번호(F0008)
-    agg2 = discover.discover_candidates(std, previous_review=prev)
+    agg2 = discover.discover_candidates(std, previous_review=prev, recalc=True)
     r = agg2[agg2["수요기관"] == "가상군"].iloc[0]
-    assert r["검수_포함여부"] == "포함", "기본값 그대로였던 '제외'는 이어받지 않고 새 규칙(신축 → 포함)으로"
+    assert r["검수_포함여부"] == "포함", "--recalc: 기본값 그대로였던 '제외'는 이어받지 않고 새 규칙(신축 → 포함)으로"
+    keep = discover.discover_candidates(std, previous_review=prev)
+    assert keep[keep["수요기관"] == "가상군"].iloc[0]["검수_포함여부"] == "제외", "기본 동작(검수 유지): 기본값과 같아 보이는 칸도 적혀 있던 그대로"
     prev3 = agg.copy()
     prev3.loc[prev3["수요기관"] == "다른군", "검수_포함여부"] = "제외"        # 사용자가 기본값(포함)을 고침 → 이어받아야 함
     prev3.loc[prev3["수요기관"] == "다른군", "검수_시설명"] = "다른군 문예회관(별칭)"
@@ -705,6 +707,261 @@ def test_discover_and_dedup(tmp):
     assert set(l4["공고번호"]) == {"A9"} and h4[h4["공고번호"] == "A1"]["대체공고번호"].iloc[0] == "A9"
 
 
+def test_discover_keeps_review(tmp):
+    """검수를 마친 뒤 discover 를 다시 돌려도(공고가 늘었거나 이름 정리 규칙이 바뀌었어도) 이전 행의 시설ID·검수 칸이 그대로 남는다."""
+    from g2b_costdb import pipeline
+    cfg = load_config()
+    n = lambda no, nm, dt, org, mc="건축공사": dict(bidNtceNo=no, bidNtceOrd="00", bidNtceNm=nm, ntceKindNm="일반공고", bidNtceDt=dt, dminsttNm=org,
+                                                presmptPrce="1000000000", mainCnsttyNm=mc)
+    rows1 = [n("A1", "가상군 문화예술회관 건립공사", "2024-01-05 10:00:00", "가상군"), n("B1", "다른군 문화예술회관 건립공사", "2024-02-05 10:00:00", "다른군"),
+             n("M1", "셋째군 문화예술회관 방수공사", "2024-03-01 10:00:00", "셋째군")]
+    rows2 = rows1 + [n("M2", "셋째군 문화예술회관 증축공사", "2026-09-20 10:00:00", "셋째군"), n("N1", "넷째군 문화예술회관 건립공사", "2026-09-21 10:00:00", "넷째군")]
+    std1, std2 = discover.standardize(pd.DataFrame(rows1), cfg, None), discover.standardize(pd.DataFrame(rows2), cfg, None)
+    agg0 = discover.discover_candidates(std1)
+    assert list(agg0.columns).index(discover.STATUS_COL) == list(agg0.columns).index("검수_포함여부") - 1 and set(agg0[discover.STATUS_COL]) == {""}, "표시 열은 노란 칸 바로 앞, 처음 만들 때는 빈칸"
+    by = lambda df, org: df[df["수요기관"] == org].iloc[0]
+    assert by(agg0, "셋째군")["사업유형"] == "유지보수" and by(agg0, "셋째군")["검수_포함여부"] == "제외"
+    prev = agg0.copy()
+    ix = lambda org: prev.index[prev["수요기관"] == org][0]
+    prev.loc[ix("가상군"), ["시설ID", "검수_수요기관", "검수_별칭(;구분)"]] = ["F0100", None, "가상문예"]            # 수요기관을 비움(이름만으로 찾기) — 기본값으로 되돌리면 안 된다
+    old_key = prev.at[ix("다른군"), "시설키"]
+    prev.loc[ix("다른군"), ["시설ID", "시설키", "시설명_후보", "검수_시설명", "검수_메모"]] = ["F0002", old_key + "옛", "다른군 문화예술회관 옛", "다른군 문화예술회관 옛", "확인함"]   # 옛 규칙의 시설키
+    prev.loc[ix("셋째군"), "시설ID"] = "F0003"
+    gone = dict(prev.iloc[0]); gone.update({"시설ID": "F0200", "시설키": "없어진시설", "시설명_후보": "없어진 시설", "수요기관": "없는군", "공고명_예시": None,
+                                           "검수_포함여부": "포함", "검수_시설명": "없어진 시설", "검수_별칭(;구분)": None, "검수_수요기관": "없는군", "검수_메모": "직접 넣음"})
+    prev = pd.concat([prev, pd.DataFrame([gone, {c: None for c in prev.columns}])], ignore_index=True)        # 이번 후보에 없는 행 + 통째로 빈 줄
+    path = os.path.join(tmp, "keep", "facility_candidates.xlsx")
+    discover.write_review_workbook(prev, path)
+    assert not os.path.exists(path + ".tmp"), "임시 파일을 남기지 않는다"
+    prev_x = discover.read_review_file(path)                                                                # 엑셀을 거친 값으로 시험(빈칸은 None)
+    out = discover.discover_candidates(std2, previous_review=prev_x)
+    st = lambda org: by(out, org)[discover.STATUS_COL]
+    a, b, m, nw, g = by(out, "가상군"), by(out, "다른군"), by(out, "셋째군"), by(out, "넷째군"), by(out, "없는군")
+    assert (a["시설ID"], a["검수_수요기관"], a["검수_별칭(;구분)"], a["검수_포함여부"], st("가상군")) == ("F0100", "", "가상문예", "포함", ""), dict(a)
+    assert b["시설ID"] == "F0002" and b["시설키"] == old_key and b["검수_시설명"] == "다른군 문화예술회관 옛" and b["검수_메모"] == "확인함" \
+        and st("다른군").startswith("후보 이름 바뀜: '다른군 문화예술회관 옛' → '다른군 문화예술회관'"), ("시설키가 바뀐 행은 예시 공고명으로 맞춘다", dict(b))
+    assert m["시설ID"] == "F0003" and m["사업유형"] == "증축" and m["검수_포함여부"] == "제외" and "확인: 사업유형 유지보수→증축, 새 기본값 '포함'(지금 '제외' 그대로 둠)" in st("셋째군"), dict(m)
+    assert nw["시설ID"] == "F0201" and st("넷째군") == "신규" and nw["검수_포함여부"] == "포함", ("새 시설의 번호는 이전 파일의 모든 번호 뒤(남겨 둔 F0200 다음)", dict(nw))
+    assert g["시설ID"] == "F0200" and g["검수_포함여부"] == "포함" and g["검수_메모"] == "직접 넣음" and st("없는군").startswith("이번 후보에 없음") and out.index[out["수요기관"] == "없는군"][0] == len(out) - 1
+    assert len(out) == 5 and out["시설ID"].is_unique, out[["시설ID", "수요기관", discover.STATUS_COL]]
+    discover.write_review_workbook(out, path)
+    rv = discover.read_reviewed(path)
+    assert sorted(rv["시설ID"]) == ["F0002", "F0100", "F0200", "F0201"] and rv.set_index("시설ID").loc["F0100", "검수_수요기관"] in ("", None), rv[["시설ID", "검수_수요기관"]]
+    again = discover.discover_candidates(std2, previous_review=discover.read_review_file(path))            # 한 번 더 돌려도 그대로. 아직 확인하지 않았을 수 있는 표시는 '지난번: ' 을 붙여 남긴다
+    key = ["시설ID"] + discover.REVIEW_COLS
+    st2 = lambda org: by(again, org)[discover.STATUS_COL]
+    assert again[key].equals(out[key]) and st2("넷째군") == "지난번: 신규" and st2("셋째군").startswith("지난번: 확인: 사업유형 유지보수→증축") \
+        and st2("다른군") == "" and st2("가상군") == "" and st2("없는군").startswith("이번 후보에 없음"), again[key + [discover.STATUS_COL]]
+    discover.write_review_workbook(again, path)
+    third = discover.read_review_file(path)
+    third.loc[third["수요기관"] == "넷째군", "검수_메모"] = "확인함"                                       # 새 시설을 보고 메모를 남김 → 표시가 사라진다
+    third.loc[third["수요기관"] == "셋째군", "검수_포함여부"] = "포함"                                     # 확인 대상의 값을 고침 → 표시가 사라진다
+    t3 = discover.discover_candidates(std2, previous_review=third)
+    assert by(t3, "넷째군")[discover.STATUS_COL] == "" and by(t3, "셋째군")[discover.STATUS_COL] == "" and by(t3, "넷째군")["검수_메모"] == "확인함"
+    t4 = discover.discover_candidates(std2, previous_review=discover.read_review_file(path))               # 손대지 않고 또 돌리면 표시는 그대로(겹쳐 붙지 않는다)
+    assert by(t4, "넷째군")[discover.STATUS_COL] == "지난번: 신규" and by(t4, "셋째군")[discover.STATUS_COL] == st2("셋째군")
+    discover.write_review_workbook(out, path)
+    # --recalc(검수 전 단계용 옛 동작)과의 차이: 손대지 않은 칸을 다시 계산하고, 이번 후보에 없는 행은 싣지 않는다
+    rc = discover.discover_candidates(std2, previous_review=prev_x, recalc=True)
+    assert by(rc, "셋째군")["검수_포함여부"] == "포함" and by(rc, "가상군")["검수_수요기관"] == "가상군" and len(rc) == 4 and set(rc[discover.STATUS_COL]) == {""}
+    # 시설키·시설ID 열이 없는 옛 형식 파일은 맞출 기준이 없다 → 새로 만든다(이전 행을 덧붙여 두 배로 만들지 않는다)
+    assert len(discover.discover_candidates(std2, previous_review=prev_x.drop(columns=["시설키"]))) == 4
+    # 머리글이 망가진 파일(열 삭제·이름 변경, 첫 줄 위에 줄 삽입)은 이어받을 수 없다 — 까닭을 알려 주고, discover 단계는 검수 파일을 덮어쓰지 않고 멈춘다
+    assert discover.review_file_problem(prev_x) == "" and discover.review_file_problem(None) == "" and discover.review_file_problem(prev_x.iloc[0:0]) == ""
+    for bad in (prev_x.drop(columns=["시설키"]), prev_x.rename(columns={"시설ID": "ID"}), prev_x.drop(columns=["수요기관"]),
+                pd.DataFrame([list(prev_x.columns)] + prev_x.values.tolist(), columns=["2026년 검수본"] + ["None"] * (len(prev_x.columns) - 1))):
+        assert "열이 없습니다" in discover.review_file_problem(bad), list(bad.columns)
+    own = prev_x.copy()
+    own["None"] = [None] * len(own)                                                                       # 서식만 있는 빈 열은 괜찮다
+    assert discover.review_file_problem(own) == ""
+    own.loc[own.index[0], "None"] = "따로 적은 글"                                                          # 이름 없는 열에 적은 글은 옮길 수 없다 → 말없이 빼지 않고 알린다
+    assert "이름이 없는 열에 글이 1칸" in discover.review_file_problem(own), discover.review_file_problem(own)
+    cfg3 = load_config()
+    cfg3["paths"] = dict(cfg3["paths"], data_dir=os.path.join(tmp, "keep", "data3"), raw_dir=os.path.join(tmp, "keep", "raw3"), out_dir=os.path.join(tmp, "keep", "out3"))
+    cfg3["period"] = dict(cfg3["period"], start="2024-01", end="2024-01")
+    for k in ("data_dir", "raw_dir", "out_dir"):
+        os.makedirs(cfg3["paths"][k], exist_ok=True)
+    pd.DataFrame(rows2).to_parquet(os.path.join(cfg3["paths"]["data_dir"], "notices_all.parquet"))
+    path3 = os.path.join(cfg3["paths"]["out_dir"], "facility_candidates.xlsx")
+    discover.write_review_workbook(prev_x.rename(columns={"시설ID": "ID"}), path3)
+    before3 = open(path3, "rb").read()
+    try:
+        pipeline.stage_discover(cfg3)
+        raise AssertionError("머리글이 망가진 검수 파일은 덮어쓰지 않고 멈춰야 한다")
+    except SystemExit as e:
+        assert "[중단]" in str(e) and "'시설ID'" in str(e), str(e)
+    assert open(path3, "rb").read() == before3 and os.listdir(cfg3["paths"]["out_dir"]) == ["facility_candidates.xlsx"], "검수 파일은 그대로, 사본도 만들지 않는다"
+    # ── _keep_review 단위: 같은 (시설키, 수요기관)이 검색어 둘에 걸린 시설, 예전 공고로 새로 잡힌 후보
+    mk = lambda w, k, org, nm, first, last, typ="신축", inc="포함": {"표2_대분류": "X", "표2_중분류": "x", "검색어": w, "시설키": k, "시설명_후보": nm, "수요기관": org, "공고건수": 1,
+                                                              "최초공고일": first, "최종공고일": last, "사업유형": typ, "공고명_예시": nm + " 건립공사",
+                                                              "검수_포함여부": inc, "검수_시설명": nm, "검수_별칭(;구분)": "", "검수_수요기관": org, "검수_메모": ""}
+    pv = pd.DataFrame([dict(mk("k1", "K", "O", "케이", "2024-01-01", "2024-02-01", inc="제외"), 시설ID="F0001"), dict(mk("k2", "K", "O", "케이", "2024-01-01", "2024-02-01"), 시설ID="F0001"),
+                       dict(mk("추모공원", "의령4·26추모공원", "의령군", "의령4·26추모공원", "2023-12-13", "2024-07-22"), 시설ID="F0002")])
+    ag = pd.DataFrame([mk("k1", "K", "O", "케이", "2024-01-01", "2024-02-01"), mk("k2", "K", "O", "케이", "2024-01-01", "2024-02-01"), mk("k3", "K", "O", "케이", "2026-09-20", "2026-09-20"),
+                       mk("추모공원", "의령4·26추모공원", "의령군", "의령4·26추모공원", "2023-12-13", "2024-07-22"), mk("추모공원", "의령추모공원", "의령군", "의령 추모공원", "2024-02-06", "2024-02-06", typ="미분류", inc="검토필요"),
+                       mk("추모공원", "전혀다른곳", "의령군", "전혀 다른 곳", "2026-09-25", "2026-09-25")])
+    kr = discover._keep_review(ag, pv)
+    assert list(kr["검수_포함여부"][:3]) == ["제외", "포함", "제외"] and list(kr["시설ID"][:3]) == ["F0001"] * 3, ("검색어가 다른 두 행은 각자 자기 값을, 새 검색어 행은 그 시설의 값을", kr[["시설ID", "검색어", "검수_포함여부"]])
+    assert kr[discover.STATUS_COL][2].startswith("신규 행(같은 시설 F0001") and kr[discover.STATUS_COL][0] == kr[discover.STATUS_COL][1] == ""
+    assert kr["시설ID"][4] == "F0003" and "예전 공고가 있음" in kr[discover.STATUS_COL][4] and "비슷한 기존 시설: F0002 '의령4·26추모공원'" in kr[discover.STATUS_COL][4], kr[discover.STATUS_COL][4]
+    assert kr["시설ID"][5] == "F0004" and kr[discover.STATUS_COL][5] == "신규", kr[discover.STATUS_COL][5]
+    # 같은 시설ID 로 합친 두 행은 이전 파일의 순서를 지킨다(재검색은 묶음의 첫 행에서 시설명·분류를 가져온다) — 검수자가 정렬해 저장한 경우
+    pv2 = pd.DataFrame([dict(mk("z9", "ZZ", "O", "둘째 이름", "2024-01-01", "2024-02-01"), 시설ID="F0007"), dict(mk("a1", "AA", "O", "첫째 이름", "2024-01-01", "2024-02-01"), 시설ID="F0007")])
+    ag2 = pd.DataFrame([mk("a1", "AA", "O", "첫째 이름", "2024-01-01", "2024-02-01"), mk("a0", "AA", "O", "첫째 이름", "2026-09-20", "2026-09-20"), mk("z9", "ZZ", "O", "둘째 이름", "2024-01-01", "2024-02-01")])
+    kr2 = discover._keep_review(ag2, pv2)
+    pv2["내확인"] = ["봤음", None]                                                                              # 검수자가 직접 더한 열
+    assert list(discover._keep_review(ag2, pv2)["내확인"].map(lambda v: "" if discover._blank(v) else v)) == ["봤음", "", ""], "검수자가 더한 열은 그 행에 그대로"
+    assert list(kr2["검색어"]) == ["z9", "a1", "a0"] and list(kr2["시설ID"]) == ["F0007"] * 3 and kr2[discover.STATUS_COL][2].startswith("신규 행("), kr2[["시설ID", "검색어", discover.STATUS_COL]]
+    # ── _keep_review 단위(이어서): 맞추는 순서 ①②③ 과 표시 조건을 하나씩 고정한다
+    from g2b_costdb.classify import extract_facility_name, normalize_facility_key, prefix_institution
+    ST, d1, d2 = discover.STATUS_COL, "2024-01-01", "2024-02-01"
+    key_of = lambda title, w, org: normalize_facility_key(prefix_institution(extract_facility_name(title, w), w, org))
+    row = lambda sid, w, k, org, nm, **kw: dict(mk(w, k, org, nm, d1, d2), 시설ID=sid, **kw)
+    # ① 같은 (시설키, 수요기관)의 두 검색어 행이 이전 파일에 다른 순서로 있어도 각자 자기 검색어 행에 붙고, ② 검색어만 바뀐 행은 시설키로 붙는다
+    k2 = discover._keep_review(pd.DataFrame([mk("k1", "K", "O", "케이", d1, d2), mk("k2", "K", "O", "케이", d1, d2), mk("새검색어", "L", "O", "엘", d1, d2)]),
+                               pd.DataFrame([row("F0012", "k2", "K", "O", "케이"), row("F0011", "k1", "K", "O", "케이", 검수_포함여부="제외"), row("F0013", "옛검색어", "L", "O", "엘", 검수_포함여부="제외")]))
+    assert list(k2["시설ID"]) == ["F0011", "F0012", "F0013"] and list(k2["검수_포함여부"]) == ["제외", "포함", "제외"] and set(k2[ST]) == {""}, k2[["시설ID", "검색어", "검수_포함여부", ST]]
+    # 사람이 한 줄을 복사해 두 줄로 만든 행(묶음 열쇠가 같음), 노란 칸만 적어 넣은 행, 번호가 빈 행 — 어느 것도 잃지 않고, 앞뒤 공백은 떼며, 번호는 겹치지 않는다
+    pv3 = pd.DataFrame([row(" F0021 ", "k", "K", "O", "케이", 검수_포함여부=" 제외 "), row("F0022", "k", "K", "O", "케이", 검수_시설명="케이 B단지", 검수_메모="복사한 줄"),
+                        {"검수_포함여부": "포함", "검수_시설명": "손으로 넣은 시설"}, row(None, "k", "M", "오 ", "엠", 검수_메모="번호 없음"), row(" F0050 ", "k", "없어진키", "O", "없어진 곳", 공고명_예시=None)])
+    k3 = discover._keep_review(pd.DataFrame([mk("k", "K", "O", "케이", d1, d2), mk("k", "M", "오 ", "엠", d1, d2), mk("k", "N", "O", "엔", "2026-09-01", "2026-09-01")]), pv3)
+    got = sorted(zip(k3["시설ID"], k3["검수_포함여부"], k3["검수_시설명"], k3["검수_메모"]))
+    assert got == sorted([("F0021", "제외", "케이", ""), ("F0022", "포함", "케이 B단지", "복사한 줄"), ("", "포함", "손으로 넣은 시설", ""), ("F0051", "포함", "엠", "번호 없음"),
+                          ("F0052", "포함", "엔", ""), ("F0050", "포함", "없어진 곳", "")]), got
+    assert k3[ST][1] == "" and k3[ST][2] == "신규" and list(k3[ST][3:]) == ["이번 후보에 없음(이전 내용 그대로 둠)"] * 3, ("수요기관은 공백까지 같은 글자로 맞춘다(전량 표와 같은 방식)", list(k3[ST]))
+    # ③ 예시 공고명으로 다시 낸 시설키: 지자체명 접두까지 지금 규칙대로 / 이미 쓴 이전 행은 다시 쓰지 않는다 / 두 이전 행이 한 새 행에 겹치면 하나는 끝에 남긴다 / 같은 검색어 행 먼저
+    t1, t2 = "문화예술회관 건립공사", "가나다 문화회관 건립공사"
+    g1, g2 = key_of(t1, "문화예술회관", "넷째군"), key_of(t2, "문화회관", "O")
+    assert g1 == "넷째군문화예술회관" and g2 == "가나다문화회관", (g1, g2)
+    k4 = discover._keep_review(pd.DataFrame([mk("문화예술회관", g1, "넷째군", "넷째군 문화예술회관", d1, d2), mk("문화회관", "K", "O", "케이", d1, d2), mk("문화회관", g2, "O", "가나다 문화회관", d1, d2)]),
+                               pd.DataFrame([row("F0031", "문화예술회관", "옛키", "넷째군", "문화예술회관", 공고명_예시=t1, 검수_포함여부="제외"), row("F0032", "문화회관", "K", "O", "케이", 공고명_예시=t2),
+                                             row("F0033", "문화회관", "옛1", "O", "가나다 문화회관", 공고명_예시=t2, 검수_포함여부="제외"), row("F0034", "문화회관", "옛2", "O", "가나다 문화회관", 공고명_예시=t2)]))
+    assert list(k4["시설ID"]) == ["F0031", "F0032", "F0033", "F0034"] and list(k4["검수_포함여부"]) == ["제외", "포함", "제외", "포함"], k4[["시설ID", "검색어", "시설키", "검수_포함여부", ST]]
+    assert k4[ST][0].startswith("후보 이름 바뀜: '문화예술회관' → '넷째군 문화예술회관'") and k4[ST][1] == "" and k4[ST][2] == "시설키 바뀜(이름 정리 규칙)" and k4[ST][3].startswith("이번 후보에 없음"), list(k4[ST])
+    k4b = discover._keep_review(pd.DataFrame([mk("가나다", g2, "O", "가나다 문화회관", d1, d2), mk("문화회관", g2, "O", "가나다 문화회관", d1, d2)]),
+                                pd.DataFrame([row("F0035", "문화회관", "옛3", "O", "가나다 문화회관", 공고명_예시=t2, 검수_포함여부="제외")]))
+    st4 = dict(zip(k4b["검색어"], k4b[ST]))
+    assert list(k4b["시설ID"]) == ["F0035"] * 2 and st4["가나다"].startswith("신규 행(같은 시설 F0035") and st4["문화회관"] == "시설키 바뀜(이름 정리 규칙)" and list(k4b["검수_포함여부"]) == ["제외"] * 2, st4
+    # 검수_시설명이 빈칸(= 시설명_후보를 씀)이던 행: 후보 이름이 달라지면 쓰이던 이름을 적어 두고, 같으면 빈칸 그대로
+    k5 = discover._keep_review(pd.DataFrame([mk("k", "K", "O", "케이 새이름", d1, d2), mk("k", "L", "O", "엘", d1, d2)]),
+                               pd.DataFrame([row("F0041", "k", "K", "O", "케이 옛이름", 검수_시설명=None), row("F0042", "k", "L", "O", "엘", 검수_시설명=None)]))
+    assert list(k5["검수_시설명"]) == ["케이 옛이름", ""] and set(k5[ST]) == {""}, k5[["시설ID", "검수_시설명", ST]]
+    # '확인' 은 기본값이 달라지고(유형만 바뀐 것은 아님) 지금 값이 새 기본값과 다를 때만. 이전 파일에 사업유형이 없으면 표시하지 않는다
+    chk = lambda old_t, new_t, kept: discover._keep_review(pd.DataFrame([mk("k", "K", "O", "케이", d1, d2, typ=new_t)]), pd.DataFrame([row("F0001", "k", "K", "O", "케이", 사업유형=old_t, 검수_포함여부=kept)]))[ST][0]
+    assert chk("유지보수", "증축", "제외").startswith("확인: 사업유형 유지보수→증축") and chk("미분류", "신축", "검토필요").startswith("확인:")
+    assert chk("신축", "증축", "제외") == "" and chk("유지보수", "증축", "포함") == "" and chk(None, "신축", "제외") == "", "기본값이 같거나, 지금 값이 새 기본값과 같거나, 이전 유형을 모르면 표시 없음"
+    # 비슷한 기존 시설: 한쪽 이름이 다른 쪽에 통째로 들어 있으면(3자 이상) 길이 차이가 커도 알린다 / 예전 공고 판정은 이전 파일의 가장 늦은 공고일까지(같은 시각 포함)
+    k6 = discover._keep_review(pd.DataFrame([mk("k", "가나다라마바사아자차문화회관", "O", "긴 이름", d2, d2), mk("k", "문화회관", "O", "문화회관", d1, d2)]), pd.DataFrame([row("F0061", "k", "문화회관", "O", "문화회관")]))
+    assert k6[ST][0].startswith("신규(예전 공고가 있음") and "비슷한 기존 시설: F0061 '문화회관'" in k6[ST][0], k6[ST][0]
+    # 시설ID 열이 없는 파일도 옛 형식으로 본다(새로 만든다)
+    no_id = discover.discover_candidates(std2, previous_review=prev_x.drop(columns=["시설ID"]))
+    assert len(no_id) == 4 and set(no_id[discover.STATUS_COL]) == {""}
+    # ── 파이프라인: 덮어쓰기 전 사본, 전량 표가 수집분보다 적을 때의 알림
+    b1 = pipeline._backup_review_file(path)
+    b2 = pipeline._backup_review_file(path)
+    assert b1 and b2 and b1 != b2 and os.path.exists(b1) and os.path.exists(b2) and os.path.getsize(b1) == os.path.getsize(path), (b1, b2)
+    assert pipeline._backup_review_file(os.path.join(tmp, "keep", "없는파일.xlsx")) is None
+    d = os.path.join(tmp, "keep", "data"); os.makedirs(d, exist_ok=True)
+    cfg2 = {"paths": {"data_dir": d}}
+    assert pipeline._std_behind_collect(cfg2) == 0, "파일이 없으면 조용히 0"
+    pd.DataFrame({"a": range(7)}).to_parquet(os.path.join(d, "notices_all.parquet")); pd.DataFrame({"a": range(5)}).to_parquet(os.path.join(d, "notices_std.parquet"))
+    assert pipeline._std_behind_collect(cfg2) == 2
+    # 건수가 같아도 collect 가 discover 보다 나중이면(뒤늦게 올라온 기초금액·다시 받은 달) 알린다
+    t_std = os.path.getmtime(os.path.join(d, "notices_std.parquet"))
+    assert not pipeline._collect_after_discover({"paths": {"data_dir": os.path.join(tmp, "keep", "없는폴더")}})
+    pd.DataFrame({"a": [1]}).to_parquet(os.path.join(d, "bsis_all.parquet"))
+    os.utime(os.path.join(d, "notices_all.parquet"), (t_std - 60, t_std - 60)); os.utime(os.path.join(d, "bsis_all.parquet"), (t_std - 60, t_std - 60))
+    assert not pipeline._collect_after_discover(cfg2), "discover 가 나중이면 조용히"
+    os.utime(os.path.join(d, "bsis_all.parquet"), (t_std + 60, t_std + 60))
+    assert pipeline._collect_after_discover(cfg2)
+    # ── discover 단계의 멈춤: 이어받을 수 없는 파일·열려 있는 파일·쓰기 실패 — 어느 경우에도 검수 파일은 그대로다
+    def stops(msg_part, **kw):
+        before = open(path3, "rb").read()
+        try:
+            pipeline.stage_discover(cfg3, **kw)
+            raise AssertionError("멈춰야 한다: " + msg_part)
+        except SystemExit as e:
+            assert "[중단]" in str(e) and msg_part in str(e), str(e)
+        assert open(path3, "rb").read() == before, "검수 파일은 그대로"
+    dup = prev_x.copy()
+    dup.insert(len(dup.columns), "검수_메모_", dup["검수_메모"])
+    dup.columns = [c.rstrip("_") for c in dup.columns]                                                    # 열을 복사해 같은 이름이 둘
+    discover.write_review_workbook(dup, path3)
+    stops("'검수_메모' 열이 두 번 있습니다")
+    discover.write_review_workbook(prev_x.rename(columns={"검수_메모": "메모"}), path3)                 # 검수 열 이름을 고침 → 그 열을 말없이 비우지 않는다
+    stops("'검수_메모' 열이 없습니다")
+    stops("'검수_메모' 열이 없습니다", fresh=True)
+    assert os.listdir(cfg3["paths"]["out_dir"]) == ["facility_candidates.xlsx"], "멈춘 실행은 사본을 만들지 않는다"
+    discover.write_review_workbook(prev_x, path3)
+    real_open = open
+    def locked(p, mode="r", *a, **k):                                                                      # Excel 이 열고 있는 파일: 쓰기용으로 열 수 없다
+        if str(p) == path3 and "+" in mode:
+            raise PermissionError(13, "Permission denied")
+        return real_open(p, mode, *a, **k)
+    pipeline.open = locked
+    try:
+        stops("Excel 에서 이 파일이 열려 있으면 닫은 뒤")
+    finally:
+        del pipeline.open
+    assert os.listdir(cfg3["paths"]["out_dir"]) == ["facility_candidates.xlsx"] and not os.path.exists(os.path.join(cfg3["paths"]["data_dir"], "notices_std.parquet")), \
+        "열려 있는 파일은 계산을 시작하기 전에 알린다(사본도, 전량 표도 만들지 않는다)"
+    real_replace = discover.os.replace
+    def full(src, dst):
+        raise OSError(28, "No space left on device")
+    discover.os.replace = full
+    try:
+        stops("검수 파일을 새로 쓰지 못했습니다")
+    finally:
+        discover.os.replace = real_replace
+    left = sorted(os.listdir(cfg3["paths"]["out_dir"]))
+    assert len(left) == 2 and left[0] == "facility_candidates.xlsx" and ".이전_" in left[1] and not any(x.endswith(".tmp") for x in left), left
+    pipeline.stage_discover(cfg3)                                                                         # 멈춘 뒤 그냥 다시 돌리면 이어받는다
+    done = discover.read_review_file(path3)
+    tx = lambda v: "" if discover._blank(v) else str(v)
+    rv3 = lambda df: sorted((tx(a), tx(b), tx(c)) for a, b, c in zip(df["시설ID"], df["검수_포함여부"], df["검수_메모"]) if tx(a))
+    assert set(rv3(done)) >= set(rv3(prev_x)) and len(rv3(prev_x)) == 4 and len(done) == 5, (rv3(done), rv3(prev_x))
+    # 사본을 쓰다 실패하면 쓰다 만 파일을 '사본' 이름으로 남기지 않는다
+    real_copy = pipeline.shutil.copy2
+    def half(src, dst):
+        real_open(dst, "wb").write(b"half")
+        raise OSError(28, "No space left on device")
+    pipeline.shutil.copy2 = half
+    n_before = len(os.listdir(cfg3["paths"]["out_dir"]))
+    try:
+        pipeline._backup_review_file(path3)
+        raise AssertionError("사본 실패는 올려 보내야 한다")
+    except OSError:
+        pass
+    finally:
+        pipeline.shutil.copy2 = real_copy
+    assert len(os.listdir(cfg3["paths"]["out_dir"])) == n_before
+    # 번호 칸에 날짜 같은 긴 숫자가 들어 있어도 새 번호는 평소 번호 뒤에 이어진다
+    odd = prev_x.copy()
+    odd.loc[odd["시설ID"] == "F0001", "시설ID"] = "20240105000000"
+    new_ids = set(discover.discover_candidates(std2, previous_review=odd)["시설ID"]) - set(odd["시설ID"])
+    assert new_ids and all(len(x) == 5 for x in new_ids), new_ids
+
+
+def test_discover_keeps_merged_row_order():
+    """같은 시설ID 로 합친 행들의 순서는 discover 를 다시 돌려도 이전 파일 그대로 — 재검색이 묶음의 첫 행에서 읽는 대표 이름·표2 분류·검색어가 바뀌지 않는다."""
+    mk = lambda t2, w, k, nm, inc="포함": {"표2_대분류": t2, "표2_중분류": t2, "검색어": w, "시설키": k, "시설명_후보": nm, "수요기관": "O", "공고건수": 1, "최초공고일": "2024-01-01",
+                                         "최종공고일": "2024-02-01", "사업유형": "신축", "공고명_예시": nm + " 건립공사", "검수_포함여부": inc, "검수_시설명": nm, "검수_별칭(;구분)": "",
+                                         "검수_수요기관": "O", "검수_메모": ""}
+    ag = pd.DataFrame([mk("가", "공연장", "A", "에이 공연장"), mk("가", "공연장", "D", "디 공연장"), mk("나", "주차장", "B", "비 주차장"), mk("나", "주차장", "C", "씨 주차장")])
+    # 검수자가 B 를 대표로 두고 A 와 없어진 Z 를 같은 번호로 합친 뒤 줄 순서를 바꿔 둔 파일(Z, B, C, A 순). D 는 이번에 새로 잡힌, B 와 같은 시설의 다른 검색어 행
+    pv = pd.DataFrame([dict(mk("다", "옛", "Z", "지 옛시설"), 시설ID="F0002", 공고명_예시=None), dict(mk("나", "주차장", "B", "비 주차장"), 시설ID="F0002"),
+                       dict(mk("나", "주차장", "C", "씨 주차장"), 시설ID="F0003"), dict(mk("가", "공연장", "A", "에이 공연장"), 시설ID="F0002")])
+    ag.loc[1, "시설키"] = "B"                                               # ('공연장', B) = F0002 의 다른 검색어 행
+    out = discover._keep_review(ag, pv)
+    assert list(out["시설ID"]) == ["F0002", "F0002", "F0002", "F0002", "F0003"], list(out["시설ID"])
+    assert list(out["검수_시설명"]) == ["지 옛시설", "비 주차장", "에이 공연장", "비 주차장", "씨 주차장"], ("합친 묶음은 첫 행 자리에 모아 이전 파일 순서대로(Z, B, A), 새 검색어 행은 묶음의 뒤", list(out["검수_시설명"]))
+    assert out[discover.STATUS_COL][0].startswith("이번 후보에 없음") and out[discover.STATUS_COL][3].startswith("신규 행(같은 시설 F0002") and list(out["검색어"][:4]) == ["옛", "주차장", "공연장", "공연장"]
+    again = discover._keep_review(ag, out)                                # 한 번 더 돌려도 줄 순서까지 그대로
+    assert list(again["검수_시설명"]) == list(out["검수_시설명"]) and list(again["시설ID"]) == list(out["시설ID"]) and list(again["검색어"]) == list(out["검색어"])
+    solo = discover._keep_review(ag, pv.assign(시설ID=["F0009", "F0002", "F0003", "F0008"]))   # 번호가 겹치지 않으면 줄 순서는 후보 순서 그대로, 없어진 행은 끝
+    assert list(solo["시설키"]) == ["A", "B", "B", "C", "Z"] and list(solo["시설ID"]) == ["F0008", "F0002", "F0002", "F0003", "F0009"], solo[["시설ID", "시설키"]]
+
+
 def test_institution_prefix():
     """단지명 없는 시설명은 수요기관 지자체명을 접두하고, 재검색은 접두어를 뗀 패턴으로도 공고를 찾는다."""
     from g2b_costdb.classify import is_generic_facility_name, prefix_institution, short_institution, strip_institution_prefix
@@ -737,6 +994,26 @@ def test_institution_prefix():
     hits = discover.research_by_facility(std, rev)
     assert set(hits["공고번호"]) == {"G1", "G2"}, ("접두어를 뗀 '국민임대아파트'로 구례군 공고만 재검색", set(hits["공고번호"]))
     assert (hits["시설명"] == "구례군 국민임대아파트").all()
+
+
+def test_discover_new_row_hints():
+    """새 후보의 단서: 같은 이름의 시설이 다른 수요기관 이름으로 이미 있으면 알린다(기관 이름이 바뀐 경우). 새 검색어 행은 그 시설이 쓰던 이름을 그대로 쓴다."""
+    mk = lambda w, k, org, nm, first="2024-01-01": {"표2_대분류": "X", "표2_중분류": "x", "검색어": w, "시설키": k, "시설명_후보": nm, "수요기관": org, "공고건수": 1, "최초공고일": first,
+                                                   "최종공고일": first, "사업유형": "신축", "공고명_예시": nm + " 건립공사", "검수_포함여부": "포함", "검수_시설명": nm, "검수_별칭(;구분)": "",
+                                                   "검수_수요기관": org, "검수_메모": ""}
+    pv = pd.DataFrame([dict(mk("안식의 집", "제2안식의집", "강원도 춘천시", "제2안식의 집"), 시설ID="F0001", 검수_포함여부="제외"),
+                       dict(mk("k1", "K", "O", "케이 옛이름"), 시설ID="F0002", 검수_시설명=None)])
+    ag = pd.DataFrame([mk("k1", "K", "O", "케이 새이름"), mk("k2", "K", "O", "케이 새이름"), mk("안식의 집", "제2안식의집", "강원특별자치도 춘천시", "제2안식의 집", "2026-09-01"),
+                       mk("k1", "전혀다른곳", "강원특별자치도 춘천시", "전혀 다른 곳", "2026-09-01")])
+    out = discover._keep_review(ag, pv)
+    st = list(out[discover.STATUS_COL])
+    assert st[2] == "신규 / 이름이 같은 기존 시설: F0001 (수요기관 '강원도 춘천시') → 같은 시설이면 '제외' 하거나 시설ID 를 그 번호로" and st[3] == "신규", st
+    assert list(out["검수_시설명"][:2]) == ["케이 옛이름"] * 2 and list(out["시설ID"][:2]) == ["F0002"] * 2 and st[1].startswith("신규 행(같은 시설 F0002"), out[["시설ID", "검수_시설명"]]
+    old = discover._keep_review(pd.DataFrame([mk("k1", "N", "O", "엔", "2023-06-01")]), pv)
+    assert old[discover.STATUS_COL][0].startswith("신규(예전 공고가 있음: 뒤늦게 수집된 공고이거나"), old[discover.STATUS_COL][0]
+    # 확인하지 않은 채 한 번 더 돌려도 새 시설 표시와 단서는 '지난번: ' 을 붙여 남는다(같은 이름 단서 포함)
+    again = discover._keep_review(ag, out)
+    assert list(again[discover.STATUS_COL])[2] == "지난번: 신규 / 지난번: 이름이 같은 기존 시설: F0001 (수요기관 '강원도 춘천시') → 같은 시설이면 '제외' 하거나 시설ID 를 그 번호로", list(again[discover.STATUS_COL])
 
 
 def test_research_fallback_and_merge():
@@ -2993,6 +3270,9 @@ def run():
         test_collector_review(tmp)
         test_classify()
         test_discover_and_dedup(tmp)
+        test_discover_keeps_review(tmp)
+        test_discover_keeps_merged_row_order()
+        test_discover_new_row_hints()
         test_institution_prefix()
         test_research_fallback_and_merge()
         test_research_other_orders()

@@ -196,12 +196,87 @@ def stage_collect(cfg):
         print("[안내] 낙찰정보(낙찰금액·낙찰률)는 config.yaml api.use_awards: true 로 켜면 함께 수집됩니다(낙찰정보서비스 활용신청 필요)")
 
 
-def stage_discover(cfg, fresh: bool = False):
+def _backup_review_file(path: str) -> Optional[str]:
+    """검수 파일을 덮어쓰기 전에 같은 폴더에 사본을 남긴다(사람이 한 검수는 다시 만들 수 없다). 파일이 없으면 None."""
+    if not os.path.exists(path):
+        return None
+    from datetime import datetime
+    root, ext = os.path.splitext(path)
+    bak = f"{root}.이전_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+    n = 1
+    while os.path.exists(bak):                       # 같은 초에 두 번 돌려도 앞 사본을 덮어쓰지 않는다
+        n += 1
+        bak = f"{root}.이전_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{n}{ext}"
+    try:
+        shutil.copy2(path, bak)
+    except OSError:
+        try:
+            os.remove(bak)                           # 쓰다 만 사본을 '사본' 이름으로 남기지 않는다
+        except OSError:
+            pass
+        raise
+    return bak
+
+
+def _check_review_file(out: str) -> pd.DataFrame:
+    """이전 검수 파일을 읽어 돌려준다(없으면 빈 표). 이어받을 수 없는 파일이면 덮어쓰기 전에 멈춘다:
+    머리글이 망가진 파일(첫 줄 위에 줄을 넣음·열 이름을 고침·열을 지움·열을 복사해 같은 이름이 둘)은 말없이 진행하면 검수 내용이 기본값으로 돌아가고,
+    Excel 에 열려 있는 파일은 마지막 덮어쓰기에서 실패한다."""
+    try:
+        prev = discover.read_review_file(out)
+        if os.path.exists(out):
+            with open(out, "r+b"):                   # 쓰기 가능한지만 본다(내용은 건드리지 않음). Excel 이 열고 있으면 Windows 가 여기서 막는다
+                pass
+    except PermissionError:
+        raise SystemExit(_excel_busy(out))
+    problem = discover.review_file_problem(prev)
+    if problem:
+        names = ", ".join(str(c) for c in list(prev.columns)[:6])
+        raise SystemExit(f"[중단] 이전 검수 파일 '{out}' 의 {problem}(첫 줄에서 읽은 이름: {names} …). "
+                         "이대로 다시 만들면 시설ID 와 검수 내용을 이어받지 못하므로 멈췄습니다(검수 파일은 그대로입니다). "
+                         "머리글 위에 줄을 넣었는지, 열 이름을 고쳤는지, 열을 지우거나 복사했는지, 정렬할 때 머리글 줄이 자료 사이로 들어갔는지 확인해 되돌린 뒤 다시 실행하세요. "
+                         "검수 내용을 버리고 처음부터 새로 만들려면 이 파일의 이름을 바꿔 둔 뒤 실행하세요.")
+    return prev
+
+
+def _review_change_report(agg: pd.DataFrame) -> None:
+    """discover 를 다시 돌린 뒤 검수자가 볼 행을 화면에 요약한다(갱신_표시 열)."""
+    col = discover.STATUS_COL
+    if col not in agg.columns:
+        return
+    st = agg[col].map(lambda v: "" if discover._blank(v) else str(v))
+    kinds = [("신규 행(", "이미 있는 시설의 다른 검색어로 새로 생긴 행(검수 값은 그 시설과 같게 둠)"), ("신규", "새 시설(기본값 확인)"),
+             ("확인:", "사업유형이 달라져 기본값이 지금 값과 다른 행(값은 그대로 둠)"),
+             ("후보 이름 바뀜", "이름 정리 규칙이 바뀐 행(검수_시설명은 그대로)"), ("시설키 바뀜", "시설키만 바뀐 행"),
+             ("이번 후보에 없음", "이번 후보에 없어 이전 내용 그대로 남긴 행"),
+             (discover.PREV_MARK.strip(), "지난 실행 때 표시됐고 그 뒤 노란 칸이 그대로인 행(이미 확인했으면 넘어가도 됩니다)")]
+    first = lambda part: next((k for k, _ in kinds if part.strip().startswith(k)), None)     # 한 표시는 먼저 맞는 한 종류에만 센다('신규 행(' 을 '신규' 로 세지 않게)
+    lines = []
+    for key, label in kinds:
+        m = st.map(lambda x: any(first(part) == key for part in x.split(" / ")))
+        if m.any():
+            lines.append((label, agg[m]))
+    if not lines:
+        print(f"이전 검수 파일과 달라진 행 없음('{col}' 열이 모두 빈칸)")
+        return
+    print(f"\n[검수 파일 갱신] 이전 행의 시설ID·노란 칸은 그대로 두었습니다. '{col}' 열에 글이 있는 행만 보시면 됩니다:")
+    for label, sub in lines:
+        print(f"  · {label}: {len(sub)}행")
+        for _, r in sub.head(15).iterrows():
+            nm = next((str(v) for v in (r.get("검수_시설명"), r.get("시설명_후보")) if not discover._blank(v)), "")[:28]
+            print(f"      {r['시설ID']} {nm} [{str(r.get('검수_포함여부') or '')}] : {str(r[col])[:110]}")    # '—' 는 cp949 화면에서 '?' 로 찍힌다
+        if len(sub) > 15:
+            print(f"      … 외 {len(sub) - 15}행")
+
+
+def stage_discover(cfg, fresh: bool = False, recalc: bool = False):
     for prefix, label in (("notices_", "공고"), ("bsis_", "기초금액")) + ((("award_", "낙찰"),) if cfg["api"].get("use_awards") else ()):
         miss = collect.incomplete_months(cfg, prefix)
         if miss:
             print(f"[경고] {label} 수집 미완료 월 {len(miss)}개 ({', '.join(miss[:8])}{' …' if len(miss) > 8 else ''}) — "
                   f"부분 데이터로 후보를 만듭니다. 전체 결과가 필요하면 collect 를 먼저 완료하세요.")
+    out = os.path.join(cfg["paths"]["out_dir"], "facility_candidates.xlsx")
+    _check_review_file(out)                          # 몇 분 걸리는 계산을 하기 전에: 이어받을 수 없는 파일이거나 Excel 에 열려 있으면 바로 멈춘다
     raw = _read_raw_notices(cfg)
     bsis_path = _p(cfg, "bsis_all.parquet")
     bsis = pd.read_parquet(bsis_path) if os.path.exists(bsis_path) else None
@@ -211,26 +286,64 @@ def stage_discover(cfg, fresh: bool = False):
     if awards is not None:
         print(f"낙찰정보 연결: 공고 {int(std['낙찰금액_API'].notna().sum())}건에 낙찰금액 부여 (낙찰 목록 {len(awards)}건)")
     std.to_parquet(_p(cfg, "notices_std.parquet"), index=False)
-    out = os.path.join(cfg["paths"]["out_dir"], "facility_candidates.xlsx")
-    try:
-        prev = discover.read_review_file(out)
-    except PermissionError:
-        raise SystemExit(_excel_busy(out))
-    if fresh and prev is not None and not prev.empty:
+    prev = _check_review_file(out)                   # 계산하는 동안 파일이 바뀌었을 수 있으므로 쓰기 직전에 다시 읽는다
+    had_prev = prev is not None and not prev.empty
+    if fresh and had_prev:
         print("[--fresh] 이전 검수 파일에서 시설ID만 이어받고 검수 칸은 모두 새 기본값으로 채웁니다")
-    agg = discover.discover_candidates(std, previous_review=prev, ids_only=fresh)
+    elif recalc and had_prev:
+        print("[--recalc] 손대지 않은 검수 칸(기본값 그대로이던 칸)은 새 규칙의 기본값으로 다시 계산합니다 — 검수를 마친 파일에는 쓰지 마세요")
+    agg = discover.discover_candidates(std, previous_review=prev, ids_only=fresh, recalc=recalc)
     if agg.empty:
         raise SystemExit("후보 시설 0건 — keywords.yaml 의 검색어(include)를 넓히거나 수집 기간을 확인하세요.")
+    try:
+        bak = _backup_review_file(out)
+    except OSError as e:
+        raise SystemExit(f"[중단] 이전 검수 파일의 사본을 만들지 못했습니다({e}). 검수 파일은 그대로 두었습니다 — 파일이 Excel 에 열려 있으면 닫고 다시 실행하세요.")
+    if bak:
+        print(f"이전 검수 파일 사본: {bak}")
     try:
         discover.write_review_workbook(agg, out)
     except PermissionError:
         raise SystemExit(_excel_busy(out))
-    print(f"공고 {len(std)}건 중 후보 시설 {len(agg)}개 → {out} 에서 검수(노란 셀) 후 `research` 실행")
+    except OSError as e:
+        raise SystemExit(f"[중단] 검수 파일을 새로 쓰지 못했습니다({e}). 이전 검수 파일은 그대로입니다 — 디스크 여유 공간을 확인한 뒤 같은 명령을 다시 실행하세요.")
+    if had_prev and not fresh and not recalc:
+        _review_change_report(agg)
+    n_gone = int(agg[discover.STATUS_COL].map(lambda v: str(v).startswith("이번 후보에 없음")).sum()) if discover.STATUS_COL in agg.columns else 0
+    kept = f"(이번 후보에 없어 남겨 둔 {n_gone}행은 따로)" if n_gone else ""
+    print(f"공고 {len(std)}건 중 후보 시설 {len(agg) - n_gone}개{kept} → {out} 에서 검수(노란 셀) 후 `research` 실행")
     print("표2 대분류별 시설 수:\n" + agg.groupby("표2_대분류").size().to_string())
     print("사업유형별 시설 수:\n" + agg.groupby("사업유형").size().to_string())
 
 
+def _std_behind_collect(cfg) -> int:
+    """수집된 공고 수(notices_all) − 전량 표의 공고 수(notices_std). collect 뒤에 discover 를 다시 돌리지 않으면 0 보다 크다. 셀 수 없으면 0."""
+    try:
+        import pyarrow.parquet as pq
+        return int(pq.ParquetFile(_p(cfg, "notices_all.parquet")).metadata.num_rows) - int(pq.ParquetFile(_p(cfg, "notices_std.parquet")).metadata.num_rows)
+    except Exception:  # noqa: BLE001 — 알림용이라 파일이 없거나 읽지 못하면 조용히 넘어간다
+        return 0
+
+
+def _collect_after_discover(cfg) -> bool:
+    """collect 가 만든 표(공고·기초금액·낙찰)가 전량 표(notices_std)보다 나중에 쓰였는지. 건수가 같아도 뒤늦게 올라온 기초금액·낙찰 정보나
+    다시 받은 달의 공고는 discover 를 다시 돌려야 전량 표에 들어간다. 알 수 없으면 False."""
+    try:
+        std_t = os.path.getmtime(_p(cfg, "notices_std.parquet"))
+        return any(os.path.exists(_p(cfg, n)) and os.path.getmtime(_p(cfg, n)) > std_t + 1
+                   for n in ("notices_all.parquet", "bsis_all.parquet", "award_all.parquet"))
+    except OSError:
+        return False
+
+
 def stage_research(cfg):
+    behind = _std_behind_collect(cfg)
+    if behind > 0:
+        print(f"[주의] 수집된 공고가 전량 표(notices_std)보다 {behind:,}건 많습니다 — collect 뒤에 discover 를 다시 돌리지 않았습니다. "
+              "이번 재검색은 이전 전량 표로 진행합니다. 늘어난 공고를 넣으려면 discover(이전 검수 내용은 그대로 둠) → 새 후보 검수 → research 순서로 다시 실행하세요.")
+    elif _collect_after_discover(cfg):
+        print("[안내] collect 를 마지막 discover 보다 나중에 실행했습니다. 그 사이 기초금액·낙찰 정보가 더 올라왔거나 다시 받은 달이 있으면 "
+              "discover 를 다시 실행해야 전량 표에 들어갑니다(이전 검수 내용은 그대로 둠). 이번 재검색은 지금의 전량 표로 진행합니다.")
     std = _read(cfg, "notices_std.parquet")
     review_path = os.path.join(cfg["paths"]["out_dir"], "facility_candidates.xlsx")
     try:
@@ -1542,6 +1655,7 @@ def main(argv=None):
     ap.add_argument("--config", default=None)
     ap.add_argument("--ym", default="2026-08", help="probe 대상 월(YYYY-MM)")
     ap.add_argument("--fresh", action="store_true", help="discover: 이전 검수 파일의 시설ID 만 이어받고 검수 칸은 새 기본값으로(검수 시작 전 규칙이 바뀌었을 때)")
+    ap.add_argument("--recalc", action="store_true", help="discover: 손대지 않은 검수 칸만 새 규칙의 기본값으로 다시 계산(검수 시작 전). 기본 동작은 이전 행의 시설ID·검수 칸을 그대로 둠")
     ap.add_argument("--retry-failed", dest="retry_failed", action="store_true", help="attach: 추출 실패 파일이 있는 공고를 텍스트가 있어도 다시 처리(HWP 백엔드 설치 뒤 일괄 재시도)")
     ap.add_argument("--report", action="store_true", help="attach: 처리 없이 첨부 결과 요약과 텍스트 없는 공고의 원인만 출력")
     ap.add_argument("--limit", type=int, default=None, help="extract: 건축 공종·추정가격 큰 순으로 N건만(시범 추출용)")
@@ -1586,7 +1700,7 @@ def main(argv=None):
     elif a.stage == "extract-extra":
         stage_extract_extra(cfg, yes=a.yes, batch=a.batch, limit=a.limit, refetch=a.refetch, only=a.only)
     elif a.stage == "discover":
-        stage_discover(cfg, fresh=a.fresh)
+        stage_discover(cfg, fresh=a.fresh, recalc=a.recalc)
     elif a.stage == "attach":
         stage_attach(cfg, retry_failed=a.retry_failed, report_only=a.report)
     else:

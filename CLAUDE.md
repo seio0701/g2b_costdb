@@ -35,7 +35,7 @@ Excel 공사비 DB(`output/공사비DB.xlsx`)를 만드는 파이프라인이다
 | doctor | 파이썬 3.10+, 필수 패키지 OK, `G2B_SERVICE_KEY` 설정됨, 네트워크 연결 OK | 없는 패키지 설치, 키 없으면 setx 안내 후 중단 |
 | probe | 공고·기초금액·면허제한 표본 출력, `[매핑 OK]` 또는 `[매핑 확인 필요]` 목록. `api.use_awards: true` 면 낙찰 표본과 `[award_*]` 매핑 상태 | 존재하지 않는 매핑만 실제 필드명으로 수정, 변경 내역을 사용자에게 표로 보고. 면허제한 오류 10/11 이면 `api.license_query.inqryDiv` 조정. 낙찰 덩어리만 20/30 이면 활용신청·`api.award_base_url` 확인 안내 |
 | collect | `data/notices_all.parquet`, `data/bsis_all.parquet`(+ `use_awards` 면 `data/award_all.parquet`) 생성, 월별 건수 로그, 끝에 `[완료]` 또는 `[미완료] … 남은 월` | 오류코드 30/20 → 키·승인 문제 안내(코드가 한국어로 설명) / 22 또는 예산 도달 → 내일 재실행 |
-| discover | `output/facility_candidates.xlsx` 생성, 시설 수·대분류별·사업유형별 건수 보고, 상위 20개 시설명 미리보기. 재실행 시 기존 검수 내용은 유지됨 | 후보 0건이면 keywords.yaml include 확장 제안(사용자 확인 후 적용). `[경고] 수집 미완료 월`이 보이면 사용자에게 알림 |
+| discover | `output/facility_candidates.xlsx` 생성, 시설 수·대분류별·사업유형별 건수 보고, 상위 20개 시설명 미리보기. 재실행 시 이전 행의 시설ID·검수 칸은 적혀 있던 그대로 둔다(달라진 행은 `갱신_표시` 열과 화면 요약, 덮어쓰기 전 사본 자동 보관. 검수를 마친 파일에 `--recalc`·`--fresh` 를 쓰지 않는다) | 후보 0건이면 keywords.yaml include 확장 제안(사용자 확인 후 적용). `[경고] 수집 미완료 월`이 보이면 사용자에게 알림 |
 | research | `data/notices_research.parquet`, 시설당 공종 분포(건축/전기/정보통신/소방) 보고 | 검수 Excel 미저장·열림 상태 확인 |
 | dedup | "전체 N건 → 대표 M건" 보고, 경고 건 요약 | — |
 | attach | `07` 추출노트 기준 파일 성공률 보고. HWP 실패율 20% 초과 시 pyhwp/한컴 COM 폴백 점검 | 배포용 HWP는 목록만 정리해 사용자에게 수동 처리 안내 |
