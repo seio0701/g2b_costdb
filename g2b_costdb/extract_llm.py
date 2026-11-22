@@ -596,6 +596,27 @@ def extract_trades_with_claude(snippet: str, api_hint: Dict, cfg_llm: Dict, max_
     return data
 
 
+def inside_total_rows(items: List[Dict], total: Optional[float], trade_sum: float) -> Tuple[float, bool]:
+    """집계표 합계 안에 든 것으로 볼 비공종 행의 합과, 그렇게 보면 (공종 행 합 + 그 행들)이 합계와 1% 안에서 맞는지 → (합, 맞음).
+    공통가설·간접비 행은 늘 합계 안으로 본다. 관급자재·부가세·배분제외(이설비·분담금) 행은 합계 안에 든 것일 수도, 합계 밖에 따로 적힌 것일 수도 있다
+    ('관급자재 제외' 집계표 옆의 관급 행, 도급자 설치분만 든 합계, 합계 밖의 조달수수료) → 행마다 넣고 뺀 조합 가운데 합계에 가장 가까운 것을 고른다.
+    예전에는 이 행들을 늘 모두 합계 안으로 보아, 스스로 맞아떨어지는 문서가 '공종 행 합 불일치'·'146% — 중복 의심' 으로 판정됐다(2026-11-21: 26건·4건)."""
+    mand = sum(i["금액_원"] for i in items if i["공종"] in ("공통가설", "간접비"))
+    opt = [i["금액_원"] for i in items if i["공종"] in ("관급자재", "부가세", "배분제외") and i["금액_원"]]
+    if not total:
+        return mand + sum(opt), False
+    sums = {0.0}
+    if len(opt) <= 12:
+        for v in opt:
+            sums |= {x + v for x in sums}
+    else:                                              # 행이 아주 많으면 라벨 단위로만 넣고 뺀다
+        for lab in ("관급자재", "부가세", "배분제외"):
+            v = sum(i["금액_원"] for i in items if i["공종"] == lab)
+            sums |= {x + v for x in sums}
+    best = min(sums, key=lambda x: abs(trade_sum + mand + x - total))
+    return mand + best, abs(trade_sum + mand + best - total) <= total * 0.01
+
+
 def cross_verify_trades(bid_no: str, api_row: Dict, tdoc: Dict, vat: float = 0.10) -> List[Dict]:
     """2차 추출 정합성: 공종 합 vs 집계표 합계, 집계표 합계의 금액 기준(부가세 포함/제외/직접공사비/천원 단위) 판별."""
     logs: List[Dict] = []
@@ -606,10 +627,10 @@ def cross_verify_trades(bid_no: str, api_row: Dict, tdoc: Dict, vat: float = 0.1
         return logs
     gross = tsum
     if gross is not None:
-        gross += sum(i["금액_원"] for i in items if i["공종"] in ("공통가설", "간접비", "관급자재", "부가세"))
-        excl = sum(i["금액_원"] for i in items if i["공종"] == "배분제외")
-        if total and excl:                              # 이설비·분담금 같은 배분제외 행은 집계표 총합에 들어 있을 수도, 빠져 있을 수도 → 합계에 가까운 쪽
-            gross = min((gross, gross + excl), key=lambda v: abs(v - total))
+        if total:
+            gross += inside_total_rows(items, total, tsum)[0]        # 합계 안에 든 것으로 볼 비공종 행(조합 가운데 합계에 가장 가까운 것)
+        else:
+            gross += sum(i["금액_원"] for i in items if i["공종"] in ("공통가설", "간접비", "관급자재", "부가세"))
     if total and gross:
         r = (gross - total) / total
         logs.append({"공고번호": bid_no, "항목": "공종합=집계표합계", "API값": total, "문서값": gross, "차이": gross - total, "차이율": round(r, 5),
@@ -637,12 +658,21 @@ def cross_verify_trades(bid_no: str, api_row: Dict, tdoc: Dict, vat: float = 0.1
         doc_cands = [(base, "집계표 합계"), (base - gov_doc, "집계표 합계 − 관급자재"), (base - vat_doc, "집계표 합계 − 부가세"),
                      (base - gov_doc - vat_doc, "집계표 합계 − 관급 − 부가세")]
         api_cands = []
-        for av, an in ((api_b, "기초금액(부가세 포함)"), (api_p, "추정가격(부가세 제외)")):
+        g1_api = _num(api_row.get("도급자관급액_API")) or 0
+        # 기초금액이 없는 공고(대형 통합발주에 많다)는 추정가격 + 부가세가 04 의 기초금액 기준 합계다 — 이 후보가 없으면 부가세 포함 집계표가
+        # 어느 API 값과도 맞지 않아 '불일치' 경고와 배분적용 N 이 붙었다(2026-11-21: 가장 큰 통합발주 건축 공고 7건, 참고 배분 약 1,500억 공란)
+        vat_base = (api_p * (1 + vat), "추정가격 + 부가세(기초금액 없음)") if api_p and not api_b else (None, "")
+        # 기초금액이 추정가격 + 부가세와 다른 공고(조달청 조사금액 기준)는 문서가 추정가격 + 부가세(추정금액)로 적은 집계표도 있다
+        vat_est = (api_p * (1 + vat), "추정가격 + 부가세") if api_p and api_b and abs(api_p * (1 + vat) - api_b) > api_b * 0.01 else (None, "")
+        exact_only = []                                 # 1% 안에서 맞을 때만 인정하는 후보. 3% '근접' 판정에는 쓰지 않는다 — 후보가 늘수록 근접 창이 이어져
+        for av, an in ((api_b, "기초금액(부가세 포함)"), (api_p, "추정가격(부가세 제외)"), vat_base, vat_est):      # 다른 차수·다른 공사의 집계표도 통과한다
             if av:                                      # 값이 없는 API 항목은 후보에서 뺀다(없는 기초금액 + 관급 = 관급만 남는 가짜 후보 방지)
-                api_cands.append((av, an))
+                (exact_only if an == vat_est[1] else api_cands).append((av, an))
                 if gov_api:
-                    api_cands.append((av + gov_api, an.split("(")[0] + " + 관급자재(API)"))
-        match = next(((dn, an) for dv, dn in doc_cands for av, an in api_cands if dv and av and near(dv, av)), None)
+                    (exact_only if an == vat_est[1] else api_cands).append((av + gov_api, an.split("(")[0] + " + 관급자재(API)"))
+                if g1_api and g1_api != gov_api:        # 추정금액 = 추정가격 + 부가세 + 도급자설치 관급자재(관급자 설치분은 빼고 적은 집계표)
+                    exact_only.append((av + g1_api, an.split("(")[0] + " + 도급자관급(API)"))
+        match = next(((dn, an) for dv, dn in doc_cands for av, an in api_cands + exact_only if dv and av and near(dv, av)), None)
         close = match or next(((dn, an) for dv, dn in doc_cands for av, an in api_cands if dv and av and near(dv, av, 0.03)), None)
         if match:
             verdict, note = "참고", f"{match[0]} = {match[1]}"
@@ -805,6 +835,61 @@ def _gap_hint(a: float, d: float, vat: float = 0.10, item: str = "", sib: Option
     return f"API값과 문서값이 5% 넘게 다름 — 변경공고로 금액이 바뀌었거나 문서에서 다른 금액을 읽었을 수 있음({use}, 공고문 확인)"
 
 
+def gov_misreads(api_row: Dict, doc: Dict, vat: float = 0.10) -> Dict[str, str]:
+    """문서의 도급자관급액·관급자관급액 가운데 관급자재 금액이 아닌 것을 읽은 것으로 보이는 항목 → {필드: 까닭('기초금액과 같은 금액' 등)}.
+    공고문의 '도급액(도급비) ○원, 관급액 ○원' 을 LLM 이 도급자관급액으로 옮기는 일이 있다(2026-11-21 실자료: 고유 공고 4,858건 중 59건.
+    그중 API 에 관급 금액이 없어 04 합계에 그대로 더해진 28건이 71억 과다 — 대부분 합계가 두 배). 관급자재 금액이 그 공고의 기초금액·추정가격과
+    원 단위까지 같을 수는 없으므로, 같으면(±0.01% 또는 1천원) 공사 금액을 읽은 것으로 본다. 관급자관급액은 부가세액과 같은 경우도 본다
+    (추정가격·부가세를 두 관급 칸에 나눠 적은 사례). 문서의 총공사금액과 같은 값도 관급이 아니다.
+    문서의 총공사금액이 두 관급액의 합과 같으면(도급 2,023,680천원 + 관급 578,720천원 = 사업비 2,602,400천원) 총액 안에 도급 공사비가 들어갈 자리가 없으므로
+    도급자관급액 쪽이 도급 금액이다 — API 기초금액과 값이 달라 위 비교에 걸리지 않는 경우(기초금액의 80~125% 일 때만: 관급 소계를 총액으로 읽은 문서와 구분).
+    단, 문서의 총공사금액이 (기초금액 + 두 관급액)과 1% 안에서 맞으면 문서 스스로 그 금액을 따로 더한 것이므로 손대지 않는다
+    (관급자재가 우연히 기초금액과 비슷한 대형 공사). 빼면 문서의 총공사금액에서 더 멀어지는 경우도 손대지 않는다."""
+    g1, g2 = _num(doc.get("도급자관급액_원")), _num(doc.get("관급자관급액_원"))
+    if not g1 and not g2:
+        return {}
+    api_p, api_b, api_v = _num(api_row.get("추정가격")), _num(api_row.get("기초금액")), _num(api_row.get("부가세_API"))
+    doc_p, doc_b, doc_v = _num(doc.get("추정가격_원")), _num(doc.get("기초금액_원")), _num(doc.get("부가가치세_원"))
+    tot = _num(doc.get("총공사금액_원"))
+    p, b = api_p or doc_p, api_b or doc_b
+    base = b or (p * (1 + vat) if p else None)
+    if tot and base and abs(tot - (base + (g1 or 0) + (g2 or 0))) <= tot * 0.01:
+        return {}
+    same = lambda a, c: bool(a) and bool(c) and abs(a - c) <= max(1000.0, abs(c) * 0.0001)
+    own = [("기초금액과 같은 금액", api_b), ("추정가격과 같은 금액", api_p), ("추정가격+부가세와 같은 금액", round(api_p * (1 + vat)) if api_p else None),
+           ("문서의 기초금액과 같은 금액", doc_b), ("문서의 추정가격과 같은 금액", doc_p),
+           # 문서의 총공사금액이 기준 금액의 80% 에도 못 미치면 이 공고의 총액이 아니다(관급 소계 등을 총액 칸에 적은 문서 — 실자료 4,362건 중 2건) → 견주지 않는다
+           ("문서의 총공사금액과 같은 금액", tot if (tot and (not base or tot >= base * 0.8)) else None)]
+    vats = [("부가세와 같은 금액", api_v), ("문서의 부가세와 같은 금액", doc_v),
+            ("부가세(기초금액−추정가격)와 같은 금액", (api_b - api_p) if api_b and api_p else None)]
+    out: Dict[str, str] = {}
+    for key, g, cands in (("도급자관급액_원", g1, own), ("관급자관급액_원", g2, own + vats)):
+        hit = next((name for name, v in cands if same(g, v)), None) if g else None
+        if hit:
+            out[key] = hit
+    if g1 and g2 and tot and base and "도급자관급액_원" not in out and abs(tot - (g1 + g2)) <= tot * 0.001 and 0.8 <= g1 / base <= 1.25:
+        out["도급자관급액_원"] = "문서의 총공사금액에서 관급자관급액을 뺀 금액(총액 = 이 값 + 관급자관급액)"
+    if out and tot and base and tot <= (base + (g1 or 0) + (g2 or 0)) * 1.25:
+        # 빼면 문서가 적은 총공사금액에서 오히려 더 멀어지는 경우는 손대지 않는다(두 칸에 추정가격·부가세가 들어 있지만 실제 관급이 따로 있는 문서 —
+        # 2026-11-21 실자료 20240827868: 문서 총액 4,231만, 더하면 4,613만(+9%), 빼면 2,307만(−45%)). 06 '총공사금액=기초금액+관급' 경고로 남는다
+        # 문서 총액이 (기준 + 두 칸)보다도 25% 넘게 크면 이 공고의 총액이 아니다(여러 공종을 합친 총사업비 — 실자료 4,362건 중 5건) → 이 판단을 하지 않는다:
+        # 그대로 두면 기초금액과 원 단위까지 같은 '도급액' 이 총사업비에 '더 가깝다' 는 까닭으로 남아 합계가 두 배가 된다
+        kept = sum(g for k, g in (("도급자관급액_원", g1 or 0), ("관급자관급액_원", g2 or 0)) if k not in out)
+        if abs(tot - (base + kept)) > abs(tot - (base + (g1 or 0) + (g2 or 0))):
+            return {}
+    return out
+
+
+def gov_kept(api_row: Dict, doc: Dict, vat: float = 0.10) -> Dict[str, str]:
+    """기초금액·추정가격·부가세와 같은 금액인데도 문서의 총공사금액 때문에 그대로 둔 관급 항목 → {필드: 까닭}.
+    API 관급이 없으면 이 값이 04 에 실리는데 관급자재 금액이 아닐 수 있으므로 06 에 따로 경고로 적는다(cross_verify) — 06 '총공사금액=기초금액+관급' 경고는
+    1천 건이 넘어(2026-11-21 실자료 4,362행 중 1,179행) 그 줄만으로는 이런 공고를 찾을 수 없다(실자료: 걸리는 값은 4개 공고·5개,
+    그중 API 관급이 없어 04 에 실리는 것은 20240827868 의 두 값)."""
+    bad = gov_misreads(api_row, doc, vat)
+    raw = gov_misreads(api_row, {k: v for k, v in doc.items() if k != "총공사금액_원"}, vat)
+    return {k: v for k, v in raw.items() if k not in bad}
+
+
 def cross_verify(bid_no: str, api_row: Dict, doc: Dict, warn_ratio: float = 0.005, vat: float = 0.10) -> List[Dict]:
     """API 값과 문서 추출값 비교 → 검증로그 rows. 숫자가 문자열/NaN 이어도 안전."""
     logs: List[Dict] = []
@@ -862,9 +947,23 @@ def cross_verify(bid_no: str, api_row: Dict, doc: Dict, warn_ratio: float = 0.00
     fl = _num(doc.get("지상층수"))
     if fl is not None and fl > 60:
         logs.append({"공고번호": bid_no, "항목": "층수 범위", "문서값": fl, "판정": "경고", "비고": "층수 오독 의심"})
+    bad = gov_misreads(api_row, doc, vat)      # 도급액·부가세를 관급 칸으로 읽은 값: 04 에 싣지 않고(assemble_trade_table), 여기에는 까닭을 남긴다
+    kept = gov_kept(api_row, doc, vat)         # 같은 금액이지만 문서의 총공사금액 때문에 그대로 실은 값: 무엇을 확인할지 적는다
     for item, ak, dk in (("도급자관급액", "도급자관급액_API", "도급자관급액_원"), ("관급자관급액", "관급자관급액_API", "관급자관급액_원")):
         a, dv = _num(api_row.get(ak)), _num(doc.get(dk))
         if a is None and dv is None:
+            continue
+        if dk in bad:
+            whose = "" if bad[dk].startswith("문서의") else "이 공고의 "          # '이 공고의 문서의 총공사금액' 처럼 겹치지 않게
+            logs.append({"공고번호": bid_no, "항목": item, "API값": a, "문서값": dv, "판정": "경고",
+                         "비고": f"문서값이 {whose}{bad[dk]} — 공사 금액(도급액·부가세·총액)을 관급자재 금액으로 읽은 것으로 보아 "
+                                 f"04 에 싣지 않음(합계에 더하지 않음). 실제 관급자재가 있는지는 공고문 확인"})
+            continue
+        if dk in kept and not a:               # API 관급이 있으면 04 는 API 값을 쓴다 → 아래의 API·문서 비교 행(문서 값은 합계에 들어가지 않는다)
+            whose = "" if kept[dk].startswith("문서의") else "이 공고의 "
+            logs.append({"공고번호": bid_no, "항목": item, "API값": a, "문서값": dv, "판정": "경고",
+                         "비고": f"문서값이 {whose}{kept[dk]}이지만, 빼면 문서의 총공사금액에서 더 멀어져(또는 총공사금액이 이 값을 더한 금액과 맞아) "
+                                 f"04 에 그대로 실음 — 관급자재 금액이 맞는지 공고문 확인"})
             continue
         if a is not None and dv is not None and (a or dv):
             base = a if a else dv
@@ -875,7 +974,7 @@ def cross_verify(bid_no: str, api_row: Dict, doc: Dict, warn_ratio: float = 0.00
             logs.append({"공고번호": bid_no, "항목": item, "API값": a, "문서값": dv, "판정": "참고", "비고": "한쪽만 존재 → 존재하는 값 사용"})
     tot = _num(doc.get("총공사금액_원"))
     if tot and b:
-        comp = b + (_num(doc.get("도급자관급액_원")) or 0) + (_num(doc.get("관급자관급액_원")) or 0)
+        comp = b + sum((_num(doc.get(k)) or 0) for k in ("도급자관급액_원", "관급자관급액_원") if k not in bad)
         r = (tot - comp) / comp if comp else 0
         logs.append({"공고번호": bid_no, "항목": "총공사금액=기초금액+관급", "API값": comp, "문서값": tot, "차이": tot - comp,
                      "차이율": round(r, 5), "판정": "정상" if abs(r) <= 0.01 else "경고", "비고": "금액 구성 정합성"})

@@ -239,6 +239,35 @@ def _check_review_file(out: str) -> pd.DataFrame:
     return prev
 
 
+def _unreviewed_new_included(df: pd.DataFrame) -> pd.DataFrame:
+    """검수 파일에서 새로 잡힌 시설(갱신_표시가 '신규…' 또는 '지난번: 신규…', 같은 시설의 다른 검색어 행은 제외) 가운데 검수_포함여부가 '포함' 인 행.
+    discover 가 붙인 기본값 그대로 재검색에 들어가는 행이다 — 2026-11-21 PC 실행에서 검수 없이 research 가 이어져 새 시설 3개(그중 92억 공고 1건)가 그대로 실렸다."""
+    col = discover.STATUS_COL
+    if df is None or df.empty or col not in df.columns or "검수_포함여부" not in df.columns:
+        return pd.DataFrame(columns=["시설ID"])
+    def is_new(v):
+        # 표시는 ' / ' 로 이어진다. '신규' 가 맨 앞이 아닐 수도 있다: 지난 실행 때 새로 잡혀 아직 그대로인 행의 사업유형·시설키가 이번에 달라지면
+        # '확인: … / 지난번: 신규', '후보 이름 바뀜: … / 지난번: 신규' 가 된다 → 어느 자리에 있든 '신규' 면 새 시설이다
+        for part in ("" if discover._blank(v) else str(v)).split(" / "):
+            part = part.strip()
+            if part.startswith(discover.PREV_MARK):
+                part = part[len(discover.PREV_MARK):]
+            if part.startswith("신규") and not part.startswith("신규 행("):
+                return True
+        return False
+    one = lambda c: df[c].iloc[:, 0] if isinstance(df[c], pd.DataFrame) else df[c]     # 열을 복사해 같은 이름이 둘이어도 알림 때문에 멈추지 않는다(첫 열을 본다)
+    return df[(one(col).map(is_new) & one("검수_포함여부").map(lambda v: str(v).strip() == "포함")).to_numpy()]
+
+
+def _id_names(rows: pd.DataFrame, limit: int = 30) -> str:
+    """'F0006 한빛군 추모공원, F0003 새봄시 시립미술관 …' — 시설ID 만으로는 어느 줄인지 알기 어렵다(기존 시설의 번호로 합친 새 줄은 기존 시설의 번호로 나온다)."""
+    out = []
+    for _, r in rows.head(limit).iterrows():
+        nm = next((str(v).strip() for v in (r.get("검수_시설명"), r.get("시설명_후보")) if not discover._blank(v)), "")
+        out.append(f"{r['시설ID']} {nm[:24]}".strip())
+    return ", ".join(out) + (" …" if len(rows) > limit else "")
+
+
 def _review_change_report(agg: pd.DataFrame) -> None:
     """discover 를 다시 돌린 뒤 검수자가 볼 행을 화면에 요약한다(갱신_표시 열)."""
     col = discover.STATUS_COL
@@ -260,13 +289,24 @@ def _review_change_report(agg: pd.DataFrame) -> None:
         print(f"이전 검수 파일과 달라진 행 없음('{col}' 열이 모두 빈칸)")
         return
     print(f"\n[검수 파일 갱신] 이전 행의 시설ID·노란 칸은 그대로 두었습니다. '{col}' 열에 글이 있는 행만 보시면 됩니다:")
+    new_inc = _unreviewed_new_included(agg)
     for label, sub in lines:
         print(f"  · {label}: {len(sub)}행")
-        for _, r in sub.head(15).iterrows():
+        # '포함' 으로 들어갈 새 시설을 먼저, 15행에서 자르지 않고 모두 보인다 — '새 시설' 묶음뿐 아니라, 지난 실행 때 새로 잡혀 아직 그대로인 행('지난번: 신규')이
+        # 들어 있는 묶음에서도(검수 없이 discover 를 한 번 더 돌리면 그 행들은 '새 시설' 이 아니라 '지난 실행 때 표시됐고 …' 묶음에 나온다)
+        top = sub.index.isin(new_inc.index)
+        sub = pd.concat([sub[top], sub[~top]])
+        shown = max(15, int(top.sum()))
+        for _, r in sub.head(shown).iterrows():
             nm = next((str(v) for v in (r.get("검수_시설명"), r.get("시설명_후보")) if not discover._blank(v)), "")[:28]
             print(f"      {r['시설ID']} {nm} [{str(r.get('검수_포함여부') or '')}] : {str(r[col])[:110]}")    # '—' 는 cp949 화면에서 '?' 로 찍힌다
-        if len(sub) > 15:
-            print(f"      … 외 {len(sub) - 15}행")
+        if len(sub) > shown:
+            print(f"      … 외 {len(sub) - shown}행")
+    if len(new_inc):
+        ids = ", ".join(str(v) for v in new_inc["시설ID"].head(30)) + (" …" if len(new_inc) > 30 else "")
+        print(f"[주의] 새로 잡힌 시설 가운데 검수_포함여부가 '포함'(기본값)인 {len(new_inc)}행: {ids}\n"
+              "       검수하지 않고 research 를 실행하면 이 시설들이 그대로 DB 에 들어가고 attach·extract(유료 추출) 대상이 됩니다. "
+              "넣지 않을 시설은 먼저 '제외' 로 바꾸고 저장하세요.")
 
 
 def stage_discover(cfg, fresh: bool = False, recalc: bool = False):
@@ -312,8 +352,9 @@ def stage_discover(cfg, fresh: bool = False, recalc: bool = False):
     n_gone = int(agg[discover.STATUS_COL].map(lambda v: str(v).startswith("이번 후보에 없음")).sum()) if discover.STATUS_COL in agg.columns else 0
     kept = f"(이번 후보에 없어 남겨 둔 {n_gone}행은 따로)" if n_gone else ""
     print(f"공고 {len(std)}건 중 후보 시설 {len(agg) - n_gone}개{kept} → {out} 에서 검수(노란 셀) 후 `research` 실행")
-    print("표2 대분류별 시설 수:\n" + agg.groupby("표2_대분류").size().to_string())
-    print("사업유형별 시설 수:\n" + agg.groupby("사업유형").size().to_string())
+    cur = agg[~agg[discover.STATUS_COL].map(lambda v: str(v).startswith("이번 후보에 없음"))] if n_gone else agg     # 표의 합 = 위 줄의 후보 시설 수
+    print("표2 대분류별 시설 수:\n" + cur.groupby("표2_대분류").size().to_string())
+    print("사업유형별 시설 수:\n" + cur.groupby("사업유형").size().to_string())
 
 
 def _std_behind_collect(cfg) -> int:
@@ -352,6 +393,11 @@ def stage_research(cfg):
         raise SystemExit(_excel_busy(review_path))
     if reviewed.empty:
         raise SystemExit("검수_포함여부가 '포함'인 시설이 없습니다. facility_candidates.xlsx 를 검수한 뒤 저장했는지 확인하세요.")
+    new_inc = _unreviewed_new_included(reviewed)
+    if len(new_inc):
+        print(f"[주의] 검수 파일에 새로 잡힌 시설 {len(new_inc)}행이 '포함' 으로 들어 있습니다({discover.STATUS_COL} 열에 '신규' 가 적힌 줄): {_id_names(new_inc)}\n"
+              "       확인을 마친 것이면 그대로 두면 됩니다(다음부터 이 알림을 보지 않으려면 그 줄의 갱신_표시 칸을 지우세요). "
+              "아직 보지 않았다면 Ctrl+C 로 멈추고 검수한 뒤 다시 실행하세요. 이 시설들은 DB 와 유료 추출 대상에 들어갑니다.")
     hits = discover.research_by_facility(std, reviewed)
     if hits.empty:
         raise SystemExit("재검색 결과 없음")
@@ -507,9 +553,13 @@ def stage_attach(cfg, retry_failed: bool = False, report_only: bool = False):
         print(f"[--retry-failed] 추출 실패·오류 기록이 있는 공고와 다른 차수의 공고문·현장설명서가 아직 반영되지 않은 공고 {len(retry_nos)}건"
               f"(그중 차수 병합 {n_merge}건)을 다시 처리합니다(내려받은 파일은 재사용)")
     processed_nos, n_merged = set(), 0
+    done_keys = set()
     for i, (_, row) in enumerate(latest.iterrows(), 1):
         if row["공고키"] in texts and str(row["공고번호"]) not in retry_nos:
             continue
+        if row["공고키"] in done_keys:        # 같은 공고가 여러 시설에 배정돼 있으면 대표 공고 행이 여럿이다 → 이번 실행에서는 한 번만 처리
+            continue                          # (예전에는 --retry-failed·텍스트 없는 공고에서 시설 수만큼 다시 처리해 07 추출노트에 같은 파일 기록이 겹쳤다)
+        done_keys.add(row["공고키"])
         processed_nos.add(str(row["공고번호"]))
         rd = row.to_dict()
         others = [r for r in others_by_no.get(str(row["공고번호"]), []) if r.get("공고키") != row["공고키"]]
@@ -538,6 +588,8 @@ def stage_attach(cfg, retry_failed: bool = False, report_only: bool = False):
     if not prev_df.empty and processed_nos and "공고번호" in prev_df.columns:
         prev_df = prev_df[~prev_df["공고번호"].astype(str).isin(processed_nos)]
     notes_df = pd.concat([d for d in (prev_df, notes_df) if not d.empty], ignore_index=True) if (not prev_df.empty or not notes_df.empty) else notes_df
+    if not notes_df.empty:
+        notes_df = notes_df.drop_duplicates(ignore_index=True)     # 이전 실행에서 겹쳐 쌓인 똑같은 기록도 한 줄로
     notes_df.to_parquet(prev_notes, index=False)
     with open(texts_path, "w", encoding="utf-8") as f:
         json.dump(texts, f, ensure_ascii=False)
@@ -727,8 +779,9 @@ def _print_estimate(cfg, texts, todo, docs, latest, batch=False):
     es = _error_summary(docs)
     if es:
         print(es + "\n  → 실패 건은 다음 extract 실행 때 자동으로 다시 대상에 포함됩니다")
-    print(f"LLM 추출 대상: {len(todo)}건 (이미 완료 {len([k for k in docs if '_error' not in docs[k]])}건, 텍스트 없음 "
-          f"{len([k for k in latest['공고키'] if k not in texts])}건)")
+    keys = list(dict.fromkeys(latest["공고키"]))        # 같은 공고가 여러 시설에 배정돼 있어도 한 번만 센다(예전에는 행 수·캐시 건수가 섞여 합이 맞지 않았다)
+    print(f"LLM 추출 대상: {len(todo)}건 (대표 공고 {len(keys)}건(고유) 중 이미 완료 {len([k for k in keys if k in docs and '_error' not in docs[k]])}건, "
+          f"텍스트 없음 {len([k for k in keys if k not in texts])}건)")
     print(f"예상 입력 {est['input_tokens']:,} 토큰 / 출력 {est['output_tokens']:,} 토큰, 모델 {est['model']}"
           f"{' (Batches 50% 할인 적용)' if batch else ''} → 약 ${est['usd']} (≈{est['krw']:,}원, 환율 {cfg['llm'].get('usd_krw', 1400)})")
     return est
@@ -910,7 +963,9 @@ DETAIL_COLS = ["프로젝트ID", "시설ID", "시설명", "사업유형", "상�
 
 
 def _trade_targets(latest: pd.DataFrame, docs: dict, texts: dict) -> List[str]:
-    """2차 추출 대상 공고키: 공종이 건축이거나, 포함공종(API∪문서)이 2개 이상인 공고(중복 제거)."""
+    """2차 추출 대상 공고키: 공종이 건축이거나, 포함공종(API∪문서)에 주요 공종이 2개 이상인 공고(중복 제거).
+    주요 공종(classify.MAIN_TRADES)만 센다 — '전기·1식', '정보통신·CCTV설비', '조경·식재·포장' 처럼 공종이 아닌 글이 붙은 한 공종짜리 공고와
+    '전기·철거' 는 통합발주가 아니다(2026-11-21: 새로 2차 추출된 153건 중 90건이 이런 공고였다)."""
     keys: List[str] = []
     for _, r in latest.iterrows():
         k = r["공고키"]
@@ -922,8 +977,9 @@ def _trade_targets(latest: pd.DataFrame, docs: dict, texts: dict) -> List[str]:
             d = {}
         inc_doc = classify.normalize_trade_list(d.get("포함공종_문서") or "") or \
             classify.included_trades_from_text(texts.get(k, ""), assigned=str(r["공종"]))
+        inc_doc = classify.drop_fire_subfields(inc_doc, str(r["공종"]), inc_api)      # 소방 공고의 '기계'·'전기' 는 기계소방·전기소방
         inc = classify.merge_trade_lists(inc_api, inc_doc, assigned=str(r["공종"]))
-        if str(r["공종"]) == "건축" or len([p for p in inc.split("·") if p]) >= 2:
+        if str(r["공종"]) == "건축" or classify.main_trade_count(inc) >= 2:
             keys.append(k)
     return keys
 
@@ -996,16 +1052,23 @@ def _trade_context(cfg, limit: Optional[int] = None):
 def _trade_dup_logs(latest: pd.DataFrame, tdocs: dict) -> List[Dict]:
     """같은 프로젝트에 전기·정보통신·소방 공고가 따로 있는데 건축 공고 집계표에도 그 공종 금액이 있으면 '중복 가능' 경고."""
     logs: List[Dict] = []
+    seen = set()
     sep = latest[latest["공종"].astype(str) != "건축"].groupby("프로젝트ID")["공종"].agg(lambda s: set(map(str, s))).to_dict()
     for _, r in latest.iterrows():
         t = tdocs.get(r["공고키"])
         if not t or "_error" in t or str(r["공종"]) != "건축":
             continue
         have = sep.get(r["프로젝트ID"], set())
+        applied = _alloc_decision(r.to_dict(), t) == "Y"       # 배분적용 N 인 공고는 05 문서배분에 금액이 없어 05 '문서배분_중복경고' 도 비어 있다
+        where = "05 '문서배분_중복경고' 참고" if applied else "04b 금액 참고(이 공고는 배분적용 N 이라 05 에는 배분되지 않음)"
         for it in t.get("공종별금액") or []:
             if it["공종"] in ("전기", "정보통신", "소방") and it["공종"] in have:
-                logs.append({"공고번호": r["공고번호"], "항목": "공종 중복 가능(문서)", "문서값": it["금액_원"], "판정": "경고",
-                             "비고": f"{it['공종']}: 분리발주 공고가 따로 있는데 건축 집계표에도 금액 있음 → 05 '문서배분_중복경고' 참고, 합산 금지"})
+                row = {"공고번호": r["공고번호"], "항목": "공종 중복 가능(문서)", "문서값": it["금액_원"], "판정": "경고",
+                       "비고": f"{it['공종']}: 분리발주 공고가 따로 있는데 건축 집계표에도 금액 있음 → {where}, 합산 금지"}
+                sig = (row["공고번호"], it["공종"], row["문서값"], row["비고"])
+                if sig not in seen:                            # 같은 공고가 여러 시설에 배정돼 있어도 한 번만 적는다
+                    seen.add(sig)
+                    logs.append(row)
     return logs
 
 
@@ -1038,8 +1101,8 @@ def _verify_trades_and_report(cfg, latest, tdocs, n_ok=None, n_err=None):
     if es:
         print(es)
     head = f"2차 추출 성공 {n_ok}건 / 실패 {n_err}건, " if n_ok is not None else ""
-    print(f"{head}완료 {done}건(공종별 금액이 나온 공고 {with_items}건, 누적 토큰 입력 {usage_in:,} 출력 {usage_out:,}), "
-          f"집계표 없음(건너뜀) {n_skip}건, 검증로그 {len(logs)}건")
+    print(f"{head}2차 결과가 있는 대표 공고 {done}건(지금은 대상이 아닌 이전 결과 포함. 공종별 금액이 나온 공고 {with_items}건, "
+          f"누적 토큰 입력 {usage_in:,} 출력 {usage_out:,}), 집계표 없음 기록 {n_skip}건(누적), 검증로그 {len(logs)}건")
     if logs:
         print(pd.DataFrame(logs)["판정"].value_counts().to_string())
 
@@ -1380,7 +1443,10 @@ def _alloc_decision(api_row: Dict, t: Dict) -> str:
     if basis and basis["판정"] == "경고":
         return "N(집계표 합계가 API 금액과 불일치)" if total else "N(읽은 행의 합이 API 금액과 불일치)"
     if total:
-        ref = total - sum(i["금액_원"] for i in items if i["공종"] in ("공통가설", "간접비", "관급자재", "부가세", "배분제외"))
+        # 공종분 = 합계 − 합계 안에 든 비공종 행. 관급자재·부가세·배분제외 행은 합계 밖에 따로 적힌 것일 수 있으므로, (공종 행 합 + 비공종 행)이 합계와
+        # 맞아떨어지는 조합이 있으면 그 조합의 행만 뺀다(extract_llm.inside_total_rows). 맞는 조합이 없으면 예전대로 모두 뺀다
+        inside, fits = extract_llm.inside_total_rows(items, total, asum)
+        ref = total - (inside if fits else sum(i["금액_원"] for i in items if i["공종"] in ("공통가설", "간접비", "관급자재", "부가세", "배분제외")))
         if ref <= 0:
             ref = total
         src, hi = "집계표 공종분", 1.25
@@ -1483,9 +1549,12 @@ def _etc_duplicates(latest: pd.DataFrame, docs: dict, extra: dict) -> Dict[Tuple
     return out
 
 
-def assemble_trade_table(latest: pd.DataFrame, docs: dict, texts: Optional[dict] = None, extra: Optional[dict] = None) -> pd.DataFrame:
+def assemble_trade_table(latest: pd.DataFrame, docs: dict, texts: Optional[dict] = None, extra: Optional[dict] = None,
+                         vat: float = 0.10) -> pd.DataFrame:
     """04 시트 행. 포함공종: API(주공종명·부공종명) / 문서(LLM 필드 '포함공종_문서', 없으면 텍스트 규칙) / 종합(합집합).
-    extra = 보강 추출(llm_extra.json): 기타금액·면세 문구."""
+    extra = 보강 추출(llm_extra.json): 기타금액·면세 문구.
+    문서의 관급 금액이 그 공고의 기초금액·추정가격·부가세와 같은 값이면(도급액을 관급 칸으로 읽은 것 — extract_llm.gov_misreads) 싣지 않는다:
+    04 수식은 API 관급이 없을 때 문서 관급을 그대로 더하므로, 실으면 합계가 두 배가 된다. 까닭은 06 '도급자관급액'·'관급자관급액' 행에 남는다."""
     rows = []
     texts, extra = texts or {}, extra or {}
     dup = _etc_duplicates(latest, docs, extra)
@@ -1499,10 +1568,12 @@ def assemble_trade_table(latest: pd.DataFrame, docs: dict, texts: Optional[dict]
         raw_ev, raw_xev = d.get("근거문구"), x.get("근거문구")       # 옛 추출 결과는 근거문구가 문자열·배열일 수 있다 → 그대로 '원문' 으로
         ev = dict(raw_ev) if isinstance(raw_ev, dict) else ({"원문": raw_ev} if raw_ev else {})
         ev.update({f"[보강]{k}": v for k, v in (raw_xev.items() if isinstance(raw_xev, dict) else ([("원문", raw_xev)] if raw_xev else []))})
+        bad_gov = extract_llm.gov_misreads(r.to_dict(), d, vat) if d else {}
         inc_api = classify.included_trades(r.get("주공종명"), r.get("부공종명"), r["공종"])
         inc_doc, inc_src = classify.normalize_trade_list(d.get("포함공종_문서") or ""), "LLM"
         if not inc_doc:
             inc_doc, inc_src = classify.included_trades_from_text(texts.get(r["공고키"], ""), assigned=str(r["공종"])), "규칙"
+        inc_doc = classify.drop_fire_subfields(inc_doc, str(r["공종"]), inc_api)      # 소방 공고의 '기계'·'전기' 는 기계소방·전기소방(_trade_targets 와 같게)
         if not inc_doc:
             inc_src = ""
         rows.append({
@@ -1519,7 +1590,8 @@ def assemble_trade_table(latest: pd.DataFrame, docs: dict, texts: Optional[dict]
             "예산금액_API": r.get("예산금액"),
             "낙찰금액_API": r.get("낙찰금액_API"), "낙찰률_API": r.get("낙찰률_API"), "낙찰자": r.get("낙찰자"), "낙찰하한율": r.get("낙찰하한율"),
             "부가세_문서": d.get("부가가치세_원"),
-            "도급자관급액_문서": d.get("도급자관급액_원"), "관급자관급액_문서": d.get("관급자관급액_원"),
+            "도급자관급액_문서": None if "도급자관급액_원" in bad_gov else d.get("도급자관급액_원"),
+            "관급자관급액_문서": None if "관급자관급액_원" in bad_gov else d.get("관급자관급액_원"),
             "기타금액_문서": x.get("기타금액_원"), "기타금액_항목_문서": x.get("기타금액_항목") or "",
             "기타금액_판정": (f"제외(같은 프로젝트의 공고 {dup[(str(r['프로젝트ID']), r['공고키'])]} 와 같은 금액 — 이중계산 방지)"
                               if (str(r["프로젝트ID"]), r["공고키"]) in dup
@@ -1554,9 +1626,59 @@ def _blank(c: str, v) -> bool:
     return c in _ZERO_EMPTY_COLS and extract_llm._num(v) == 0
 
 
+AREA_MINOR_SHARE = 0.20   # 건축·기타 공고의 금액이 프로젝트에서 가장 큰 공고의 이 비율에 못 미치면 '부분 공사 공고'(철거·목업·부속동 등)로 본다.
+#   2026-11-21 실자료(연면적의 출처 공고를 찾은 888개 프로젝트): 출처가 최대 공고가 아닌 건축·기타 공고 27건 가운데 5% 미만 9건 + 10~30% 7건은 모두 부분 공사
+#   (철거·석면·목업·포장·부속 창고)의 면적, 30% 이상 11건. 10% 로는 9건만 걸러졌다 → 20%: 13건(F2882-N·F3287-R-01·F3532-E·F0159-N-01 추가).
+#   20~30% 인 3건(F0082-N = F1959-N-02 수장고 내부 200㎡, F2588-R 석면 947㎡)은 남는다 — 토목이 큰 사업의 본 건축 공고가 이 구간에 있을 수 있어 더 올리지 않았다
+
+
+def _area_minor(trade: str, amt: float, top_amt: float) -> bool:
+    """부분 공사 공고인지. 금액을 모르는 공고(API 추정가격 없음 → 0)는 '작은 공고' 가 아니다 — 본 건축 공고의 추정가격이 비어 있고
+    다른 공고에만 금액이 있으면 본 공고의 연면적이 '최대 공고의 0.0%' 라며 버려지던 것을 막는다."""
+    return trade in ("건축", "기타") and top_amt > 0 and 0 < amt < top_amt * AREA_MINOR_SHARE
+
+
+def _area_text(v: float) -> str:
+    """면적을 글로: 5181.08 → '5,181.08', 40 → '40' (':g' 는 유효숫자 6자리라 12345.67 → 12345.7, 1234567.8 → 1.23457e+06 이 된다)."""
+    return f"{v:,.2f}".rstrip("0").rstrip(".")
+
+
+def _pick_area(cands: List[Dict], top_amt: float) -> Tuple[Optional[Dict], str]:
+    """프로젝트의 연면적을 어느 공고의 값으로 할지. cands = [{"v": 연면적, "trade": 공종, "amt": 추정가격, "key": 공고키}] (건축 먼저, 금액 큰 순).
+    → (고른 후보 또는 None, 싣지 않은 까닭).
+    예전에는 값이 있는 첫 공고를 썼다 — 본 건축 공고에 연면적이 없으면 같은 프로젝트의 작은 건축 공고(철거 113㎡, 객실 목업 40㎡, 창고 증축)의
+    '공사 대상 면적' 이 건물 연면적 자리에 들어가 ㎡당 공사비가 수천만~수십억 원이 됐다(2026-11-21 실자료 F4859-N-02·F2280-R·F3171-E).
+      ① 부분 공사 공고(건축·기타 공종이면서 금액이 프로젝트 최대 공고의 AREA_MINOR_SHARE(20%) 미만. 금액을 모르는 공고는 해당 없음)의 값은 쓰지 않는다
+      ② 남은 후보의 첫째가 건축 공고면 그 값(본 공사 문서의 면적 — 다른 공종 문서의 단지 전체 면적보다 우선)
+      ③ 건축 공고에 값이 없으면 두 공고 이상이 같게 적은 값(1% 이내), 없으면 남은 후보의 첫째(전기·소방 등 건물 전체를 대상으로 하는 공종의 문서)
+      ④ 부분 공사 공고의 값밖에 없으면 비워 둔다(엉뚱한 ㎡당 공사비를 내느니 빈칸 — 까닭은 '개요_출처' 에 적는다)"""
+    if not cands:
+        return None, ""
+    minor = lambda c: _area_minor(c["trade"], c["amt"], top_amt)
+    pool = [c for c in cands if not minor(c)]
+    if not pool:
+        c = cands[0]
+        return None, (f"연면적 미채택: {c['trade']} 공고 {c['key']} 의 {_area_text(c['v'])}㎡ 는 사업 일부(부분 공사·부속 건물)의 면적으로 보임"
+                      f"(그 공고 금액이 프로젝트 최대 공고의 {c['amt'] / top_amt:.1%})")
+    if pool[0]["trade"] == "건축":
+        return pool[0], ""
+    groups: List[List[Dict]] = []
+    for c in pool:
+        for g in groups:
+            if abs(c["v"] - g[0]["v"]) <= abs(g[0]["v"]) * 0.01:
+                g.append(c)
+                break
+        else:
+            groups.append([c])
+    best = max(groups, key=lambda g: (len(g), sum(c["amt"] for c in g)))
+    return (best[0] if len(best) >= 2 else pool[0]), ""
+
+
 def enrich_facility(fac: pd.DataFrame, latest: pd.DataFrame, docs: dict, extra: Optional[dict] = None) -> pd.DataFrame:
     """프로젝트(시설×사업유형) 공사개요를 조달청 '공사비 정보광장' 항목 틀로 채운다. 값은 건축 공종 문서 → 없으면 다른 공종 문서 순,
     같은 공고 안에서는 1차 추출(llm_docs) → 보강 추출(llm_extra) 순. 어느 공종 공고에서 왔는지 '개요_출처' 에 적는다.
+    연면적만은 값이 있는 첫 공고가 아니라 _pick_area 로 고른다(부분 공사 공고의 대상 면적이 건물 연면적 자리에 들어가지 않게).
+    건축면적도 부분 공사 공고의 값은 쓰지 않는다(2026-11-21 실자료 F4859-N-02: 철거 건물 113㎡ 가 연면적 5,181.08㎡ 옆에 남았다). 층수·구조 등은 예전대로.
     공사명 = 건축 대표 공고명(추정가격 최대), 현장위치 = 문서의 공사위치(없으면 API 공사현장지역), 발주년월 = 건축 대표 공고의 최초 공고월."""
     fac = fac.copy()
     extra = extra or {}
@@ -1571,16 +1693,23 @@ def enrich_facility(fac: pd.DataFrame, latest: pd.DataFrame, docs: dict, extra: 
         g = g.assign(_pri=g["공종"].map(lambda t: 0 if t == "건축" else 1), _amt=pd.to_numeric(g["추정가격"], errors="coerce").fillna(0))
         g = g.sort_values(["_pri", "_amt"], ascending=[True, False])
         has_arch = bool((g["공종"] == "건축").any())
+        top_amt = float(g["_amt"].max())
         sources: List[str] = []
+        areas: List[Dict] = []
         for _, r in g.iterrows():
             d = docs.get(r["공고키"], {}) or {}
             x = extra.get(r["공고키"], {}) or {}
             d = {} if "_error" in d else d
             x = {} if "_error" in x else x
             used = False
+            av = extract_llm._num(d.get("연면적_m2"))
+            if av and av > 0:
+                areas.append({"v": av, "raw": d.get("연면적_m2"), "trade": str(r["공종"]), "amt": float(r["_amt"]), "key": r["공고키"]})
             for c in cols:
-                if not _blank(c, fac.at[i, c]):
+                if c == "연면적_m2" or not _blank(c, fac.at[i, c]):
                     continue
+                if c == "건축면적_m2" and _area_minor(str(r["공종"]), float(r["_amt"]), top_amt):
+                    continue          # 부분 공사 공고(철거한 건물·증축 창고)의 건축면적도 이 사업 건물의 것이 아니다 — 연면적과 같은 기준
                 v = d.get(c) if c in FAC_BASE_COLS else None
                 if _blank(c, v):
                     v = x.get(FAC_EXTRA_COLS.get(c, c))
@@ -1592,6 +1721,11 @@ def enrich_facility(fac: pd.DataFrame, latest: pd.DataFrame, docs: dict, extra: 
                 used = True
             if used and str(r["공종"]) not in sources:
                 sources.append(str(r["공종"]))
+        pick, why_not = _pick_area(areas, top_amt)
+        if pick:
+            fac.at[i, "연면적_m2"] = pick["raw"]
+            if pick["trade"] not in sources:
+                sources.append(pick["trade"])
         top = g.iloc[0]
         fac.at[i, "공사명"] = top["공고명"]
         if _empty(fac.at[i, "현장위치"]):
@@ -1603,6 +1737,8 @@ def enrich_facility(fac: pd.DataFrame, latest: pd.DataFrame, docs: dict, extra: 
             fac.at[i, "발주년월_기준"] = "건축 공고" if has_arch else f"{top['공종']} 공고(건축 공고 없음)"
         if sources:
             fac.at[i, "개요_출처"] = "·".join(sources) + ("" if has_arch else " (건축 공고 없음)")
+        if why_not:
+            fac.at[i, "개요_출처"] = " / ".join(x for x in (fac.at[i, "개요_출처"], why_not) if x)
     return fac
 
 
@@ -1629,7 +1765,7 @@ def stage_excel(cfg):
     fac = enrich_facility(dedup.facility_summary(latest, hist), latest, docs, extra)
     texts_path = _p(cfg, "texts.json")
     texts = json.load(open(texts_path, encoding="utf-8")) if os.path.exists(texts_path) else {}
-    trade = assemble_trade_table(latest, docs, texts, extra)
+    trade = assemble_trade_table(latest, docs, texts, extra, vat=float(cfg["verify"]["vat_ratio"]))
     detail = assemble_trade_detail_table(latest, tdocs)
     os.makedirs(cfg["paths"]["out_dir"], exist_ok=True)
     out = os.path.join(cfg["paths"]["out_dir"], cfg["paths"]["excel_name"])

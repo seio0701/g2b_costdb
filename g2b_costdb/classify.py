@@ -228,6 +228,32 @@ def strip_institution_prefix(name: str, inst: str) -> str:
 WORK_TYPE_CODE = {"신축": "N", "증축": "E", "리모델링": "R", "증축·리모델링": "ER", "유지보수": "M", "미분류": "U"}
 
 
+# 사업유형 어휘가 다른 낱말의 일부로 걸리는 자리: '○○신 축구장'(신축), '통신설비'(신설), '건축 조경'(축조)
+# 단, 어절 첫머리의 '신축구장'·'증축구장' 은 신축·증축 + 구장(새 야구장)일 수 있어 가리지 않는다('쌍신축구장' 처럼 앞에 글자가 더 있을 때만 가린다)
+_WT_MASK = re.compile(r"(?<!(?<![가-힣])[신증개])축구(?=\s*(?:장|센터|공원|전용|경기|타운|종합|클럽|교실|회관))|통신\s*설비|(?<!재)건축(?=\s*조경)")
+_WORD_CHAR = re.compile(r"[0-9A-Za-z가-힣]")
+
+
+def _work_word_hit(name: str, stripped: str, word: str) -> bool:
+    """사업유형 어휘 word 가 공고명에 있는지. 띄어쓰기 변형('환경 개선', '대 수선', '증 축 공 사')을 잡으려고 공백을 뺀 문자열에서 찾되,
+    어휘가 띄어쓰기를 가로질러 걸린 경우에는 어절의 첫머리에서 시작할 때만 인정한다 — 앞 어절의 끝 글자와 뒤 어절의 첫 글자가 이어져
+    우연히 어휘가 되는 것을 막는다('공원녹지 권역별 관리공사' 의 별관 → 증축, '노후영구임대 수선유지공사' 의 대수선 → 리모델링, '건축 조경' 의 축조.
+    2026-11-21 실자료: 유지관리 공고 27건·93억이 증축 프로젝트로 실려 있었다). 어휘 자체에 공백이 있으면('기능보강 리모델링') 그대로 인정."""
+    ws = word.replace(" ", "")
+    if ws not in stripped:
+        return False
+    if ws in name or " " in word:
+        return True
+    idx = [i for i, ch in enumerate(name) if ch != " "]
+    p = stripped.find(ws)
+    while p >= 0:
+        a = idx[p]
+        if " " not in name[a:idx[p + len(ws) - 1] + 1] or a == 0 or not _WORD_CHAR.match(name[a - 1]):
+            return True
+        p = stripped.find(ws, p + 1)
+    return False
+
+
 def classify_work_type(notice_name: str, rules: Optional[Dict[str, List[str]]] = None,
                        ancillary: Optional[List[str]] = None) -> str:
     """사업유형: 신축 / 증축 / 리모델링 / 증축·리모델링 / 유지보수 / 미분류.
@@ -238,8 +264,14 @@ def classify_work_type(notice_name: str, rules: Optional[Dict[str, List[str]]] =
         kw = load_keywords()
     rules = rules or kw["work_type_rules"]
     ancillary = ancillary if ancillary is not None else (kw.get("ancillary_words") or [])
-    s = (notice_name or "").replace(" ", "")
-    hits = [label for label, words in rules.items() if any(w.replace(" ", "") in s for w in words)]
+    name = notice_name or ""
+    if "축구" in name or "통신" in name or "건축" in name:
+        name = _WT_MASK.sub(lambda m: "▒" * len(m.group(0)), name)       # 다른 낱말 속에 든 어휘('쌍신축구장'의 신축, '통신설비'의 신설)는 가린다
+    s = name.replace(" ", "")
+    # 신축·증축·리모델링 어휘는 어절을 가로질러 우연히 생긴 것을 치지 않는다(_work_word_hit). 유지보수 어휘는 예전처럼 공백을 뺀 문자열에서 찾는다 —
+    # 유지보수로 잡히던 공고가 미분류로 바뀌면 재검색에서 빠지지 않고 들어오므로, 확인된 오검출(공사 유형 쪽)만 고친다
+    hits = [label for label, words in rules.items()
+            if any((w.replace(" ", "") in s) if label == "유지보수" else _work_word_hit(name, s, w) for w in words)]
     # '기계설비공사'·'건축설비공사'는 공종명이지 부속 설비 공사가 아니다 → 부속어 판정에서 제외
     s_anc = re.sub(r"기계설비|건축설비|전기설비|소방설비|통신설비", "", s)
     anc = any(w.replace(" ", "") in s_anc for w in ancillary)
@@ -369,21 +401,40 @@ def _doc_labels(line: str) -> Tuple[List[str], str]:
     return labels, rest
 
 
+MAIN_TRADES = ("건축", "전기", "정보통신", "소방", "조경", "기계설비", "토목")     # 한 계약에 둘 이상 들어 있으면 '통합발주' 로 보는 공종
+
+
 def normalize_trade_list(s: str) -> str:
-    """LLM 이 적은 '건축, 토목, 기계, 조경' → '건축·토목·기계설비·조경'. 라벨로 못 바꾼 어절은 '공사' 를 떼고 그대로."""
+    """LLM 이 적은 '건축, 토목, 기계, 조경' → '건축·토목·기계설비·조경'. 공종 라벨(_DOC_TRADE_WORDS)로 바꿀 수 있는 어절만 남긴다.
+    LLM 은 이 칸에 공종이 아니라 내역서의 세부 작업·수량 표기를 적기도 한다('가설·수장·토공·포장공', '1식', '100%', '상대업종', 'CCTV설비' —
+    2026-11-21 실자료: LLM 이 채운 1,086건 중 384건, 483가지). 그대로 두면 한 공종짜리 공고가 '포함공종 2개 이상' 이 되어 2차 추출 대상에 들어가고
+    05 '통합발주_포함공종' 이 '전기(+1식)' 같은 글로 채워진다 → 라벨이 아닌 어절은 버린다."""
     out: List[str] = []
     for tok in _DOC_SEP.split(str(s or "")):
         tok = tok.strip()
         if not tok or tok.lower() in ("nan", "none"):
             continue
-        labels, rest = _doc_labels(tok)
-        if labels:
-            out.extend(l for l in labels if l not in out)
-        else:
-            raw = re.sub(r"(공사업|공사|업)$", "", tok)
-            if 1 < len(raw) <= 12 and raw not in out and not _DOC_NOISE.fullmatch(raw):
-                out.append(raw)
+        labels, _ = _doc_labels(tok)
+        out.extend(l for l in labels if l not in out)
     return "·".join(out)
+
+
+def main_trade_count(trades: str) -> int:
+    """'전기·소방·1식' 같은 포함공종 표기에 든 주요 공종(MAIN_TRADES) 가짓수 — 통합발주 판단용(철거·가스·승강기와 라벨이 아닌 글은 세지 않는다)."""
+    return len({p for p in str(trades or "").split("·") if p in MAIN_TRADES})
+
+
+_FIRE_SUBFIELDS = ("기계설비", "전기")       # 소방 공고의 문서에 적힌 '기계'·'전기' = 기계소방·전기소방(소방시설공사의 두 분야)
+
+
+def drop_fire_subfields(inc_doc: str, assigned: str, inc_api: str = "") -> str:
+    """배정 공종이 소방인 공고의 문서 포함공종에서 '기계설비'·'전기' 를 뺀다. '소방(기계, 전기)'·'기계소방, 전기소방' 을 공종 낱말로 읽은 것이어서
+    한 공종짜리 소방 공고가 '소방·기계설비·전기' 통합발주로 잡혔다(2026-11-21 실자료: 주요 공종 2개 이상으로 남은 비건축 대상 221건 중 129건이 이런 소방 공고,
+    이미 받은 2차 결과 46건에는 소방 말고 다른 공종 금액이 한 건도 없었다). API(주공종명·부공종명)에 그 공종이 따로 있으면 그대로 둔다."""
+    if str(assigned or "") != "소방" or not inc_doc:
+        return inc_doc
+    api = {p for p in str(inc_api or "").split("·") if p}
+    return "·".join(p for p in str(inc_doc).split("·") if p and (p not in _FIRE_SUBFIELDS or p in api))
 
 
 def included_trades_from_text(text: str, assigned: str = "", window: int = 1500) -> str:

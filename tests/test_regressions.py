@@ -1016,6 +1016,364 @@ def test_discover_new_row_hints():
     assert list(again[discover.STATUS_COL])[2] == "지난번: 신규 / 지난번: 이름이 같은 기존 시설: F0001 (수요기관 '강원도 춘천시') → 같은 시설이면 '제외' 하거나 시설ID 를 그 번호로", list(again[discover.STATUS_COL])
 
 
+def test_audit_1121_fixes(tmp):
+    """2026-11-21 워크북 점검에서 나온 결함: 도급액을 관급으로 읽어 합계가 두 배, 부분 공사 공고의 면적이 연면적으로, 포함공종의 비공종 어휘,
+    띄어쓰기를 가로지른 사업유형 어휘, 기초금액 없는 통합발주 공고의 집계표 기준, 합계 밖에 적힌 관급 행, 견적서 안내공고 이름."""
+    from g2b_costdb import classify, works, pipeline
+    from g2b_costdb.extract_llm import gov_misreads, cross_verify, cross_verify_trades, normalize_trade_doc
+    # ── ① 문서의 '도급액' 을 도급자관급액으로 읽은 값: 그 공고의 기초금액·추정가격과 같은 금액이면 관급이 아니다
+    api = {"추정가격": 1_399_460_000, "기초금액": 1_539_406_000, "공고기관": "x"}
+    doc = {"추정가격_원": 1_399_460_000, "기초금액_원": 1_539_406_000, "도급자관급액_원": 1_539_406_000, "관급자관급액_원": 206_451_000, "총공사금액_원": 1_745_857_000}
+    assert gov_misreads(api, doc) == {"도급자관급액_원": "기초금액과 같은 금액"}, gov_misreads(api, doc)
+    lg = {l["항목"]: l for l in cross_verify("G1", api, doc)}
+    assert lg["도급자관급액"]["판정"] == "경고" and "04 에 싣지 않음" in lg["도급자관급액"]["비고"] and lg["도급자관급액"]["문서값"] == 1_539_406_000
+    assert lg["관급자관급액"]["판정"] == "참고" and lg["총공사금액=기초금액+관급"]["판정"] == "정상", "오독한 값을 빼면 문서의 총공사금액과 맞는다"
+    # 같은 금액이지만 문서의 총공사금액 때문에 그대로 실은 값은 06 에 따로 경고로 적는다('총공사금액=기초금액+관급' 경고 줄만으로는 찾을 수 없다)
+    lk = {l["항목"]: l for l in cross_verify("G2", {"추정가격": 20_970_000, "기초금액": 23_067_000, "부가세_API": 2_097_000, "공고기관": "x"},
+                                           {"도급자관급액_원": 20_970_000, "관급자관급액_원": 2_097_000, "총공사금액_원": 42_315_000})}
+    assert lk["도급자관급액"]["판정"] == "경고" and "이 공고의 추정가격과 같은 금액이지만" in lk["도급자관급액"]["비고"] and "그대로 실음" in lk["도급자관급액"]["비고"], lk["도급자관급액"]
+    assert lk["관급자관급액"]["판정"] == "경고" and "부가세와 같은 금액이지만" in lk["관급자관급액"]["비고"], lk["관급자관급액"]
+    lk2 = {l["항목"]: l for l in cross_verify("G3", {"추정가격": 20_970_000, "기초금액": 23_067_000, "부가세_API": 2_097_000, "도급자관급액_API": 19_000_000, "공고기관": "x"},
+                                            {"도급자관급액_원": 20_970_000, "관급자관급액_원": 2_097_000, "총공사금액_원": 42_315_000})}
+    assert "그대로 실음" not in lk2["도급자관급액"]["비고"] and "API 우선 사용" in lk2["도급자관급액"]["비고"], "API 관급이 있으면 04 는 API 값 — 예전의 비교 행"
+    assert "그대로 실음" in lk2["관급자관급액"]["비고"], "API 값이 없는 칸은 문서 값이 04 에 실린다"
+    # 관급자재가 우연히 기초금액과 비슷한 대형 공사: 문서의 총공사금액이 (기초금액 + 관급)이면 그대로 둔다 / 원 단위까지 같지 않으면 걸지 않는다
+    big = {"기초금액_원": 4_230_408_000, "도급자관급액_원": 4_230_408_000, "총공사금액_원": 8_460_816_000}
+    assert gov_misreads({"추정가격": 3_845_825_455, "기초금액": 4_230_408_000}, big) == {}
+    assert gov_misreads({"추정가격": 3_845_825_455, "기초금액": 4_230_408_000}, {"도급자관급액_원": 4_231_688_042}) == {}, "0.03% 다른 값은 관급일 수 있다"
+    assert gov_misreads({"추정가격": 100_000_000, "기초금액": 110_000_000}, {"도급자관급액_원": 30_000_000, "관급자관급액_원": 5_000_000}) == {}
+    assert gov_misreads({}, {}) == {} and gov_misreads({"추정가격": "", "기초금액": None}, {"도급자관급액_원": "nan"}) == {}
+    # 추정가격·부가세를 두 관급 칸에 나눠 적은 경우, 총공사금액을 관급자관급액으로 읽은 경우
+    both = gov_misreads({"추정가격": 20_970_000, "기초금액": 23_067_000, "부가세_API": 2_097_000}, {"도급자관급액_원": 20_970_000, "관급자관급액_원": 2_097_000, "총공사금액_원": 42_315_000})
+    assert both == {}, "빼면 문서의 총공사금액(4,231만)에서 더 멀어진다(더하면 +9%, 빼면 −45%) → 손대지 않고 06 총공사금액 경고로 남긴다"
+    both = gov_misreads({"추정가격": 20_970_000, "기초금액": 23_067_000, "부가세_API": 2_097_000}, {"도급자관급액_원": 20_970_000, "관급자관급액_원": 2_097_000})
+    assert both == {"도급자관급액_원": "추정가격과 같은 금액", "관급자관급액_원": "부가세와 같은 금액"}, both       # 문서 총액이 없으면 같은 금액이라는 것만으로 뺀다
+    assert gov_misreads({"추정가격": 47_890_000, "기초금액": 52_679_000}, {"관급자관급액_원": 54_340_000, "총공사금액_원": 54_340_000}) == {"관급자관급액_원": "문서의 총공사금액과 같은 금액"}
+    # 문서의 '총공사금액' 이 이 공고의 총액일 수 없는 값이면(여러 공종의 총사업비 / 관급 소계) 그 값에 기대지 않는다
+    assert gov_misreads({"추정가격": 100_000_000, "기초금액": 110_000_000}, {"도급자관급액_원": 110_000_000, "총공사금액_원": 300_000_000}) == {"도급자관급액_원": "기초금액과 같은 금액"}
+    assert gov_misreads({"추정가격": 454_545_455, "기초금액": 500_000_000}, {"관급자관급액_원": 54_000_000, "총공사금액_원": 54_000_000}) == {}
+    # API 에 기초금액이 없으면 추정가격 + 부가세와 견준다
+    assert gov_misreads({"추정가격": 100_000_000}, {"도급자관급액_원": 110_000_000}) == {"도급자관급액_원": "추정가격+부가세와 같은 금액"}
+    # 문서의 총공사금액 = 도급 + 관급: API 기초금액과 값이 달라도 '도급' 이 도급자관급액 칸에 든 것(관급 소계를 총액으로 읽은 문서는 건드리지 않는다)
+    sp = gov_misreads({"추정가격": 1_725_295_454, "기초금액": 1_897_825_000}, {"도급자관급액_원": 2_023_680_000, "관급자관급액_원": 578_720_000, "총공사금액_원": 2_602_400_000})
+    assert list(sp) == ["도급자관급액_원"] and "총공사금액에서 관급자관급액을 뺀" in sp["도급자관급액_원"], sp
+    assert gov_misreads({"추정가격": 1_725_295_454, "기초금액": 1_897_825_000}, {"도급자관급액_원": 300_000_000, "관급자관급액_원": 200_000_000, "총공사금액_원": 500_000_000}) == {}
+    # (검토 보강) 같은 금액으로 보는 폭: ±1,000원 또는 0.01% — 그보다 다르면 걸지 않는다
+    small = {"추정가격": 5_000_000, "기초금액": 5_500_000}
+    assert gov_misreads(small, {"도급자관급액_원": 5_500_900}) == {"도급자관급액_원": "기초금액과 같은 금액"}, "1,000원 안쪽"
+    assert gov_misreads(small, {"도급자관급액_원": 5_502_000}) == {}, "2,000원 다른 값은 관급일 수 있다"
+    big_api = {"추정가격": 3_845_825_455, "기초금액": 4_230_408_000}
+    assert gov_misreads(big_api, {"도급자관급액_원": 4_230_808_000}) == {"도급자관급액_원": "기초금액과 같은 금액"}, "0.0095% 차이"
+    assert gov_misreads(big_api, {"도급자관급액_원": 4_231_008_000}) == {}, "0.014% 차이"
+    # (검토 보강) API 금액이 없을 때 문서의 기초금액·추정가격, 문서 부가세, 기초금액 − 추정가격과 견준다. 도급자관급액은 부가세와 견주지 않는다
+    assert gov_misreads({"추정가격": None, "기초금액": None}, {"기초금액_원": 66_174_000, "도급자관급액_원": 66_174_000}) == {"도급자관급액_원": "문서의 기초금액과 같은 금액"}
+    assert gov_misreads({}, {"추정가격_원": 60_158_181, "도급자관급액_원": 60_158_181}) == {"도급자관급액_원": "문서의 추정가격과 같은 금액"}
+    assert gov_misreads({"추정가격": 100_000_000}, {"부가가치세_원": 9_500_000, "관급자관급액_원": 9_500_000}) == {"관급자관급액_원": "문서의 부가세와 같은 금액"}
+    assert gov_misreads({"추정가격": 100_000_000, "기초금액": 108_000_000}, {"관급자관급액_원": 8_000_000}) == {"관급자관급액_원": "부가세(기초금액−추정가격)와 같은 금액"}
+    assert gov_misreads({"추정가격": 100_000_000, "기초금액": 110_000_000, "부가세_API": 10_000_000}, {"도급자관급액_원": 10_000_000}) == {}
+    # (검토 보강) 총액 = 두 관급의 합 규칙의 폭(기초금액의 125% 까지, 합이 0.1% 안에서 맞을 때만)
+    a110 = {"추정가격": 100_000_000, "기초금액": 110_000_000}
+    assert gov_misreads(a110, {"도급자관급액_원": 150_000_000, "관급자관급액_원": 30_000_000, "총공사금액_원": 180_000_000}) == {}, "기초금액의 136% 는 도급액으로 보지 않는다"
+    assert gov_misreads(a110, {"도급자관급액_원": 120_000_000, "관급자관급액_원": 30_000_000, "총공사금액_원": 153_000_000}) == {}, "총액과 2% 어긋나면 걸지 않는다"
+    # (검토 보강) '빼면 더 멀어진다' 판단은 남는 관급(걸리지 않은 칸)을 더한 값으로 한다 / 기준 금액은 API 가 먼저, 기초금액이 없으면 추정가격 + 부가세
+    assert gov_misreads({"추정가격": 396_736_364, "기초금액": 436_410_000}, {"도급자관급액_원": 436_410_000, "관급자관급액_원": 906_400_000, "총공사금액_원": 1_342_810_000}) \
+        == {"도급자관급액_원": "기초금액과 같은 금액"}, "실제 관급(9.06억)이 따로 있는 문서: 도급액만 뺀다"
+    assert gov_misreads(a110, {"기초금액_원": 50_000_000, "도급자관급액_원": 110_000_000, "총공사금액_원": 110_000_000}) == {"도급자관급액_원": "기초금액과 같은 금액"}, "API 기초금액이 먼저"
+    assert gov_misreads({"추정가격": 20_970_000, "부가세_API": 2_097_000}, {"도급자관급액_원": 20_970_000, "관급자관급액_원": 2_097_000, "총공사금액_원": 42_315_000}) == {}, "기초금액이 없으면 추정가격 + 부가세가 기준"
+    # (검토 보강) 설정의 부가세율이 그대로 전달된다
+    lg5 = {l["항목"]: l for l in cross_verify("G5", {"추정가격": 100_000_000, "공고기관": "x"}, {"도급자관급액_원": 105_000_000}, vat=0.05)}
+    assert lg5["도급자관급액"]["판정"] == "경고" and "추정가격+부가세와 같은 금액" in lg5["도급자관급액"]["비고"], lg5["도급자관급액"]
+    # 04 표: 오독한 값은 문서 열에 싣지 않는다(04 수식은 API 관급이 없으면 문서 관급을 그대로 더한다) — 다른 공고의 관급은 그대로
+    base = {"프로젝트ID": "P1", "시설ID": "F1", "시설명": "s", "사업유형": "신축", "공종": "건축", "공고차수": "000", "공고명": "n", "공고일시": "2025-01-01", "수요기관": "d",
+            "주공종명": "건축공사업", "부공종명": ""}
+    lt = pd.DataFrame([dict(base, 공고키="A-000", 공고번호="A", 추정가격=1_399_460_000, 기초금액=1_539_406_000),
+                       dict(base, 공고키="B-000", 공고번호="B", 추정가격=100_000_000, 기초금액=110_000_000)])
+    tt = pipeline.assemble_trade_table(lt, {"A-000": doc, "B-000": {"도급자관급액_원": 30_000_000, "관급자관급액_원": 5_000_000}}).set_index("공고번호")
+    assert pd.isna(tt.at["A", "도급자관급액_문서"]) and tt.at["A", "관급자관급액_문서"] == 206_451_000, tt.loc["A"].to_dict()
+    assert tt.at["B", "도급자관급액_문서"] == 30_000_000 and tt.at["B", "관급자관급액_문서"] == 5_000_000
+    ltc = pd.DataFrame([dict(base, 공고키="C-000", 공고번호="C", 추정가격=47_890_000, 기초금액=52_679_000), dict(base, 공고키="V-000", 공고번호="V", 추정가격=100_000_000, 기초금액=None)])
+    dc = {"C-000": {"관급자관급액_원": 54_340_000, "총공사금액_원": 54_340_000}, "V-000": {"도급자관급액_원": 105_000_000, "관급자관급액_원": 7_000_000}}
+    tc = pipeline.assemble_trade_table(ltc, dc, vat=0.05).set_index("공고번호")
+    assert pd.isna(tc.at["C", "관급자관급액_문서"]), "관급자관급액 칸에 든 총공사금액도 싣지 않는다"
+    assert pd.isna(tc.at["V", "도급자관급액_문서"]) and tc.at["V", "관급자관급액_문서"] == 7_000_000, "부가세율은 설정값(5%)으로 견준다"
+    assert pipeline.assemble_trade_table(ltc, dc).set_index("공고번호").at["V", "도급자관급액_문서"] == 105_000_000
+    # ── ② 연면적: 부분 공사 공고(건축·기타, 프로젝트 최대 공고의 20% 미만)의 값은 쓰지 않고, 건축 공고에 값이 없으면 여러 공고가 같게 적은 값
+    c = lambda v, trade, amt, key="k": {"v": v, "raw": v, "trade": trade, "amt": amt, "key": key}
+    pick, why = pipeline._pick_area([c(113, "건축", 22_383_636, "철거"), c(5181.08, "소방", 300e6), c(5181.08, "전기", 500e6), c(5200, "정보통신", 200e6)], 4_000e6)
+    assert pick["v"] == 5181.08 and why == "", (pick, why)
+    pick, why = pipeline._pick_area([c(40, "건축", 175_818_182, "목업-000")], 60_000e6)
+    assert pick is None and "연면적 미채택" in why and "목업-000" in why and "40㎡" in why, why
+    assert pipeline._pick_area([c(644.88, "건축", 3_000e6), c(16959.27, "전기", 400e6), c(16959.27, "소방", 200e6)], 3_000e6)[0]["v"] == 644.88, "본 건축 공고의 값이 먼저"
+    assert pipeline._pick_area([c(900, "전기", 60e6), c(1200, "소방", 40e6)], 2_000e6)[0]["v"] == 900, "일치하는 값이 없으면 남은 후보의 첫째"
+    pick, why = pipeline._pick_area([c(976, "기타", 44_575_455, "석면-000")], 912_928_182)
+    assert pick is None and "기타 공고 석면-000" in why and "4.9%" in why, "기타 공종의 석면 철거 공고(최대 공고의 4.9%)도 부분 공사"
+    assert pipeline.AREA_MINOR_SHARE == 0.20
+    assert pipeline._pick_area([c(300, "건축", 400e6, "부속동")], 5_000e6)[0] is None, "최대 공고의 8% 인 건축 공고는 부분 공사"
+    assert pipeline._pick_area([c(198.36, "건축", 519_640_909, "부대시설")], 3_770e6)[0] is None, "최대 공고의 13.8% 인 건축 공고도 부분 공사(실자료 F2882-N: 토목 37.7억 조성사업의 부대시설)"
+    assert pipeline._pick_area([c(300, "건축", 950e6, "부속동")], 5_000e6)[0] is None, "19% 도 부분 공사"
+    assert pipeline._pick_area([c(300, "건축", 1_000e6, "부속동")], 5_000e6)[0]["v"] == 300, "꼭 20% 면 부분 공사가 아니다"
+    assert pipeline._pick_area([c(300, "전기", 10e6)], 5_000e6)[0]["v"] == 300, "건축·기타가 아닌 공종은 금액이 작아도 쓴다"
+    agree = [c(1000, "전기", 600e6), c(1300, "소방", 50e6), c(1310, "정보통신", 40e6)]
+    assert pipeline._pick_area(agree, 600e6)[0]["v"] == 1300, "건축 공고에 값이 없으면 두 공고가 같게(1% 이내) 적은 값이 금액 큰 한 공고의 값보다 먼저"
+    assert pipeline._pick_area(agree[:2], 600e6)[0]["v"] == 1000
+    assert pipeline._pick_area([c(900, "전기", 600e6), c(1200, "소방", 400e6), c(1250, "정보통신", 300e6)], 9_000e6)[0]["v"] == 900, "4% 다른 값은 같은 값이 아니다"
+    assert pipeline._pick_area([c(900, "전기", 600e6), c(1200, "소방", 500e6), c(1200, "정보통신", 300e6), c(900.5, "기계설비", 100e6)], 9_000e6)[0]["v"] == 1200, "일치한 공고 수가 같으면 금액 합이 큰 쪽"
+    lt7 = pd.DataFrame([dict(base, 프로젝트ID="P7", 공고키="M7-000", 공고번호="M7", 공종="건축", 추정가격=1_000_000_000),
+                        dict(base, 프로젝트ID="P7", 공고키="A7-000", 공고번호="A7", 공종="건축", 추정가격=220_000_000),
+                        dict(base, 프로젝트ID="P7", 공고키="E7-000", 공고번호="E7", 공종="전기", 추정가격=100_000_000),
+                        dict(base, 프로젝트ID="P7", 공고키="S7-000", 공고번호="S7", 공종="소방", 추정가격=100_000_000),
+                        dict(base, 프로젝트ID="P6", 공고키="M6-000", 공고번호="M6", 공종="건축", 추정가격=1_000_000_000),
+                        dict(base, 프로젝트ID="P6", 공고키="E6-000", 공고번호="E6", 공종="전기", 추정가격=100_000_000),
+                        dict(base, 프로젝트ID="P5", 공고키="M5-000", 공고번호="M5", 공종="건축", 추정가격=1_000_000_000),
+                        dict(base, 프로젝트ID="P5", 공고키="K5-000", 공고번호="K5", 공종="기타", 추정가격=49_000_000)])
+    e7 = pipeline.enrich_facility(pd.DataFrame([{"프로젝트ID": "P7"}, {"프로젝트ID": "P6"}, {"프로젝트ID": "P5"}]), lt7,
+                                  {"A7-000": {"연면적_m2": 300.0}, "M6-000": {"연면적_m2": 0}, "E6-000": {"연면적_m2": 500.0},
+                                   "M5-000": {"구조": "철골조"}, "K5-000": {"연면적_m2": 976}}).set_index("프로젝트ID")
+    assert e7.at["P7", "연면적_m2"] == 300.0, "최대 공고의 22%(프로젝트 합계의 15%)인 건축 공고는 부분 공사가 아니다 — 기준은 최대 공고"
+    assert e7.at["P6", "연면적_m2"] == 500.0, "0 으로 적힌 연면적은 값이 아니다"
+    assert pd.isna(e7.at["P5", "연면적_m2"]) and e7.at["P5", "개요_출처"].startswith("건축 / 연면적 미채택: 기타 공고 K5-000 의 976㎡"), e7.at["P5", "개요_출처"]
+    assert pipeline._pick_area([c(36.96, "건축", 80e6)], 80e6)[0]["v"] == 36.96, "공고 하나짜리 프로젝트는 그 공고가 본 공사"
+    assert pipeline._pick_area([c(300, "건축", 1_200e6, "부속동")], 5_000e6)[0]["v"] == 300, "최대 공고의 20% 이상인 건축 공고는 그대로"
+    assert pipeline._pick_area([], 1e9) == (None, "")
+    # 금액을 모르는 공고(추정가격 없음 → 0)는 '작은 공고' 로 보지 않는다 / 까닭에 적는 면적은 자릿수를 줄이지 않는다
+    assert pipeline._pick_area([c(3000, "건축", 0.0, "본공사")], 36_508_000)[0]["v"] == 3000
+    assert "12,345.67㎡" in pipeline._pick_area([c(12345.67, "기타", 1e6, "철거")], 1e9)[1]
+    lt2 = pd.DataFrame([dict(base, 프로젝트ID="P9", 공고키="M-000", 공고번호="M", 공종="건축", 추정가격=4_000_000_000),
+                        dict(base, 프로젝트ID="P9", 공고키="D-000", 공고번호="D", 공종="건축", 추정가격=22_383_636),
+                        dict(base, 프로젝트ID="P9", 공고키="E-000", 공고번호="E", 공종="전기", 추정가격=500_000_000),
+                        dict(base, 프로젝트ID="P9", 공고키="S-000", 공고번호="S", 공종="소방", 추정가격=300_000_000),
+                        dict(base, 프로젝트ID="P8", 공고키="H-000", 공고번호="H", 공종="건축", 추정가격=90_000_000_000),
+                        dict(base, 프로젝트ID="P8", 공고키="U-000", 공고번호="U", 공종="건축", 추정가격=175_818_182)])
+    dd = {"M-000": {"구조": "철근콘크리트"}, "D-000": {"연면적_m2": 113, "건축면적_m2": 113, "지상층수": 1}, "E-000": {"연면적_m2": 5181.08}, "S-000": {"연면적_m2": 5181.08},
+          "H-000": {"용도": "숙박시설"}, "U-000": {"연면적_m2": 40}}
+    ef = pipeline.enrich_facility(pd.DataFrame([{"프로젝트ID": "P9"}, {"프로젝트ID": "P8"}]), lt2, dd).set_index("프로젝트ID")
+    assert ef.at["P9", "연면적_m2"] == 5181.08 and ef.at["P9", "지상층수"] == 1 and "전기" in ef.at["P9", "개요_출처"], ef.loc["P9"].to_dict()
+    assert pd.isna(ef.at["P9", "건축면적_m2"]), "철거 공고의 건축면적(철거한 건물)도 싣지 않는다"
+    assert pd.isna(ef.at["P8", "연면적_m2"]) and "연면적 미채택" in ef.at["P8", "개요_출처"] and ef.at["P8", "용도"] == "숙박시설", ef.loc["P8"].to_dict()
+    lt2z = pd.DataFrame([dict(base, 프로젝트ID="P7", 공고키="M2-000", 공고번호="M2", 공종="건축", 추정가격=4_000_000_000), dict(base, 프로젝트ID="P7", 공고키="E2-000", 공고번호="E2", 공종="전기", 추정가격=500_000_000)])
+    efz = pipeline.enrich_facility(pd.DataFrame([{"프로젝트ID": "P7"}]), lt2z, {"M2-000": {"연면적_m2": 0}, "E2-000": {"연면적_m2": 777}}).set_index("프로젝트ID")
+    assert efz.at["P7", "연면적_m2"] == 777, "0㎡ 는 값이 아니다 → 다른 공고의 값"
+    # ── ③ 포함공종_문서: 공종 라벨만 남긴다. 2차 대상은 주요 공종이 둘 이상일 때만
+    n = classify.normalize_trade_list
+    assert n("전기, 1식") == "전기" and n("정보통신·CCTV설비·주차관제설비") == "정보통신" and n("조경, 식재, 포장공, 부대공") == "조경"
+    assert n("건축(+100%·상대업종·철강구조물·철근·콘크리트)") == "건축" and n("가설·수장·토공") == "" and n("건축, 토목, 기계, 조경") == "건축·토목·기계설비·조경"
+    assert n("전기공사 및 소방시설공사(철거 포함)") == "전기·소방·철거"
+    assert classify.main_trade_count("전기·철거·가스") == 1 and classify.main_trade_count("건축·토목·1식") == 2 and classify.main_trade_count("") == 0
+    lt3 = pd.DataFrame([dict(base, 공고키="E1-000", 공고번호="E1", 공종="전기", 주공종명="전기공사업"), dict(base, 공고키="E2-000", 공고번호="E2", 공종="전기", 주공종명="전기공사업"),
+                        dict(base, 공고키="E3-000", 공고번호="E3", 공종="전기", 주공종명="전기공사업"), dict(base, 공고키="K1-000", 공고번호="K1", 공종="기타", 주공종명="")])
+    tg = pipeline._trade_targets(lt3, {"E1-000": {"포함공종_문서": "전기, 1식"}, "E2-000": {"포함공종_문서": "전기, 소방"}, "E3-000": {"포함공종_문서": "전기, 철거"},
+                                      "K1-000": {"포함공종_문서": "가설, 철거, 포장"}}, {})
+    assert tg == ["E2-000"], tg
+    t3 = pipeline.assemble_trade_table(lt3, {"E1-000": {"포함공종_문서": "전기, 1식"}, "K1-000": {"포함공종_문서": "가설, 철거, 포장"}}).set_index("공고번호")
+    assert t3.at["E1", "포함공종(종합)"] == "전기" and t3.at["K1", "포함공종_문서"] == "철거"
+    # 소방 공고의 '소방(기계, 전기)'·'기계소방, 전기소방' 은 소방의 두 분야이지 기계설비·전기 공종이 아니다(API 에 그 공종이 따로 있으면 그대로)
+    assert classify.drop_fire_subfields(n("소방(기계, 전기)"), "소방") == "소방" and classify.drop_fire_subfields(n("기계소방, 전기소방"), "소방") == "소방"
+    assert classify.drop_fire_subfields("소방·기계설비", "소방", "소방·기계설비") == "소방·기계설비" and classify.drop_fire_subfields("전기·소방", "전기") == "전기·소방"
+    assert classify.drop_fire_subfields("소방·정보통신", "소방") == "소방·정보통신" and classify.drop_fire_subfields("", "소방") == ""
+    lt3f = pd.DataFrame([dict(base, 공고키="S1-000", 공고번호="S1", 공종="소방", 주공종명="소방시설공사업"), dict(base, 공고키="S2-000", 공고번호="S2", 공종="소방", 주공종명="소방시설공사업"),
+                         dict(base, 공고키="S3-000", 공고번호="S3", 공종="소방", 주공종명="소방시설공사업", 부공종명="기계설비공사업")])
+    dfire = {"S1-000": {"포함공종_문서": "소방(기계, 전기)"}, "S2-000": {"포함공종_문서": "소방, 통신"}, "S3-000": {"포함공종_문서": "기계소방"}}
+    assert pipeline._trade_targets(lt3f, dfire, {}) == ["S2-000", "S3-000"], pipeline._trade_targets(lt3f, dfire, {})
+    t3f = pipeline.assemble_trade_table(lt3f, dfire).set_index("공고번호")
+    assert t3f.at["S1", "포함공종(종합)"] == "소방" and t3f.at["S1", "포함공종_문서"] == "소방" and t3f.at["S3", "포함공종(종합)"] == "소방·기계설비", t3f[["포함공종(종합)", "포함공종_문서"]].to_dict()
+    # ── ④ 사업유형 어휘: 앞 어절의 끝 글자와 뒤 어절의 첫 글자가 이어져 생긴 어휘, 다른 낱말 속의 어휘는 치지 않는다
+    w = classify.classify_work_type
+    assert w("공원녹지 권역별 관리공사(만수권역)") == "미분류", "'권역별 관리' 는 별관(증축)이 아니다"
+    assert w("2026년 노후영구임대 수선유지공사") == "유지보수", "'임대 수선' 은 대수선(리모델링)이 아니다"
+    assert w("쌍신축구장 천연잔디 유지관리공사") == "유지보수" and w("쌍신 축구장 조명시설 설치공사(전기)") == "유지보수", "'쌍신축구장' 의 신축"
+    assert w("종합운동장 통신설비 및 선로교체 도급공사") == "유지보수", "'통신설비' 의 신설"
+    assert w("○○센터 건축 조경공사") == "미분류" and w("혁신 축산단지 진입로 정비공사") == "유지보수"
+    assert w("대전 신축구장 관람석 설치공사") == "미분류" and w("신축구장 주변 정비공사") == "미분류", "어절 첫머리의 '신축구장' 은 신축 + 구장일 수 있다 → 예전처럼 검토 대상(미분류)"
+    # 유지보수 어휘는 예전처럼 공백을 뺀 문자열에서 찾는다(유지보수 → 미분류로 바뀌어 재검색에 새로 들어오는 공고가 생기지 않게)
+    assert w("외벽방 수공사") == "유지보수" and w("노후시설 개선공사") == "유지보수"
+    # 띄어 쓴 어휘·낱자 띄어쓰기·온전한 어휘는 그대로 잡는다
+    assert w("○○초등학교 별관 증축공사") == "증축" and w("문화회관 별관 건립공사") == "증축" and w("시민회관 대수선 공사") == "리모델링"
+    assert w("주민센터 환경 개선 공사") == "유지보수" and w("청사 대 수선 공사") == "리모델링" and w("○ ○ 도 서 관 증 축 공 사") == "증축"
+    assert w("풋살장 및 축구장 신축공사") == "신축" and w("축구센터 건립공사") == "신축" and w("정보통신설비 신설공사") == "신축"
+    assert w("기능보강 리모델링 공사") == "리모델링" and w("기능보강리모델링공사") == "리모델링" and w("재건축 조경공사") == "리모델링"
+    assert w("도시철도 1호선 구암역 환승주차장 건설 기계설비공사") == "미분류", "신축 어휘 + 부속어(주차장·설비)는 예전대로"
+    # 붙여 쓴 '건축조경' 의 축조 / 공고명 맨 앞에서 시작하는 낱자 띄어쓰기 / 숫자 뒤에서 걸린 어휘('2개 보수', '2건 설치') / 우연히 걸린 자리 뒤에 진짜 어휘가 또 있는 공고명
+    assert w("○○센터 건축조경공사") == "미분류" and w("증 축 공 사") == "증축" and w("쌍신축구센터 잔디 보수") == "유지보수"
+    assert w("화장실 2개 보수공사") == "유지보수" and w("소방시설 등 2건 설치공사") == "미분류"
+    assert w("혁신 축산단지 관리동 신 축 공 사") == "신축", "앞의 '혁신 축산' 은 버리되 뒤의 '신 축' 은 잡는다"
+    # ── ⑤ 2차 검증: 기초금액이 없는 공고는 추정가격 + 부가세도 기준 후보 / 합계 밖에 따로 적힌 관급·부가세 행
+    td = normalize_trade_doc({"합계_원": "109100000000", "공종별금액": [{"공종": "건축", "항목명_원문": "건축공사", "금액_원": "80000000000"}, {"공종": "전기", "항목명_원문": "전기공사", "금액_원": "18140000000"},
+                                                                {"공종": "정보통신", "항목명_원문": "통신공사", "금액_원": "8350000000"}, {"공종": "소방", "항목명_원문": "소방공사", "금액_원": "2610000000"}]})
+    row = {"공고번호": "V", "공종": "건축", "추정가격": 99_181_818_182, "기초금액": None}
+    basis = [l for l in cross_verify_trades("V", row, td) if l["항목"] == "집계표합계 기준"][0]
+    assert basis["판정"] == "참고" and "추정가격 + 부가세" in basis["비고"], basis
+    assert pipeline._alloc_decision(row, td) == "Y"
+    row2 = dict(row, 도급자관급액_API=3_000_000_000, 관급자관급액_API=30_000_000_000)      # 관급자 설치분은 집계표에 없고 도급자 설치분만 든 문서
+    td2 = normalize_trade_doc({"합계_원": "112100000000", "공종별금액": td["공종별금액"] + [{"공종": "관급자재", "항목명_원문": "도급자설치 관급자재", "금액_원": "3000000000"}]})
+    b2 = [l for l in cross_verify_trades("V2", row2, td2) if l["항목"] == "집계표합계 기준"][0]
+    assert b2["판정"] == "참고" and "도급자관급" in b2["비고"], b2
+    far = [l for l in cross_verify_trades("V3", row, normalize_trade_doc({"합계_원": "150000000000", "공종별금액": td["공종별금액"]})) if l["항목"] == "집계표합계 기준"][0]
+    assert far["판정"] == "경고", "맞는 기준이 없는 집계표는 여전히 경고"
+    out = normalize_trade_doc({"합계_원": "6624341000", "관급자재_포함여부": "제외", "공종별금액": [
+        {"공종": "건축", "항목명_원문": "건축공사", "금액_원": "4954661000"}, {"공종": "토목", "항목명_원문": "토목공사", "금액_원": "1370487000"},
+        {"공종": "기계설비", "항목명_원문": "기계설비공사", "금액_원": "299193000"}, {"공종": "관급자재", "항목명_원문": "관급자재비", "금액_원": "2090000000"}]})
+    r4 = {"공고번호": "X4", "공종": "건축", "추정가격": 6_022_128_182, "기초금액": 6_624_341_000}
+    assert pipeline._alloc_decision(r4, out) == "Y", pipeline._alloc_decision(r4, out)
+    assert [l for l in cross_verify_trades("X4", r4, out) if l["항목"] == "공종합=집계표합계"][0]["판정"] == "정상"
+    dup = normalize_trade_doc({"합계_원": "1000", "공종별금액": [{"공종": "건축", "항목명_원문": "건축공사", "금액_원": "900"}, {"공종": "전기", "항목명_원문": "전기공사", "금액_원": "600"}]})
+    assert "중복·다른 집계표 의심" in pipeline._alloc_decision({"공고번호": "X5", "추정가격": 909, "기초금액": 1000}, dup), "공종 행 합이 합계의 150% 인 문서는 여전히 배분하지 않는다"
+    # 맞아떨어지는 조합이 없는 문서는 예전대로 비공종 행을 모두 합계에서 뺀다(문서의 '관급자재_포함여부' 표기는 보지 않는다 — 금액이 1% 안에서 맞는지만 본다):
+    # 관급이 합계의 대부분인 문서는 '일부 행만 읽힘', 공종 행 합이 합계를 넘는 문서는 '중복 의심' 그대로
+    part_only = normalize_trade_doc({"합계_원": "72380000", "관급자재_포함여부": "포함", "공종별금액": [{"공종": "기계설비", "항목명_원문": "기계설비공사", "금액_원": "4222570"},
+                                                                                       {"공종": "관급자재", "항목명_원문": "관급자재", "금액_원": "70020000"}, {"공종": "부가세", "항목명_원문": "부가세", "금액_원": "6580000"}]})
+    dec = pipeline._alloc_decision({"공고번호": "X7", "추정가격": 65_800_000, "기초금액": 72_380_000}, part_only)
+    assert dec.startswith("N(") and "일부 행만" in dec, dec
+    unk = normalize_trade_doc({"합계_원": "7417173000", "관급자재_포함여부": "불명", "공종별금액": [{"공종": "건축", "항목명_원문": "건축공사", "금액_원": "5000000000"}, {"공종": "전기", "항목명_원문": "전기공사", "금액_원": "3221529304"},
+                                                                                       {"공종": "관급자재", "항목명_원문": "관급자재", "금액_원": "2800000000"}]})
+    dec = pipeline._alloc_decision({"공고번호": "X8", "추정가격": 6_742_884_545, "기초금액": 7_417_173_000}, unk)
+    assert "중복·다른 집계표 의심" in dec, dec
+    inside = normalize_trade_doc({"합계_원": "1300", "공종별금액": [{"공종": "건축", "항목명_원문": "건축공사", "금액_원": "1000"}, {"공종": "관급자재", "항목명_원문": "관급자재비", "금액_원": "300"}]})
+    assert [l for l in cross_verify_trades("X6", {"추정가격": 909, "기초금액": 1000, "관급자재_API": 300}, inside) if l["항목"] == "공종합=집계표합계"][0]["판정"] == "정상", "관급이 합계 안에 든 문서도 정상"
+    # 합계 안팎은 라벨 단위가 아니라 행 단위로 고른다(실자료 20230541184: 부가세·도급자 설치 관급은 합계 안, 관급자 설치 관급·분담금은 합계 밖)
+    from g2b_costdb.extract_llm import inside_total_rows
+    mix = normalize_trade_doc({"합계_원": "2880650000", "공종별금액": [
+        {"공종": "전기", "항목명_원문": "추정가격", "금액_원": "1989304773"}, {"공종": "부가세", "항목명_원문": "부가가치세", "금액_원": "198930477"},
+        {"공종": "관급자재", "항목명_원문": "도급자설치관급액", "금액_원": "692415000"}, {"공종": "관급자재", "항목명_원문": "관급자설치관급액", "금액_원": "522563000"},
+        {"공종": "배분제외", "항목명_원문": "기타금액(분담금 등)", "금액_원": "46936000"}]})
+    assert inside_total_rows(mix["공종별금액"], 2_880_650_000, 1_989_304_773) == (198_930_477 + 692_415_000, True)
+    r9 = {"공고번호": "X9", "공종": "전기", "추정가격": 1_989_304_773, "기초금액": 2_188_235_000, "도급자관급액_API": 692_415_000, "관급자관급액_API": 522_563_000}
+    b9 = [l for l in cross_verify_trades("X9", r9, mix) if l["항목"] == "집계표합계 기준"][0]
+    assert pipeline._alloc_decision(r9, mix) == "Y" and b9["판정"] == "참고" and "기초금액 + 도급자관급(API)" in b9["비고"], b9
+    b10 = [l for l in cross_verify_trades("V4", dict(row, 도급자관급액_API=3_000_000_000), td2) if l["항목"] == "집계표합계 기준"][0]
+    assert "관급자재(API)" in b10["비고"] and "도급자관급" not in b10["비고"], "관급자 설치분이 없으면 '+ 도급자관급' 후보를 따로 두지 않는다"
+    it = lambda lab, amt: {"공종": lab, "항목명_원문": lab, "금액_원": amt}
+    assert inside_total_rows([it("건축", 1000), it("간접비", 300), it("관급자재", 200)], 1300, 1000) == (300, True), "공통가설·간접비는 늘 합계 안"
+    assert inside_total_rows([it("건축", 1000), it("배분제외", 50)], 1050, 1000) == (50, True) and inside_total_rows([it("건축", 1000), it("배분제외", 50)], 1000, 1000) == (0, True)
+    assert inside_total_rows([it("건축", 1000)], 1005, 1000)[1] is True and inside_total_rows([it("건축", 1000)], 1015, 1000)[1] is False, "맞음 = 1% 이내"
+    many = [it("건축", 1000)] + [it("관급자재", 10)] * 13            # 비공종 행이 12개를 넘으면 라벨 단위로만 넣고 뺀다(행 5개만 넣는 조합은 찾지 않는다)
+    assert inside_total_rows(many, 1130, 1000) == (130, True) and inside_total_rows(many, 1050, 1000)[1] is False
+    # 분리발주 중복 가능 로그: 배분적용 N 인 공고는 05 가 아니라 04b 를 보라고 적고, 여러 시설에 배정된 공고도 한 번만
+    lt5 = pd.DataFrame([dict(base, 프로젝트ID=pid, 공고키="A-000", 공고번호="A", 공종="건축", 추정가격=909, 기초금액=1000) for pid in ("P1", "P2")] +
+                       [dict(base, 프로젝트ID=pid, 공고키="E-000", 공고번호="E", 공종="전기", 추정가격=10, 기초금액=11) for pid in ("P1", "P2")])
+    d5 = pipeline._trade_dup_logs(lt5, {"A-000": dup})
+    assert len(d5) == 1 and "배분적용 N" in d5[0]["비고"] and "04b" in d5[0]["비고"], d5
+    okdoc = normalize_trade_doc({"합계_원": "1000", "공종별금액": [{"공종": "건축", "항목명_원문": "건축공사", "금액_원": "800"}, {"공종": "전기", "항목명_원문": "전기공사", "금액_원": "200"}]})
+    d6 = pipeline._trade_dup_logs(lt5, {"A-000": okdoc})
+    assert len(d6) == 1 and "05 '문서배분_중복경고' 참고" in d6[0]["비고"], d6
+    # ── ⑥ '견적서 제출 안내공고' 가 세부사업명에 '서 제출' 로 남지 않는다
+    assert works.clean_title("△△ 체육관 방수공사 견적서제출안내공고") == "△△ 체육관 방수공사" and works.clean_title("2인 견적서 제출 서산문화회관 보수공사") == "2인 서산문화회관 보수공사"
+    assert works.clean_title("수의견적서울시립미술관 방수공사") == "서울시립미술관 방수공사" and works.clean_title("○○도서관 견적서고 리모델링 공사") == "○○도서관 서고 리모델링 공사", "'견적' 에 붙은 다음 낱말의 첫 글자 '서' 는 남긴다"
+    assert works.clean_title("용인시문예회관 별관 개량공사 수의계약 견적서 제출 안내공고") == "용인시문예회관 별관 개량공사"
+    assert works.clean_title("△△ 체육관 방수공사 (수의계약 견적서 제출 안내공고)") == "△△ 체육관 방수공사"
+    assert works.clean_title("예산군 문예회관 외부 리모델링 공사 소액수의견적제출 안내  공고") == "예산군 문예회관 외부 리모델링 공사"
+    assert works.clean_title("△△ 체육관 방수공사 견적서 제출 안내공고") == "△△ 체육관 방수공사", "'수의계약' 없이 '견적서 제출' 만 있는 공고명"
+    # ── ⑦ discover 요약: '포함' 으로 들어갈 새 시설을 먼저·빠짐없이 보이고, 검수하지 않으면 어떻게 되는지 알린다. research 도 같은 행을 알린다
+    import io, contextlib
+    from g2b_costdb import discover
+    ST = discover.STATUS_COL
+    rows = [{"시설ID": f"F{i:04d}", "시설명_후보": f"시설{i}", "검수_시설명": f"시설{i}", "검수_포함여부": "제외", ST: "신규"} for i in range(1, 19)]
+    rows[16]["검수_포함여부"] = rows[17]["검수_포함여부"] = "포함"                       # 17·18번째 행(예전에는 15행에서 잘려 화면에 나오지 않았다)
+    rows += [{"시설ID": "F0100", "시설명_후보": "기존", "검수_시설명": "기존", "검수_포함여부": "포함", ST: "신규 행(같은 시설 F0001 의 다른 검색어: 검수 값은 그 행과 같게 둠)"},
+             {"시설ID": "F0101", "시설명_후보": "지난", "검수_시설명": "지난", "검수_포함여부": "포함", ST: "지난번: 신규 / 지난번: 비슷한 기존 시설: F0001 '시설1' → 같은 시설이면 …"},
+             {"시설ID": "F0102", "시설명_후보": "그대로", "검수_시설명": "그대로", "검수_포함여부": "포함", ST: ""}]
+    agg = pd.DataFrame(rows)
+    assert list(pipeline._unreviewed_new_included(agg)["시설ID"]) == ["F0017", "F0018", "F0101"]
+    assert pipeline._unreviewed_new_included(agg.drop(columns=[ST])).empty and pipeline._unreviewed_new_included(pd.DataFrame()).empty
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        pipeline._review_change_report(agg)
+    out = buf.getvalue()
+    new_part = out[out.index("새 시설(기본값 확인): 18행"):]
+    assert new_part.index("F0017") < new_part.index("F0001") and "F0018 시설18 [포함]" in new_part and "… 외 3행" in new_part, out
+    assert "[주의] 새로 잡힌 시설 가운데 검수_포함여부가 '포함'(기본값)인 3행: F0017, F0018, F0101" in out and "유료 추출" in out, out
+    many = pd.DataFrame([{"시설ID": f"F{i:04d}", "시설명_후보": f"시설{i}", "검수_시설명": f"시설{i}", "검수_포함여부": "포함" if i > 3 else "제외", ST: "신규"} for i in range(1, 24)])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        pipeline._review_change_report(many)
+    assert all(f"F{i:04d} 시설{i} [포함]" in buf.getvalue() for i in range(4, 24)) and "… 외 3행" in buf.getvalue(), "'포함' 인 새 시설 20행은 15행에서 잘리지 않는다"
+    assert len(pipeline._unreviewed_new_included(pd.DataFrame([{"시설ID": "F1", "검수_포함여부": " 포함 ", ST: " 신규"}]))) == 1, "재검색(read_reviewed)과 같은 기준: 앞뒤 공백은 뗀다"
+    # 지난 실행 때 새로 잡혀 아직 그대로인 행(검수 없이 discover 를 한 번 더 돌린 경우): 사업유형·시설키가 달라져 다른 표시가 앞에 붙어도 새 시설로 세고,
+    # '지난 실행 때 표시됐고 …' 묶음에서도 '포함' 인 행을 먼저·빠짐없이 보인다(2026-11-21 PC 의 다음 실행이 바로 이 경우: 새 18행이 모두 '지난번: 신규')
+    late = [{"시설ID": f"F{i:04d}", "시설명_후보": f"시설{i}", "검수_시설명": f"시설{i}", "검수_포함여부": "제외", ST: "지난번: 신규"} for i in range(1, 19)]
+    late[15]["검수_포함여부"] = late[16]["검수_포함여부"] = late[17]["검수_포함여부"] = "포함"
+    late[16][ST] = "확인: 사업유형 증축→미분류, 새 기본값 '검토필요'(지금 '포함' 그대로 둠) / 지난번: 신규"
+    late[17][ST] = "후보 이름 바뀜: 'a' → 'b'(이전 줄의 공고명_예시로 다시 맞춤. 다른 시설로 보이면 검수 칸 확인) / 지난번: 신규"
+    agg2 = pd.DataFrame(late)
+    assert list(pipeline._unreviewed_new_included(agg2)["시설ID"]) == ["F0016", "F0017", "F0018"]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        pipeline._review_change_report(agg2)
+    part = buf.getvalue()[buf.getvalue().index("지난 실행 때 표시됐고"):]
+    assert all(f"F00{i} 시설{i} [포함]" in part for i in (16, 17, 18)) and part.index("F0016") < part.index("F0001") and "… 외 3행" in part, buf.getvalue()
+    # 갱신_표시 열을 복사해 같은 이름의 열이 둘인 파일에서도 research 의 알림 때문에 멈추지 않는다
+    dup_cols = pd.concat([agg, agg[[ST]]], axis=1)
+    assert list(pipeline._unreviewed_new_included(dup_cols)["시설ID"]) == ["F0017", "F0018", "F0101"]
+    # research: 재검색을 시작하기 전에 같은 행을 알린다
+    cfg_r = dict(load_config())
+    cfg_r["paths"] = dict(cfg_r["paths"], data_dir=os.path.join(tmp, "rs", "data"), out_dir=os.path.join(tmp, "rs", "out"))
+    os.makedirs(cfg_r["paths"]["data_dir"], exist_ok=True)
+    pd.DataFrame([{"공고명": "x", "수요기관": "y"}]).to_parquet(os.path.join(cfg_r["paths"]["data_dir"], "notices_std.parquet"), index=False)
+    discover.write_review_workbook(agg, os.path.join(cfg_r["paths"]["out_dir"], "facility_candidates.xlsx"))
+    real_rs, buf = discover.research_by_facility, io.StringIO()
+    discover.research_by_facility = lambda std, reviewed: pd.DataFrame()
+    try:
+        with contextlib.redirect_stdout(buf):
+            pipeline.stage_research(cfg_r)
+        raise AssertionError("재검색 결과가 없으면 멈춰야 한다")
+    except SystemExit as e:
+        assert "재검색 결과 없음" in str(e)
+    finally:
+        discover.research_by_facility = real_rs
+    assert "[주의] 검수 파일에 새로 잡힌 시설 3행이 '포함' 으로 들어 있습니다" in buf.getvalue() and all(x in buf.getvalue() for x in ("F0017 시설17", "F0018 시설18", "F0101 지난")), buf.getvalue()
+    # discover 마지막 표: 이번 후보에 없어 남겨 둔 행은 세지 않는다(머리줄의 후보 시설 수와 합이 같다)
+    from g2b_costdb import collect
+    cfg_d = dict(load_config())
+    cfg_d["paths"] = dict(cfg_d["paths"], data_dir=os.path.join(tmp, "dc", "data"), raw_dir=os.path.join(tmp, "dc", "raw"), out_dir=os.path.join(tmp, "dc", "out"))
+    cfg_d["api"] = dict(cfg_d["api"], use_awards=False)
+    os.makedirs(cfg_d["paths"]["data_dir"], exist_ok=True)
+    agg_d = pd.DataFrame([{"시설ID": "F0001", "표2_대분류": "문화 및 집회시설", "사업유형": "신축", ST: "", "검수_포함여부": "포함"},
+                          {"시설ID": "F0002", "표2_대분류": "숙박시설", "사업유형": "증축", ST: "신규", "검수_포함여부": "포함"},
+                          {"시설ID": "F0003", "표2_대분류": "문화 및 집회시설", "사업유형": "신축", ST: "이번 후보에 없음(이전 내용 그대로 둠)", "검수_포함여부": "제외"}])
+    saved = (collect.incomplete_months, pipeline._read_raw_notices, discover.standardize, discover.discover_candidates)
+    collect.incomplete_months, pipeline._read_raw_notices = (lambda cfg, prefix: []), (lambda cfg: pd.DataFrame())
+    discover.standardize = lambda raw, cfg, bsis, awards=None: pd.DataFrame([{"공고명": "x"}] * 5)
+    discover.discover_candidates = lambda std, previous_review=None, ids_only=False, recalc=False: agg_d
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            pipeline.stage_discover(cfg_d)
+    finally:
+        collect.incomplete_months, pipeline._read_raw_notices, discover.standardize, discover.discover_candidates = saved
+    import re as _re
+    out = buf.getvalue()
+    assert "후보 시설 2개(이번 후보에 없어 남겨 둔 1행은 따로)" in out and _re.search(r"문화 및 집회시설\s+1\n", out) and _re.search(r"신축\s+1\n", out), out
+    # extract 견적 줄: 같은 공고가 여러 시설에 배정돼 있어도 고유 공고로 센다(대상 + 완료 + 텍스트 없음 = 대표 공고)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        pipeline._print_estimate(load_config(), {"A-000": "t", "B-000": "t"}, ["B-000"], {"A-000": {"신뢰도": "high"}, "OLD-000": {"신뢰도": "high"}},
+                                 pd.DataFrame([{"공고키": "A-000"}, {"공고키": "A-000"}, {"공고키": "B-000"}, {"공고키": "C-000"}, {"공고키": "C-000"}]))
+    assert "LLM 추출 대상: 1건 (대표 공고 3건(고유) 중 이미 완료 1건, 텍스트 없음 1건)" in buf.getvalue(), buf.getvalue()
+    # ── ⑧ attach: 같은 공고가 여러 시설에 배정돼 있어도 한 번만 처리하고, 이전에 겹쳐 쌓인 똑같은 기록은 한 줄로
+    from g2b_costdb import attachments
+    cfg = load_config()
+    cfg["paths"] = dict(cfg["paths"], data_dir=os.path.join(tmp, "att", "data"), files_dir=os.path.join(tmp, "att", "files"), text_dir=os.path.join(tmp, "att", "text"))
+    for k in ("data_dir", "files_dir", "text_dir"):
+        os.makedirs(cfg["paths"][k], exist_ok=True)
+    lt8 = pd.DataFrame([dict(base, 프로젝트ID=pid, 시설ID=fid, 공고키="Z-000", 공고번호="Z", 추정가격=1, 기초금액=1, 첨부URL1="http://x/a.hwp", 첨부파일명1="a.hwp")
+                        for pid, fid in (("P1", "F1"), ("P2", "F2"), ("P3", "F3"))])
+    lt8.to_parquet(os.path.join(cfg["paths"]["data_dir"], "notices_latest.parquet"), index=False)
+    old_rec = {"공고번호": "OLD", "파일명": "b.hwp", "우선순위": 1, "URL": "http://x/b.hwp", "다운로드": "Y", "추출성공": "Y", "추출글자수": 10, "파서": "p", "오류": ""}
+    pd.DataFrame([old_rec, old_rec, old_rec]).to_parquet(os.path.join(cfg["paths"]["data_dir"], "notes_attach.parquet"), index=False)
+    calls = []
+    real = attachments.process_notice_attachments
+    def fake(rd, files_dir, text_dir, attach_max=10):
+        calls.append(rd["공고키"])
+        return "", [{"공고번호": "Z", "파일명": "a.hwp", "우선순위": 1, "URL": "http://x/a.hwp", "다운로드": "N", "추출성공": "N", "추출글자수": 0, "파서": "", "오류": "다운로드 실패"}]
+    attachments.process_notice_attachments = fake
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            pipeline.stage_attach(cfg)
+    finally:
+        attachments.process_notice_attachments = real
+    nt = pd.read_parquet(os.path.join(cfg["paths"]["data_dir"], "notes_attach.parquet"))
+    assert calls == ["Z-000"] and sorted(nt["공고번호"]) == ["OLD", "Z"], (calls, nt["공고번호"].tolist())
+
+
 def test_research_fallback_and_merge():
     """정확한 이름으로 못 찾으면 어절 간격을 허용해 찾고, 같은 시설ID의 검수 행은 한 시설로 병합한다."""
     from g2b_costdb.classify import extract_facility_name, clean_notice_name
@@ -3273,6 +3631,7 @@ def run():
         test_discover_keeps_review(tmp)
         test_discover_keeps_merged_row_order()
         test_discover_new_row_hints()
+        test_audit_1121_fixes(tmp)
         test_institution_prefix()
         test_research_fallback_and_merge()
         test_research_other_orders()
