@@ -1,6 +1,7 @@
 """S7 Excel DB 생성 (openpyxl, 수식 기반).
 
 시트: README / 01_시설마스터 / 02_공고목록_전체 / 03_공고목록_최신 / 04_공사비DB_공종별 / 05_공사비DB_시설합산 / 06_검증로그 / 07_추출노트
+      (+ 08_용역공고(참고): link-servc 결과가 있을 때만 — 05 에 용역 참고 열이 함께 생긴다)
 색상: 파란 글자 = 원천값(API/문서), 검은 글자 = 수식, 노란 배경 = 사용자 입력·검수 셀
 """
 from __future__ import annotations
@@ -35,6 +36,12 @@ FAC_INPUT_COLS = ["구조", "지하층수", "지상층수", "연면적_m2", "대
 S_TRADE = "04_공사비DB_공종별"
 S_TRADE_DETAIL = "04b_공종세부내역(문서)"
 S_FAC = "05_공사비DB_시설합산"
+S_SERVC = "08_용역공고(참고)"
+SERVC_KINDS = ["설계", "건설사업관리·감리", "폐기물처리"]                       # servc.KINDS 와 같다(05 의 용역 참고 열)
+SERVC5_COLS = [f"용역_{k}_추정가격(수식)" for k in SERVC_KINDS] + ["용역_공고수(수식)"]
+SERVC_COLS = ["프로젝트ID", "시설ID", "시설명", "용역종류", "용역세부", "합산여부", "합산제외_까닭", "연결강도", "연결근거", "공고번호", "공고차수", "공고명", "공고일시",
+              "공고기관", "수요기관", "추정가격", "배정예산", "상태", "공고종류", "용역구분", "조달분류", "프로젝트_후보", "공사_최초공고일", "공사대비_개월",
+              "공사비대비_비율", "상세URL"]
 DETAIL_COLS = ["프로젝트ID", "시설ID", "시설명", "사업유형", "상위공종", "공고번호", "공고차수", "공고키", "세부공종", "항목명_원문",
                "금액_원_문서", "비율(수식)", "배분금액(수식)", "배분적용", "금액기준", "관급자재_포함", "단위", "집계표합계_원_문서", "출처파일", "신뢰도", "근거문구"]
 DETAIL_EXCLUDED = ["공통가설", "간접비", "관급자재", "부가세", "합계", "배분제외"]     # 비율 배분의 분자·분모에서 빼는 행('합계' = 여러 공종을 합친 도급비·총공사비 행, '배분제외' = 이설비·분담금·용역비 등 도급 공사비 밖 항목)
@@ -121,7 +128,8 @@ def bundled_trades_by_project(trade: pd.DataFrame) -> Dict[str, str]:
 
 def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest: pd.DataFrame,
                    trade: pd.DataFrame, logs: pd.DataFrame, notes: pd.DataFrame, meta: Optional[Dict] = None,
-                   trade_detail: Optional[pd.DataFrame] = None) -> None:
+                   trade_detail: Optional[pd.DataFrame] = None, servc: Optional[pd.DataFrame] = None) -> None:
+    """servc = link-servc 의 연결 표(없으면 None). None 이면 워크북은 예전과 똑같이 만들어진다(08 시트·05 의 용역 열 없음)."""
     wb = Workbook()
     # ── README ──
     ws = wb.active
@@ -153,6 +161,22 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
         ["06_검증로그", "API-문서 교차검증, 재발주 금액변동, 정합성 점검 결과"],
         ["07_추출노트", "첨부파일별 다운로드·텍스트 추출 결과"],
     ]
+    if servc is not None:
+        lines += [
+            [S_SERVC, "용역 입찰공고(설계·건설사업관리/감리·폐기물 처리) 가운데 이 DB 의 시설에 이어진 공고(link-servc). 한 줄 = 용역 공고 × 시설. "
+                      "공사비가 아니라 참고 자료다 — 05 의 총공사비합계·㎡당 공사비에는 들어가지 않는다."],
+            ["용역(08·05)", "연결 조건: 용역 공고명에 시설 이름이 있고, 수요기관이 그 시설 공사 공고의 수요기관과 같은 발주 주체(같은 지자체·교육청·기관. 광역 이름이 바뀐 경우 포함). "
+                          "어느 프로젝트의 용역인지는 공고 시점이 맞는 프로젝트 가운데 공고명의 사업 이름·사업유형·공사와의 간격으로 정하고, 가릴 수 없으면 프로젝트ID 를 비워 둔다. "
+                          "05 의 '용역_○○_추정가격' = 08 에서 그 프로젝트·그 종류이면서 합산여부가 Y 인 줄의 추정가격 합(부가세 제외. 합산여부 Y 인 공고가 없으면 빈칸 — 0 이 아니다. "
+                          "N 으로만 이어진 공고는 08 에 있을 수 있다). "
+                          "합산여부 N 의 까닭은 '합산제외_까닭' 열: 취소·재공고로 대체된 공고, 여러 시설을 묶은 공고, 연간·단가 계약, 부대 용역(타당성·VE·공모 관리 등), "
+                          "유지보수 성격의 공사에 딸린 용역, 같은 계열의 다른 기관(다른 소속기관·지사·학교)이 낸 공고, 다른 시설에도 이어진 공고, 연결이 추정인 줄, 프로젝트를 정하지 못한 줄. "
+                          "노란 칸(합산여부·프로젝트ID)은 고칠 수 있고 05 가 따라 바뀐다 — 프로젝트ID 가 빈 줄은 프로젝트ID 도 적어야 더해지고, 종류가 '기타' 인 줄은 금액 열에 들어가지 않는다"
+                          "(excel 을 다시 만들면 처음 값으로 돌아간다). "
+                          "이어진 공고가 없다고 용역이 없었던 것은 아니다: 설계 공고는 공사보다 1~3년 먼저 나므로 수집 기간의 첫 2~3년에 공고된 공사의 설계 공고는 용역 수집 기간보다 앞일 수 있고, "
+                          "소액 용역은 공고 없이 수의계약으로 집행되며, 2024-04 이전 LH 공공주택의 설계·건설사업관리는 LH 자체 시스템으로 발주됐다. "
+                          "연결은 공고명과 발주 기관만으로 한 것이므로 금액을 쓰기 전에 08 의 공고명을 확인할 것."],
+        ]
     for l in lines:
         ws.append(l)
     ws["A1"].font = Font(name="Arial", size=12, bold=True)
@@ -311,7 +335,8 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
     fcols = ["프로젝트ID", "시설ID", "시설명", "세부사업명", "세부사업수", "사업유형", "표2_대분류", "표2_중분류", "수요기관", "연면적_m2", "지상층수", "지하층수", "구조",
              "공고연도"] + [f"{tr}(수식)" for tr in TRADES] + ["건축공종계(수식)"] + TOTAL5_COLS + ["건설공사비지수_보정계수(입력)"] + ADJ5_COLS \
         + ["공종누락경고(수식)", "통합발주_포함공종"] \
-        + [f"문서배분_{tr}(수식)" for tr in DETAIL_ALLOC_TRADES] + ["건축_순건축추정(수식)", "문서배분_중복경고(수식)", "시설간_중복", "중복_제외권장", "공고건수_최신", "메모"]
+        + [f"문서배분_{tr}(수식)" for tr in DETAIL_ALLOC_TRADES] + ["건축_순건축추정(수식)", "문서배분_중복경고(수식)"] \
+        + (SERVC5_COLS if servc is not None else []) + ["시설간_중복", "중복_제외권장", "공고건수_최신", "메모"]
     f5 = pd.DataFrame({c: facility[c] if c in facility.columns else None for c in
                        ["프로젝트ID", "시설ID", "시설명", "세부사업명", "세부사업수", "사업유형", "표2_대분류", "표2_중분류", "수요기관", "연면적_m2", "지상층수", "지하층수", "구조",
                         "공고건수_최신", "시설간_중복", "중복_제외권장"]}, index=facility.index)
@@ -325,12 +350,22 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
     f5 = f5[fcols]
     _write_df(ws, f5, money_cols=["연면적_m2"] + [f"{tr}(수식)" for tr in TRADES] + ["건축공종계(수식)"] + TOTAL5_COLS + ADJ5_COLS
               + ["건축_순건축추정(수식)"]
-              + [f"문서배분_{tr}(수식)" for tr in DETAIL_ALLOC_TRADES],
+              + [f"문서배분_{tr}(수식)" for tr in DETAIL_ALLOC_TRADES] + SERVC5_COLS[:-1],
               blue_cols=["프로젝트ID", "시설ID", "시설명", "세부사업명", "세부사업수", "사업유형", "표2_대분류", "표2_중분류", "수요기관", "연면적_m2", "지상층수", "지하층수", "구조",
                          "공고연도", "공고건수_최신", "통합발주_포함공종", "시설간_중복", "중복_제외권장"],
               yellow_cols=["건설공사비지수_보정계수(입력)", "메모"],
               widths={"시설명": 30, "세부사업명": 36, "공종누락경고(수식)": 28, "통합발주_포함공종": 34, "시설간_중복": 34})
     fc = {c: get_column_letter(i + 1) for i, c in enumerate(fcols)}
+    sv = None
+    if servc is not None:
+        sv = servc.copy()
+        for c in SERVC_COLS:
+            if c not in sv.columns:
+                sv[c] = None
+        sv = sv[SERVC_COLS]
+        vcol = {c: get_column_letter(i + 1) for i, c in enumerate(SERVC_COLS)}
+        n_v = max(len(sv), 1) + 1                    # 행 범위를 지정한다(04b 와 같게)
+        V = {c: f"'{S_SERVC}'!${vcol[c]}$2:${vcol[c]}${n_v}" for c in ("프로젝트ID", "용역종류", "합산여부", "추정가격")}
     tot_rng = f"'{S_TRADE}'!${col['금액합계_기초금액기준(수식)']}:${col['금액합계_기초금액기준(수식)']}"
     tot2_rng = f"'{S_TRADE}'!${col['금액합계_추정가격기준(수식)']}:${col['금액합계_추정가격기준(수식)']}"
     id_rng, tr_rng = f"'{S_TRADE}'!${col['프로젝트ID']}:${col['프로젝트ID']}", f"'{S_TRADE}'!${col['공종']}:${col['공종']}"
@@ -375,6 +410,12 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
         dup = "&".join(f'IF(AND(SUMIFS({D["배분금액(수식)"]},{D["프로젝트ID"]},$A{r},{D["상위공종"]},"건축",{D["세부공종"]},"{tr}")>0,'
                        f'N({fc[f"{tr}(수식)"]}{r})>0),"{tr} ","")' for tr in ("전기", "정보통신", "소방"))
         ws[f"{fc['문서배분_중복경고(수식)']}{r}"] = f'=TRIM(IF(TRIM({dup})="","",TRIM({dup})&" 중복가능"))'
+        if servc is not None:
+            # 용역 참고 열: 08 에서 이 프로젝트·그 종류·합산여부 Y 인 줄의 추정가격 합. 합산여부 Y 인 공고가 없으면 0 이 아니라 빈칸(공고 없이 집행되는 용역이 많다)
+            for k in SERVC_KINDS:
+                cond = f'{V["프로젝트ID"]},$A{r},{V["용역종류"]},"{k}",{V["합산여부"]},"Y"'
+                ws[f"{fc[f'용역_{k}_추정가격(수식)']}{r}"] = f'=IF(COUNTIFS({cond})=0,"",SUMIFS({V["추정가격"]},{cond}))'
+            ws[f"{fc['용역_공고수(수식)']}{r}"] = f'=COUNTIFS({V["프로젝트ID"]},$A{r},{V["합산여부"]},"Y")'
         for c in fcols:
             if "(수식)" in c:
                 ws[f"{fc[c]}{r}"].font = FONT
@@ -388,6 +429,8 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
                    "'X 를 포함(n/m건)', 'X 와 일부 겹침(n/m건)', 'X + Y 에 나뉘어 있음'(이 행의 공고가 다른 시설 후보의 세부사업 X, Y 에 나뉘어 모두 있음). 중복_제외권장 = Y 인 행을 빼면 같은 공고가 두 번 합산되지 않는다"
                    "(같은 사업끼리는 세부사업으로 나뉘지 않은 시설의 행을 남김. '일부 겹침' 은 그것만으로는 Y 가 붙지 않음 — Y 행을 뺀 뒤에도 두 번 남는 공고 수는 06_검증로그 '시설 간 중복 프로젝트' 에 표시). 여러 프로젝트의 합계·평균을 낼 때는 Y 행을 필터로 제외할 것. "
                    "㎡당 공사비는 사업유형(신축/증축/리모델링)이 같은 프로젝트끼리만 비교할 것 — 리모델링의 연면적은 공사 대상 연면적임. "
+                   + ("용역_*_추정가격(수식)은 08 시트에서 이 프로젝트에 이어진 용역 공고(합산여부 Y)의 추정가격 합(부가세 제외) — 공사비가 아닌 참고값이며 총공사비합계·㎡당 공사비에 들어가지 않는다. "
+                      "빈칸은 '더한(합산여부 Y) 공고 없음' 이지 용역비 0 이 아니다(README '용역(08·05)'). " if servc is not None else "") +
                    "문서배분_*(수식)은 다른 공종 공고 안에 묶인 그 공종의 참고 배분(04b 비율 × 04 금액합계_기초금액기준, 자기 공종 공고의 몫 제외, 총공사비합계에 미포함), 건축_순건축추정 = 건축(수식) − 건축 공고 안의 비건축 배분(04b 배분적용이 Y 인 건축 공고의 것만 뺀다 — 배분되지 않은 건축 공고가 섞인 프로젝트는 그만큼 덜 빠진 값).")
     ws[f"A{n}"].font = FONT
 
@@ -408,5 +451,24 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
         if c not in nt.columns:
             nt[c] = None
     _write_df(ws, nt[ncols], blue_cols=ncols, widths={"파일명": 45, "오류": 50, "URL": 50})
+
+    # ── 08 용역공고(참고) — link-servc 결과가 있을 때만. 05 의 용역 참고 열이 이 시트를 SUMIFS 로 읽는다 ──
+    if sv is not None:
+        ws = wb.create_sheet(S_SERVC)
+        _write_df(ws, sv, money_cols=["추정가격", "배정예산"], blue_cols=[c for c in SERVC_COLS if c != "합산여부"], yellow_cols=["합산여부", "프로젝트ID"],
+                  widths={"시설명": 26, "공고명": 52, "합산제외_까닭": 44, "연결근거": 50, "용역세부": 22, "수요기관": 24, "공고기관": 20, "프로젝트_후보": 24, "상세URL": 30})
+        rc = get_column_letter(SERVC_COLS.index("공사비대비_비율") + 1)
+        for r in range(2, ws.max_row + 1):
+            ws[f"{rc}{r}"].number_format = "0.0%"
+        nv = len(sv) + 3
+        ws[f"A{nv}"] = ("주: 용역 입찰공고(나라장터) 가운데 이 DB 의 시설에 이어진 공고. 공사비가 아닌 참고 자료다. 추정가격은 부가세 제외, 배정예산은 보통 부가세 포함. "
+                        "합산여부 Y 인 줄만 05 의 '용역_○○_추정가격' 에 더해진다 — N 의 까닭은 '합산제외_까닭'. 프로젝트ID 가 빈 줄은 시설까지만 이어진 공고(어느 프로젝트인지 가리지 못함 — '프로젝트_후보'). "
+                        "손으로 고칠 때: 05 는 프로젝트ID·용역종류·합산여부 세 칸을 함께 본다 — 프로젝트ID 가 빈 줄은 합산여부를 Y 로 바꾸는 것만으로는 더해지지 않고 프로젝트ID(노란 칸)도 적어야 하며, "
+                        "용역종류가 '기타' 인 줄은 Y 로 바꿔도 금액 열에 들어가지 않는다(용역_공고수 에는 세어진다). "
+                        "표 아래에 새로 적은 줄은 더해지지 않는다(표의 둘째 줄부터 마지막 줄 사이에 행을 끼워 넣을 것 — 머리글 바로 아래 첫 줄 위에 끼운 줄도 더해지지 않는다). "
+                        "상태: 대표 / 재공고 이전(같은 용역이 뒤에 다시 공고됨) / 취소. 공사대비_개월 = 용역 공고일 − 그 프로젝트(없으면 가장 가까운 프로젝트) 공사 첫 공고일. "
+                        "공사비대비_비율 = 추정가격 ÷ 그 프로젝트 공사 추정가격 합(지나치게 크면 06_검증로그 '용역비 비율'). "
+                        "연결은 공고명과 발주 기관만으로 한 것이므로 금액을 쓰기 전에 공고명을 확인할 것(상세URL).")
+        ws[f"A{nv}"].font = FONT
 
     wb.save(path)

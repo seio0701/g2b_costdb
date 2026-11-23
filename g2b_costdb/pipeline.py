@@ -15,6 +15,7 @@ python -m g2b_costdb.pipeline extract-extra               # (선택) 보강 추�
 python -m g2b_costdb.pipeline excel                       # S7 Excel DB (검증로그는 저장된 추출 결과에 현재 규칙을 다시 적용해 새로 만든다)
 python -m g2b_costdb.pipeline probe --servc --ym 2026-08  # 용역 입찰공고 오퍼레이션 시험 호출(필드명·분류명 확인)
 python -m g2b_costdb.pipeline collect --servc             # 용역 입찰공고 수집(설계·건설사업관리·폐기물처리만 보존)
+python -m g2b_costdb.pipeline link-servc                  # (선택) 수집한 용역 공고를 시설·프로젝트에 연결 → 08 시트·05 의 용역 참고 열(dedup 뒤, excel 앞. API 호출 없음)
 """
 from __future__ import annotations
 
@@ -33,7 +34,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from . import attachments, collect, dedup, discover, extract_llm, classify
+from . import attachments, collect, dedup, discover, extract_llm, classify, servc
 from .api_client import ApiError, DailyBudgetExceeded
 from .build_excel import build_workbook
 from .classify import ROOT, load_config
@@ -1742,6 +1743,97 @@ def enrich_facility(fac: pd.DataFrame, latest: pd.DataFrame, docs: dict, extra: 
     return fac
 
 
+def _read_servc_raw(cfg) -> pd.DataFrame:
+    """servc_all.parquet 에서 연결에 쓰는 열만 읽는다(원문은 수십 개 열 × 수십만 행)."""
+    path = _p(cfg, "servc_all.parquet")
+    if not os.path.exists(path):
+        raise SystemExit(f"용역 공고 자료가 없습니다: {path}\n먼저 python -m g2b_costdb.pipeline collect --servc 로 용역 공고를 수집하세요.")
+    try:
+        import pyarrow.parquet as pq
+        have = set(pq.read_schema(path).names)
+    except Exception:
+        return pd.read_parquet(path)
+    cols = [c for c in servc.raw_columns(cfg) if c in have]
+    return pd.read_parquet(path, columns=cols) if cols else pd.read_parquet(path)
+
+
+def stage_link_servc(cfg):
+    """3단계(b): 수집한 용역 공고(설계·건설사업관리/감리·폐기물처리)를 시설·프로젝트에 연결한다(참고용). API·LLM 호출 없음.
+    data/servc_linked.parquet(08 시트), data/logs_servc.parquet(06 의 '용역비 비율' 경고), output/servc_link_summary.txt(화면 요약 사본)를 만든다."""
+    raw = _read_servc_raw(cfg)
+    for name in ("notices_hist.parquet", "notices_latest.parquet"):
+        if not os.path.exists(_p(cfg, name)):
+            raise SystemExit(f"중간 산출물이 없습니다: {_p(cfg, name)} (research → dedup 을 먼저 실행)")
+    hist, latest = _read(cfg, "notices_hist.parquet"), _read(cfg, "notices_latest.parquet")
+    review_path = os.path.join(cfg["paths"]["out_dir"], "facility_candidates.xlsx")
+    try:
+        reviewed = discover.read_reviewed(review_path)
+    except PermissionError:
+        raise SystemExit(_excel_busy(review_path))
+    print(f"용역 공고 {len(raw):,}줄을 시설 {reviewed['시설ID'].nunique():,}개(검수 '포함')의 이름·발주 기관과 견줍니다 …")
+    linked = servc.link(raw, reviewed, hist, latest, cfg)
+    linked.to_parquet(_p(cfg, "servc_linked.parquet"), index=False)
+    logs = servc.ratio_logs(linked, latest)
+    _logs_frame(logs).to_parquet(_p(cfg, "logs_servc.parquet"), index=False)
+    fac = None
+    try:                                              # '연면적이 빈 프로젝트 가운데 설계·건설사업관리 용역이 이어진 프로젝트' 를 세는 데만 쓴다
+        docs_path, xpath = _p(cfg, "llm_docs.json"), _p(cfg, "llm_extra.json")
+        docs = json.load(open(docs_path, encoding="utf-8")) if os.path.exists(docs_path) else {}
+        extra = _renormalize_extra(json.load(open(xpath, encoding="utf-8")) if os.path.exists(xpath) else {})
+        fac = enrich_facility(dedup.facility_summary(latest, hist), latest, docs, extra)
+    except Exception as e:                            # 요약 한 줄 때문에 연결 결과를 버리지 않는다
+        log.warning("연면적 보완 후보 수를 세지 못했습니다(%s). 연결 결과에는 영향 없음", str(e)[:120])
+    n_latest = len(servc.latest_orders(servc.standardize(raw, cfg)))          # [진단] 줄과 같은 식(공고번호가 빈 줄은 빼고 최신 차수 한 줄)
+    text = servc.profile(raw, cfg) + "\n\n" + servc.summary(linked, len(raw), n_latest, latest, fac)
+    miss = collect.incomplete_months(cfg, "servc_", collect.servc_period(cfg))
+    if miss:                                          # 수집이 끝나지 않은 달의 용역 공고는 아직 없다 → 그 시기의 프로젝트는 05 에서 빈칸으로 보인다
+        text += (f"\n[경고] 용역 공고 수집 미완료 월 {len(miss)}개 ({', '.join(miss[:8])}{' …' if len(miss) > 8 else ''}): 그 달의 용역 공고는 아직 연결되지 않았습니다. "
+                 "collect --servc 를 [완료] 가 나올 때까지 실행한 뒤 link-servc 를 다시 돌리세요.")
+    if logs:
+        text += f"\n용역비가 공사비에 견주어 큰 프로젝트 {len(logs)}개(06_검증로그 '용역비 비율' 경고): " + ", ".join(str(l["공고번호"]) for l in logs[:12]) \
+            + (" …" if len(logs) > 12 else "")
+    print(text)
+    out = os.path.join(cfg["paths"]["out_dir"], "servc_link_summary.txt")
+    try:
+        with open(out, "w", encoding="utf-8-sig") as fh:   # BOM: Windows PowerShell 5.1 의 Get-Content·type 은 BOM 없는 파일을 cp949 로 읽어 한글이 깨진다
+            fh.write(text + "\n")
+        print(f"연결 결과 저장: {_p(cfg, 'servc_linked.parquet')} ({len(linked):,}줄) / 위 요약 사본: {out}")
+    except OSError as e:
+        print(f"연결 결과 저장: {_p(cfg, 'servc_linked.parquet')} ({len(linked):,}줄) (요약 사본은 쓰지 못함: {e})")
+    print("다음: python -m g2b_costdb.pipeline excel  → '08_용역공고(참고)' 시트와 05 의 용역 참고 열이 생깁니다(총공사비 합계에는 들어가지 않음).")
+
+
+def _servc_for_excel(cfg, latest: Optional[pd.DataFrame] = None) -> Optional[pd.DataFrame]:
+    """excel 에 실을 용역 연결 결과. 없으면 None(워크북은 용역 시트·열 없이 만들어진다)."""
+    path = _p(cfg, "servc_linked.parquet")
+    if not os.path.exists(path):
+        if os.path.exists(_p(cfg, "servc_all.parquet")):
+            print("[안내] 용역 공고를 수집했지만 아직 연결하지 않았습니다. python -m g2b_costdb.pipeline link-servc 를 실행한 뒤 excel 을 다시 돌리면 "
+                  "'08_용역공고(참고)' 시트와 05 의 용역 참고 열이 생깁니다.")
+        return None
+    latest_path = _p(cfg, "notices_latest.parquet")
+    stale = os.path.exists(latest_path) and os.path.getmtime(latest_path) > os.path.getmtime(path) + 1
+    linked = None if stale else pd.read_parquet(path)
+    if linked is not None and latest is not None and len(linked) and len(latest):
+        # 파일 시각만으로는 놓치는 경우(시각을 지키지 않는 복사·내려받기, 1초 안에 이어 돌린 dedup)에 대비해 내용으로도 본다:
+        # 연결 표에 적힌 프로젝트ID 가 지금의 dedup 결과에 있고, 그 공사의 첫 공고일이 연결 때 적어 둔 날과 같아야 한다
+        first = dedup._parse_dt(latest["공고일시"]).groupby(latest["프로젝트ID"].astype(str)).min().map(lambda v: "" if pd.isna(v) else str(v)[:10])
+        has = linked[linked["프로젝트ID"].astype(str).str.strip() != ""]
+        now = has["프로젝트ID"].astype(str).map(first)
+        stale = bool((now.isna() | (now != has["공사_최초공고일"].astype(str))).any())
+    if stale:
+        # 세부사업 번호(-01, -02 …)는 dedup 때마다 최초 공고일 순으로 다시 매겨진다 → 옛 연결 결과의 프로젝트ID 가 지금은 다른 사업을 가리킬 수 있다.
+        # 그대로 실으면 05 에서 다른 프로젝트의 용역비로 보이므로 싣지 않는다(link-servc 는 API 호출 없이 다시 만들 수 있다)
+        print("[주의] dedup 을 link-servc 보다 나중에 실행했습니다. 프로젝트ID 가 가리키는 사업이 바뀌었을 수 있어 이전 연결 결과는 싣지 않습니다"
+              "(이번 워크북은 08 시트·05 의 용역 참고 열 없이 만듭니다). python -m g2b_costdb.pipeline link-servc 를 실행한 뒤 excel 을 다시 돌리세요.")
+        return None
+    raw_path = _p(cfg, "servc_all.parquet")
+    if os.path.exists(raw_path) and os.path.getmtime(raw_path) > os.path.getmtime(path) + 1:
+        print("[안내] link-servc 뒤에 용역 공고를 다시 수집했습니다(collect --servc). 새로 받은 공고는 08 시트에 없습니다. "
+              "python -m g2b_costdb.pipeline link-servc 를 실행한 뒤 excel 을 다시 돌리면 반영됩니다.")
+    return linked
+
+
 def stage_excel(cfg):
     hist, latest = _read(cfg, "notices_hist.parquet"), _read(cfg, "notices_latest.parquet")
     docs_path = _p(cfg, "llm_docs.json")
@@ -1756,8 +1848,9 @@ def stage_excel(cfg):
     extra = _renormalize_extra(json.load(open(xpath, encoding="utf-8")) if os.path.exists(xpath) else {})
     if extra:
         _extra_logs(cfg, latest, docs, extra)  # 보강 추출 검증로그도 현재 규칙으로 다시 만든다
+    servc_df = _servc_for_excel(cfg, latest)
     log_names = ("logs_dedup.parquet", "logs_verify.parquet") + (("logs_trades.parquet",) if tdocs else ()) \
-        + (("logs_extra.parquet",) if extra else ())   # 결과 파일이 없으면 남아 있는 옛 로그도 싣지 않는다
+        + (("logs_extra.parquet",) if extra else ()) + (("logs_servc.parquet",) if servc_df is not None else ())   # 결과 파일이 없으면 남아 있는 옛 로그도 싣지 않는다
     frames = [pd.read_parquet(_p(cfg, n)) for n in log_names if os.path.exists(_p(cfg, n))]
     frames = [f for f in frames if not f.empty]
     logs = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -1771,11 +1864,11 @@ def stage_excel(cfg):
     out = os.path.join(cfg["paths"]["out_dir"], cfg["paths"]["excel_name"])
     try:
         build_workbook(out, fac, hist, latest, trade, logs, notes, meta={"period": f"{cfg['period']['start']}~{cfg['period']['end']}"},
-                       trade_detail=detail)
+                       trade_detail=detail, servc=servc_df)
     except PermissionError:
         raise SystemExit(_excel_busy(out))
     print(f"Excel DB 저장: {out} (프로젝트 {len(fac)}, 대표공고 {len(latest)}, 이력 {len(hist)}, 검증로그 {len(logs)}, 추출노트 {len(notes)}, "
-          f"공종세부내역(04b) {len(detail)}행)")
+          f"공종세부내역(04b) {len(detail)}행" + (f", 용역 연결(08) {len(servc_df)}줄" if servc_df is not None else "") + ")")
     if not logs.empty and "판정" in logs.columns:
         print("검증로그 판정별 건수:\n" + logs["판정"].value_counts().to_string())
 
@@ -1787,7 +1880,7 @@ def main(argv=None):
         except (AttributeError, ValueError):
             pass
     ap = argparse.ArgumentParser(description="나라장터 공사비 DB 파이프라인 (g2b_costdb 폴더에서 실행)")
-    ap.add_argument("stage", choices=["doctor", "probe", "collect", "check-raw", "discover", "research", "dedup", "attach", "extract", "extract-trades", "extract-extra", "excel"])
+    ap.add_argument("stage", choices=["doctor", "probe", "collect", "check-raw", "discover", "research", "dedup", "attach", "extract", "extract-trades", "extract-extra", "link-servc", "excel"])
     ap.add_argument("--config", default=None)
     ap.add_argument("--ym", default="2026-08", help="probe 대상 월(YYYY-MM)")
     ap.add_argument("--fresh", action="store_true", help="discover: 이전 검수 파일의 시설ID 만 이어받고 검수 칸은 새 기본값으로(검수 시작 전 규칙이 바뀌었을 때)")
@@ -1839,6 +1932,8 @@ def main(argv=None):
         stage_discover(cfg, fresh=a.fresh, recalc=a.recalc)
     elif a.stage == "attach":
         stage_attach(cfg, retry_failed=a.retry_failed, report_only=a.report)
+    elif a.stage == "link-servc":
+        stage_link_servc(cfg)
     else:
         {"collect": stage_collect, "discover": stage_discover, "research": stage_research, "dedup": stage_dedup,
          "attach": stage_attach, "excel": stage_excel}[a.stage](cfg)

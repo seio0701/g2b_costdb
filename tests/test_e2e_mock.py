@@ -184,6 +184,15 @@ def run():
         assert by_no.at["R24030005", "프로젝트ID"] == f"{gid}-N" and by_no.at["R24030005", "대표선정사유"].startswith("합산(같은 공종 2건)"), by_no["대표선정사유"].to_dict()
         assert "같은 공종 합산" in out and "소액 공고" not in out
         assert len(latest) == 6 and latest["프로젝트ID"].nunique() == 3, latest[["프로젝트키", "공고번호"]]
+        # 4-2) link-servc — 용역 공고를 시설·프로젝트에 연결(API 호출 없음). 건설폐기물 처리용역·건설사업관리용역은 문화예술회관 신축 프로젝트로,
+        #      생활폐기물(조달분류) 공고는 이름이 맞지 않아 연결되지 않는다
+        calls_sv = sum(server.calls.values())
+        out = _run(["link-servc", "--config", cfg_path])
+        assert sum(server.calls.values()) == calls_sv, "link-servc 는 API 를 호출하지 않는다"
+        sl = pd.read_parquet(data("servc_linked.parquet")).set_index("공고번호")
+        assert set(sl.index) == {"R24S00001", "R24S00002"} and set(sl["프로젝트ID"]) == {f"{gid}-N"} and set(sl["합산여부"]) == {"Y"}, sl.to_dict("index")
+        assert sl.at["R24S00001", "용역종류"] == "폐기물처리" and sl.at["R24S00002", "용역종류"] == "건설사업관리·감리" and sl.at["R24S00002", "추정가격"] == 1500000000
+        assert "[진단] 용역 공고 3줄" in out and "합산여부 Y): 2줄" in out and os.path.exists(os.path.join(tmp, "output", "servc_link_summary.txt")), out
         # 6) attach — HWPX/DOCX/cp949 TXT 추출, HTML 응답은 실패 기록, 재실행 시 파일 재요청 없음
         out = _run(["attach", "--config", cfg_path])
         texts = json.load(open(data("texts.json"), encoding="utf-8"))
@@ -383,6 +392,9 @@ def run():
         assert hist_df[hist_df["공고번호"] == "R24020004"]["이전공고번호"].iloc[0] == "R24010003" and \
             set(hist_df[hist_df["공고번호"] == "R24010001"]["부공종명"]) <= {"토목공사업 / 조경공사업", "토목공사업"}
         assert wb["06_검증로그"].max_row > 1 and wb["07_추출노트"].max_row > 1
+        assert wb.sheetnames[-1] == "08_용역공고(참고)" and wb["08_용역공고(참고)"].max_row >= 3 and "용역 연결(08) 2줄" in out, (wb.sheetnames, out[-300:])
+        h5s = [c.value for c in wb["05_공사비DB_시설합산"][1]]
+        assert "용역_설계_추정가격(수식)" in h5s and "용역_폐기물처리_추정가격(수식)" in h5s and h5s.index("용역_공고수(수식)") < h5s.index("시설간_중복")
         from tests.check_excel import check
         rc = check(xlsx)
         assert rc in (0, 2), "Excel 수식 오류"          # 2 = 검증 도구 없음(LibreOffice/formulas) → 건너뜀
@@ -438,6 +450,9 @@ def run():
             assert abs(float(rate) - 28500000000 / 33000000000) < 1e-6, ("낙찰률(수식) = 낙찰금액/기초금액", rate)
             assert abs(float(total) - (33000000000 + 2100000000 + 2860000000 + 583000000 + 38000000 + 440000000)) < 1, "낙찰금액은 총공사비에 쓰이지 않음"
             assert float(v4("기타금액ⓒ(수식)", r4e)) == 38000000 and float(v4("금액합계_기초금액기준(수식)", r4e)) == 2860000000 + 38000000, "전기 공고의 한전불입금이 금액 합계에 가산"
+            assert float(val("05_공사비DB_시설합산", f"{col('용역_건설사업관리·감리_추정가격(수식)')}{r}")) == 1500000000
+            assert float(val("05_공사비DB_시설합산", f"{col('용역_폐기물처리_추정가격(수식)')}{r}")) == 129834000
+            assert val("05_공사비DB_시설합산", f"{col('용역_설계_추정가격(수식)')}{r}") in ("", None) and int(val("05_공사비DB_시설합산", f"{col('용역_공고수(수식)')}{r}")) == 2
             print("05 시설합산 값 검증 OK")
         except ImportError:
             print("(formulas 패키지 없음 → 05 값 검증 생략)")

@@ -3657,6 +3657,8 @@ def run():
         test_attachments(tmp)
     from tests import test_api_review          # 수집기·응답 해석·check-raw·probe 독립 검토의 확인 항목(가짜 응답만 사용)
     test_api_review.run()
+    from tests import test_servc_link          # 용역 공고 연결(link-servc)
+    test_servc_link.run()
     print("OK: 회귀 테스트 통과")
 
 

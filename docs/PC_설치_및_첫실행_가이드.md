@@ -233,6 +233,7 @@ python -m g2b_costdb.pipeline discover
 ### 8-4. 다음 세션들
 - 세션 3(본 수집): `period` 를 `2019-01` ~ `2026-09` 로 되돌리고 매일 `collect` 를 실행해 `[완료]` 가 나올 때까지 반복(약 800~1,100회 호출 → 하루 950회 예산으로 1~2일).
 - 세션 4~7: `discover` → 검수 → `research` → `dedup` → `attach` → `extract`(견적) → `extract --yes` → `excel`. 각 세션의 붙여넣기용 지시문은 `PROMPTS.md` 에 있다.
+- (선택) 설계·건설사업관리·폐기물 처리 용역 금액을 참고 열로 보려면: `collect --servc` 를 `[완료]` 가 나올 때까지 날마다 실행(약 1,900회 호출 — 이틀 이상) → `dedup` 뒤에 `link-servc` → `excel`. API·LLM 비용은 들지 않고, 총공사비에는 들어가지 않는다(워크북 `08_용역공고(참고)` 시트와 05 의 `용역_…` 열).
 
 ---
 

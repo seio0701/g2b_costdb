@@ -270,11 +270,12 @@ def _collect_monthly(cfg: dict, op_key: str, prefix: str, start: Optional[str], 
     return _stringify(df).copy() if not df.empty else df
 
 
-def incomplete_months(cfg: dict, prefix: str) -> List[str]:
-    """done.txt 기준으로 아직 수집되지 않은(오늘 이전) 월 목록 — discover 단계에서 경고용."""
+def incomplete_months(cfg: dict, prefix: str, period: Optional[tuple] = None) -> List[str]:
+    """done.txt 기준으로 아직 수집되지 않은(오늘 이전) 월 목록 — discover·link-servc 단계에서 경고용. period = (시작월, 끝월). 없으면 공사 수집 기간."""
     done = _read_done(os.path.join(cfg["paths"]["raw_dir"], f"{prefix}done.txt"))
     today_ym = date.today().strftime("%Y%m")
-    return [b[:6] for b, _ in G2BClient.month_ranges(cfg["period"]["start"], cfg["period"]["end"]) if b[:6] < today_ym and b[:6] not in done]
+    start, end = period or (cfg["period"]["start"], cfg["period"]["end"])
+    return [b[:6] for b, _ in G2BClient.month_ranges(start, end) if b[:6] < today_ym and b[:6] not in done]
 
 
 def collect_notices(cfg: dict, start: str = None, end: str = None) -> pd.DataFrame:
