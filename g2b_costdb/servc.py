@@ -88,10 +88,18 @@ _K_WASTE_OPS = re.compile(r"생활\s*폐기물|음식물|재활용|대형\s*(?:�
                           r"환경\s*에너지\s*(?:센터|타운|시설)|클린\s*센터|적환\s*시설|수집\s*[·ㆍ,및]?\s*운반\s*대행|대행\s*용역|민간\s*위탁|청소\s*용역|가로\s*청소|"
                           r"원가\s*(?:계산|산정)|연구\s*용역|실태\s*조사")
 _K_WASTE_CLASS_OPS = re.compile(r"생활폐기물|음식물|재활용|의료폐기물|하수|분뇨|슬러지|청소")
-_K_WASTE = re.compile(r"폐기물|폐\s*콘크리트|폐\s*아스콘|폐\s*석면|폐\s*보드|폐\s*임목|석면\s*(?:폐기물|처리)|건설\s*오니")
+_K_WASTE = re.compile(r"폐기물|폐\s*콘크리트|폐\s*아스콘|폐\s*석면|폐\s*보드|폐\s*임목|폐\s*목재|폐\s*(?:판넬|패널)|폐\s*토석|석면\s*(?:폐기물|처리)|건설\s*오니")
 # 공사에서 나온 폐기물임을 보이는 말. 이 말이 있으면 '재활용'(처리 방법)·'민간위탁'(계약 방식)·'오니'(건설오니)는 운영 폐기물의 표시로 보지 않는다
-_K_WASTE_CONSTR = re.compile(r"건설\s*폐기물|건설\s*오니|폐\s*아스콘|폐\s*콘크리트|임목\s*폐기물|폐\s*임목")
-_K_WASTE_CONSTR_OK = re.compile(r"재활용|민간\s*위탁|(?:건설\s*)?오니")
+_K_WASTE_CONSTR = re.compile(r"건설\s*폐기물|건설\s*오니|건설\s*폐재류|폐\s*아스콘|폐\s*콘크리트|임목\s*폐기물|폐\s*임목|폐\s*목재|폐\s*(?:판넬|패널)|폐\s*토석")
+_K_WASTE_CONSTR_OK = re.compile(r"재활용(?!\s*(?:시설|센터|선별|품))|민간\s*위탁|(?:건설\s*)?오니")      # '재활용시설'·'재활용품 선별장' 은 처리 방법이 아니라 시설이다
+# 공고명에 든 공사·사업 말 — 이 말이 있으면 그 공사·사업의 폐기물이다(조달분류가 운영 폐기물 쪽이어도). 유지보수 공사인지는 뒤에서 사업유형으로 가린다
+# ('○○ 리모델링공사 폐기물처리', '개보수 공사 가연성폐기물', '조성사업 인조잔디 재활용처리'). 공사 말과 폐기물 말 사이에 다른 말이 끼면('신축 이전에 따른 사무집기 폐기물',
+# '증축공사 준공 청소 및 폐기물') 그 공사의 폐기물이 아니다. 기관 이름 속의 '공사'('○○도시공사')와 '공사기간' 은 공사 말이 아니다
+_K_WASTE_WORK = re.compile(
+    r"(?:(?<!도시)(?<!개발)(?<!주택)(?<!관광)(?<!교통)(?<!시설)공사(?!\s*기간)|사업(?!장)|건립|신축|증축|개축|재건축|리모델링|개보수|대수선|철거|해체)"
+    r"\s*(?:[\(（][^\(\)（）]{0,14}[\)）]\s*)?(?:에\s*따른\s*)?(?:현장\s*)?(?:발생\s*)?(?:추가\s*)?"
+    r"(?:[\(（]?\s*(?:건설|혼합|가연성|불연성|매립|임목|지정|사업장|일반|인조\s*잔디)\s*[\)）]?\s*)*"
+    r"(?:폐\s*기\s*물|폐\s*[가-힣]{2,4}|인조\s*잔디\s*(?:분리\s*회수|재활용|철거))")
 # 폐기물 '처리' 용역임을 보이는 말(마지막에 오는 용역 이름이 이것이면 폐기물 처리 용역, 설계·감리이면 그쪽 용역)
 _K_WASTE_JOB = re.compile(r"(?:건설\s*오니|폐(?:기물|석면|콘크리트|아스콘|보드|임목))[^,]{0,25}?(?:처리|운반|수집|수거|위탁|상차|반출)|(?:처리|운반|수집|수거)[^,]{0,12}?폐기물|(?:처리|운반)\s*용역")
 _K_SERVICE_NOUN = re.compile(r"설계|감리|건설\s*사업\s*관리|(?<![A-Za-z])CM(?![A-Za-z])|공모")
@@ -103,18 +111,23 @@ _K_ENV_FACILITY = re.compile(r"(?:소각|매립|자원\s*회수|자원\s*순환|
 _K_IT = re.compile(r"정보\s*시스템|정보화|전산|시스템\s*(?:구축|고도화|개발|통합|운영)|통합\s*시스템|소프트웨어|(?<![A-Za-z])SW(?![A-Za-z])|(?<![A-Za-z])ISP(?![A-Za-z])|"
                    r"네트워크|유무선|통신망|플랫폼\s*구축|정보\s*자원|통합\s*구축|홈페이지|데이터\s*(?:구축|베이스)|클라우드|차세대\s*[가-힣A-Za-z]{0,12}\s*(?:시스템|구축)|감리\s*법인|개인\s*정보")
 _K_SIDE = re.compile(r"설계\s*(?:의\s*)?경제성|(?<![A-Za-z])VE(?![A-Za-z])|가치\s*공학|설계\s*의도|사후\s*설계\s*관리|설계\s*안전성|안전성\s*검토|(?<![A-Za-z])DFS(?![A-Za-z])|"
-                     r"안전\s*관리\s*계획|유해\s*위험|기술\s*지도|재해\s*예방|공모\s*(?:의\s*)?(?:관리|운영|대행|지원|진행|홍보|심사)|공모\s*지침|"
-                     r"설계\s*(?:검토|심의|자문|적정성|검증)|원가\s*(?:계산|검토)|적산|공사비\s*(?:검증|검토)|"
-                     r"타당성|기본\s*계획|기본\s*구상|건축\s*기획|지구\s*단위|도시\s*계획|연구\s*용역|영향\s*평가|인증|컨설팅|측량|지반\s*조사|지질\s*조사|"
+                     r"안전\s*관리\s*계획|유해\s*위험|기술\s*지도|재해\s*예방(?!\s*센터)|공모\s*(?:의\s*)?(?:관리|운영|대행|지원|진행|홍보|심사)|공모\s*지침|"
+                     r"설계\s*(?:검토|심의|자문|적정성|검증)|원가\s*(?:계산|검토)|(?<![가-힣])적산(?![가-힣])|공사비\s*(?:검증|검토)|"
+                     r"타당성|기본\s*계획|기본\s*구상|건축\s*기획(?!\s*(?:설계|및\s*(?:기본|실시)))|지구\s*단위|도시\s*계획|연구\s*용역|영향\s*평가|"
+                     r"(?<!시험)인증(?!\s*센터|\s*지원\s*센터|생산|동(?![가-힣]))|컨설팅|측량|지반\s*조사|지질\s*조사|"
                      r"문화재\s*(?:지표|발굴|시굴)|발굴\s*조사|감정\s*평가|석면\s*조사|해체\s*계획|안전\s*진단|안전\s*점검|내진\s*성능|구조\s*검토|적정성\s*검토|"
-                     r"사후\s*평가|백서|홍보|이전\s*용역|이사\s*용역")
+                     r"사후\s*평가|백서|홍보(?!\s*(?:관(?![가-힣])|교육관|체험관|전시관|판매장|원(?![가-힣])))|이전\s*용역|이사\s*용역")
 # 부대 용역 판정에서 보지 않는 자리: 사업 이름 머리의 '도시계획시설(…)'·'군계획시설', 괄호 속 '… 포함'(본 용역에 딸린 일)
-_K_SIDE_SKIP = re.compile(r"(?:도시|군)\s*계획\s*시설|[\(（][^\(\)（）]{0,30}포함\s*[\)）]")
+_K_SIDE_SKIP = re.compile(r"(?:도시|군)\s*계획\s*시설|[\(（][^\(\)（）]{0,30}포함\s*[\)）]|[\(（\[]\s*공모\s*대행\s*[\)）\]]")
+# 설계 용역에 딸려 함께 발주되는 일이 설계 앞에 이어 적힌 꼴 — '조사측량 및 실시설계', '기본계획 및 실시설계', '공간컨설팅, 실시설계' 는 설계 용역이다(부대 용역이 아니다)
+_K_SIDE_WITH_DESIGN = re.compile(r"(?:측량|지반\s*조사|지질\s*조사|기본\s*계획|기본\s*구상|컨설팅)\s*(?:수립\s*)?(?:및|[,·ㆍ/])\s*(?:기본\s*및\s*)?(?:실시|기본)\s*설계|"
+                                 r"(?:실시|기본)\s*설계\s*(?:및|[,·ㆍ/])\s*(?:조사\s*)?(?:측량|지반\s*조사|지질\s*조사)")
 _K_CM = re.compile(r"건설\s*사업\s*관리|감독\s*권한\s*대행|(?<![A-Za-z])CM(?![A-Za-z])|(?<![A-Za-z])PM\s*용역")
 _K_SUPERVISE = re.compile(r"감리")
 _K_COMBINED = re.compile(r"설계\s*(?:[·ㆍ,/]|및)\s*(?:감리|건설\s*사업\s*관리)|설계\s*감리(?!\s*단)")
 _K_COMPETE = re.compile(r"설계\s*(?:제안\s*)?공모|설계안\s*공모|현상\s*설계|설계\s*경기|설계\s*재\s*공모|국제\s*지명|지명\s*공모|간이\s*공모|[\(（]\s*공모\s*[\)）]")
 _K_PROPOSAL = re.compile(r"제안\s*공모")
+_K_BUILD_WORD = re.compile(r"건립|신축|증축|개축|재건축|리모델링|개보수|대수선|조성|공사")       # '설계' 낱말 없는 제안공모가 건축 설계 공모임을 보이는 말(조달분류 '건축설계…' 와 함께 있을 때)
 _K_DESIGN = re.compile(r"설계")
 _K_DESIGN_NOT = re.compile(r"전시\s*(?:물|설계|기획|연출|콘텐츠|컨텐츠)|설계\s*(?:[·ㆍ,/]|및)?\s*제작|제작\s*(?:[·ㆍ,/]|및)?\s*설치\s*용역|미디어\s*아트|조형물|인테리어\s*설계")
 _K_SPLIT_DESIGN = re.compile(r"(?:전기|정보\s*통신|통신|소방|기계\s*설비|기계)(?:\s*(?:분야|부문|공사|시설))?(?:\s*(?:[·ㆍ,/]|및)?\s*(?:전기\s*소방|기계\s*소방|전기|정보\s*통신|통신|소방|기계\s*설비|기계)"
@@ -176,8 +189,10 @@ def classify_kind(title, cls: str = "") -> Tuple[str, str, str]:
 
 def _classify_kind(t: str, c: str) -> Tuple[str, str, str]:
     if _K_WASTE.search(t) or "폐기물" in c:
-        constr = bool(_K_WASTE_CONSTR.search(t))
-        if _K_WASTE_OPS.search(_K_WASTE_CONSTR_OK.sub(" ", t) if constr else t) or _K_WASTE_CLASS_OPS.search(c.replace("재활용", " ") if constr else c):
+        # 공고명이 공사·사업에서 나온 폐기물임을 밝혔으면('건설폐기물'·'폐아스콘', '○○ 리모델링공사 폐기물처리') 조달분류는 보지 않는다 —
+        # 공사 폐기물에도 '폐기물재활용서비스'·'생활폐기물처리서비스' 가 흔히 붙는다(2026-11 실자료: 이 때문에 공사 폐기물 처리 용역 60여 줄이 운영 폐기물로 읽혔다)
+        constr = bool(_K_WASTE_CONSTR.search(t)) or bool(_K_WASTE_WORK.search(t))
+        if _K_WASTE_OPS.search(_K_WASTE_CONSTR_OK.sub(" ", t) if constr else t) or (not constr and _K_WASTE_CLASS_OPS.search(c)):
             return "기타", "운영 폐기물·폐기물 시설", "공사에서 나온 폐기물의 처리 용역이 아님(생활·음식물 폐기물, 폐기물 처리시설의 운영·설계·감리 등)"
         job = [m.end() for m in _K_WASTE_JOB.finditer(t)]
         noun = [m.end() for m in _K_SERVICE_NOUN.finditer(t)]
@@ -194,7 +209,7 @@ def _classify_kind(t: str, c: str) -> Tuple[str, str, str]:
         return "기타", "정보시스템·통신망", "건축 사업의 용역이 아님"
     if _K_COMBINED.search(t):
         return "기타", "설계·감리 일괄", "설계와 감리(건설사업관리)를 한 계약으로 묶은 용역 — 한 종류의 금액으로 넣을 수 없음"
-    side = _K_SIDE.search(_K_SIDE_SKIP.sub(" ", t))
+    side = _K_SIDE.search(_K_SIDE_WITH_DESIGN.sub(" 실시설계", _K_SIDE_SKIP.sub(" ", t)))
     if _K_CM.search(t):
         if side and not _K_STAGE_DESIGN.search(t):
             return "기타", "건설사업관리 부대(" + side.group(0) + ")", "건설사업관리비가 아닌 부대 용역"
@@ -207,7 +222,8 @@ def _classify_kind(t: str, c: str) -> Tuple[str, str, str]:
             return "건설사업관리·감리", "감리(석면·해체)", "석면·해체 공사의 감리(본 공사의 감리비와 따로 봄)"
         subs = [s for s in subs if s not in ("석면", "해체")]
         return "건설사업관리·감리", "감리" + (f"({'·'.join(subs)})" if subs else ""), ""
-    if _K_COMPETE.search(t) or _K_DESIGN.search(t):       # '제안공모' 만으로는 설계가 아니다(협상계약 방식의 콘텐츠 제작·운영·행사 용역도 '제안공모' 다) — 설계·공모 낱말이 있어야 한다
+    # '제안공모' 만으로는 설계가 아니다(협상계약 방식의 콘텐츠 제작·운영·행사 용역도 '제안공모' 다) — 설계·공모 낱말이 있거나 조달분류가 설계 용역이어야 한다
+    if _K_COMPETE.search(t) or _K_DESIGN.search(t) or (_K_PROPOSAL.search(t) and c.startswith("건축설계") and _K_BUILD_WORD.search(t)):
         if side:
             return "기타", "설계 부대(" + side.group(0) + ")", "설계비가 아닌 부대 용역"
         if _K_DESIGN_NOT.search(t):
@@ -260,6 +276,7 @@ def inst_sig(v) -> Tuple[str, frozenset, str, str]:
     prov = _prov_stems(head) if not _ORG_WORD.search(head) else frozenset()
     muni = ""
     for t in toks[(1 if prov else 0):]:
+        t = re.sub(r"(?<=[시군구])청$", "", t)          # '○○광역시 동구청' 은 자치구 '동구' 다(광역 사업소로 읽으면 그 광역의 모든 사업소와 같은 계열이 된다)
         if _MUNI_TOKEN.fullmatch(t) and not _ORG_WORD.search(t) and not _prov_stems(t):
             muni = t                                   # 광역 다음의 첫 시·군·구('경기도 수원시 영통구' → 수원시)
             break
@@ -334,7 +351,7 @@ def inst_narrow(a, b) -> bool:
 
 
 _WIDE_WHY = "발주 기관이 이 시설의 수요기관과 같은 계열의 다른 기관(소속기관·지사·학교가 다름)"
-_GENERIC_WHY = "일반적인 시설 이름만으로 이어졌고 공고 시점이 그 공사와 가깝지 않음"
+_GENERIC_WHY = "일반적인 시설 이름만으로 이어졌고"
 _DELEGATE = re.compile(r"도시\s*공사|개발\s*공사|시설\s*관리\s*공단|시설\s*공단|도시\s*관리\s*공단|문화\s*재단|체육회|종합\s*건설\s*본부|도시\s*기반\s*시설\s*본부|건설\s*본부")
 
 
@@ -545,15 +562,61 @@ def rebid_key(name) -> str:
     """같은 용역이 다시 난 공고(재공고·재재공고·수정/정정/사전 공고·PQ 안내와 본 공고)를 한 묶음으로 보는 열쇠.
     괄호 속 차수 '(1차)'·'(2차)'·'(3차 공고)' 는 뗀다(재공고 표시일 때가 많다 — 폐기물 처리의 차수분인지는 _mark_status 가 금액으로 가린다).
     '2차분'·'N단계'·'(2025년)'·'(재)실시설계' 는 다른 용역이므로 남긴다."""
+    s = _REBID_STAGE.sub(" ", _txt(name))
     s = re.sub(r"사업\s*수행\s*능력\s*평가(?:\s*서)?(?:\s*[\(（]\s*PQ\s*[\)）])?(?:\s*서류)?(?:\s*제출)?(?:\s*안내)?(?:\s*공고)?|[\(（]\s*PQ\s*[\)）]|(?:재\s*){2,}(?:공고|입찰)|재\s*공모|재\s*수정|"
-               r"(?:수정|정정|변경|사전)\s*공고|계속비[_\s]*총괄|계속비|모집\s*공고", " ", _txt(name))
+               r"(?:수정|정정|변경|사전)\s*공고|계속비[_\s]*총괄|계속비|모집\s*공고", " ", s)
     return re.sub(r"공사|사업|용역", "", works.title_key(works._strip_admin(s, drop_ord=True)))
+
+
+# 같은 용역의 입찰 단계를 알리는 말 — 사업수행능력평가(PQ) 안내 공고와 그 뒤의 가격입찰·지명경쟁 공고, 수의시담 공고는 한 용역이다
+# (2026-11 실자료: 이 말들 때문에 이름 열쇠가 달라져 같은 설계·건설사업관리 용역이 두 번 더해진 쌍이 110개·1,292억)
+_PQ = r"P\s*\.?\s*Q\s*\.?"
+_REBID_STAGE = re.compile(
+    r"(?:용역\s*)?(?:사업\s*)?집행\s*계획\s*및|"
+    r"(?:사업\s*)?수행\s*능력\s*(?:[\(（]\s*" + _PQ + r"\s*[\)）]\s*)?평가\s*(?:서류|자료|서)?\s*(?:[\(（]\s*" + _PQ + r"\s*[\)）]\s*)?(?:서류|자료)?\s*(?:제출)?\s*(?:안내)?\s*(?:공고)?|"
+    r"평가\s*자료\s*(?:[\(（]\s*" + _PQ + r"\s*[\)）]\s*)?제출\s*(?:안내)?\s*(?:공고)?|"
+    r"(?<![A-Za-z])" + _PQ + r"(?![A-Za-z])\s*(?:평가서?|심사)?\s*(?:제출)?\s*(?:안내)?\s*(?:공고)?\s*,?\s*(?:후)?\s*(?:가격\s*입찰|가격|입찰|지명\s*경쟁)?|"
+    r"(?:평가\s*)?후\s*가격\s*입찰|가격\s*입찰|지명\s*경쟁|지명\s*공고|[\(（\[]\s*지명\s*[\)）\]]|(?:전자\s*)?수의\s*시담(?:\s*공고)?|감독\s*권한\s*대행\s*등?")
 
 
 # 용역 종류별로 '그 프로젝트의 용역일 수 있는' 공고 시점[개월]: (공사 첫 공고보다 앞으로, 공사 마지막 공고보다 뒤로)
 WINDOWS = {"설계": (84, 6), "건설사업관리·감리": (48, 36), "폐기물처리": (12, 48), "기타": (84, 48)}
 # 같은 이름의 프로젝트가 여럿일 때 시점으로 고르는 좁은 창[개월]: (공사 첫 공고보다 앞으로, 뒤로 — 폐기물 처리는 공사 마지막 공고 기준)
 TIGHT = {"설계": (30, 0), "건설사업관리·감리": (6, 6), "폐기물처리": (1, 18)}
+
+
+DESIGN_LEAD_MONTHS = 2    # 공고명에 사업 이름이 없는 설계 공고는 공사 첫 공고보다 적어도 이만큼 앞서야 그 공사의 설계로 본다
+TYPE_MISMATCH_SIM = 0.8   # 공고명의 사업유형이 프로젝트와 달라도, 후보가 하나뿐이고 사업 이름 유사도가 이 이상이면 그 프로젝트로 본다
+WASTE_SOLE_MONTHS = (1, 12)   # 공사 이름 없는 '건설폐기물' 공고를 그 시설의 하나뿐인 프로젝트에 더하는 시점[개월]: 공사 첫 공고보다 (앞으로, 뒤로)
+
+# 'A 및 B … 통합 건설사업관리·감리·설계' 의 A·B(어절). 공종·용역 이름·일반어뿐인 어절('전기·통신 통합감리', '기본 및 실시설계')은 현장 이름이 아니다
+_JOINT_PAIR = re.compile(r"([0-9A-Za-z가-힣◇]+)\s*(?:및|[·ㆍ・,/&])\s*([0-9A-Za-z가-힣◇]+)")
+_JOINT_SKIP = re.compile(r"(?:기본|실시|설계|기획|계획|감독|권한|대행|건설|사업|관리|감리|건축|토목|조경|기계|설비|전기|전력|정보통신|정보|통신|소방|시공|단계|공사|용역|철거|해체|석면|폐기물|"
+                         r"수집|운반|처리|조성|건립|신축|증축|개축|리모델링|개보수|부대|시설물?|긴급|입찰|공고|총괄|\d+차분?|[A-Za-z]{1,4})+")
+_JOINT_WORK = re.compile(r"공사|사업|건립|신축|증축|개축|재건축|건설|조성|리모델링|개보수|대수선")
+
+
+def _joint_partner(masked: str, names: List[str], k: dict) -> str:
+    """'○○ 및 △△ … 통합 건설사업관리·감리·설계' 에서 이 프로젝트의 공사 이름(과 이 시설의 이름·기관)에 없는 상대 현장 이름을 돌려준다(없으면 '').
+    masked 는 시설 이름을 '◇' 로 가린 공고명. 상대 현장은 사업 이름 자리에만 온다 — 시설 이름 앞('마루공원 및 ◇ 건립공사')이나, 시설 이름 바로 뒤에서 첫 공사 말 앞까지
+    ('◇ 및 주차복합빌딩 건립사업'. 이때는 '◇' 와 짝을 이룬 어절만). 그 뒤의 어절('건립공사 전력시설물·정보통신공사 통합감리', '◇ 본관·별관 건립공사')은 공종·건물 부분의 이름이다.
+    공사 이름 자체가 '○○ 체육관 및 급식소 증축공사' 이면 두 어절이 모두 공사 이름에 있으므로 묶음이 아니다. '통합' 이라는 말만으로도(건축·전기·통신 통합 감리) 묶음이 아니다."""
+    t = _REBID_STAGE.sub(" ", _txt(masked))
+    m = re.search(r"통합", t)
+    at = t.find("◇")
+    if not m or at < 0 or at > m.start():
+        return ""
+    before, after = t[:at], t[at + 1:m.start()]
+    w = _JOINT_WORK.search(after)
+    after = after[:w.start()] if w else after
+    own = "".join(names) + "".join(_ns(x) for x in k["pats"]) + "".join(inst_key(i) for i in k["insts"])
+    pairs = _JOINT_PAIR.findall(before + "◇") + [p for p in _JOINT_PAIR.findall("◇" + after) if "◇" in p[0]]
+    for pair in pairs:
+        for tok in pair:
+            tok = tok.replace("◇", "")
+            if len(tok) >= 2 and not _JOINT_SKIP.fullmatch(tok) and tok not in own:
+                return tok
+    return ""
 
 
 def _months(a, b) -> Optional[float]:
@@ -621,6 +684,15 @@ def assign_project(kind: str, title: str, dt, projs: List[dict], wtype: str = ""
     if want:                                          # 공고명이 사업유형을 밝혔으면 그 유형의 프로젝트만 본다
         typed = [p for p in cands if fits(p)]
         if not typed:
+            # 공고명의 사업유형 말('건립'·'조성')은 공사 쪽 분류(증축·리모델링)와 어긋나기 쉽다('○○ 확장 건립사업' 은 증축 프로젝트, 그 감리 공고는 '○○ 건립사업 … 감리').
+            # 시기가 맞는 프로젝트가 하나뿐이고 사업 이름이 거의 같으면 그 프로젝트로 본다(2026-11 실자료: 유사도 0.80 이상인 줄은 모두 그 프로젝트의 용역, 0.79 이하는 다른 사업)
+            # 다만 사업유형 말만 다른 이름('○○ 건립공사 감리' ↔ 프로젝트 '○○ 증축공사')은 다른 사업이다(수집 기간 전에 지은 건물의 용역일 수 있다) —
+            # 공고명의 사업유형 말(건립·신축·조성 …)이 그 프로젝트의 사업 이름에도 들어 있을 때만('○○ 확장 건립사업')
+            if len(cands) == 1 and core:
+                verbs = set(works._VERB.findall(core))
+                s, kk = max([(works.similarity(core, k), k) for k in cands[0]["cores"] if k] or [(0.0, "")])
+                if s >= TYPE_MISMATCH_SIM and any(v in kk for v in verbs):
+                    return cands[0]["pid"], f"공고명의 사업유형({wtype})은 다르지만 사업 이름이 거의 같은 프로젝트 하나(유사도 {s:.2f})", ids, 1
             return "", f"공고명의 사업유형({wtype})에 맞는 프로젝트가 없음", ids, 0
         cands = typed
     if len(cands) == 1:
@@ -670,6 +742,75 @@ def _names_this_project(p: Optional[dict], title: str, k: dict) -> bool:
     return len(works._GENERIC.sub("", rest)) >= 2
 
 
+# 사업 이름 앞뒤에 붙어도 '다른 현장' 을 뜻하지 않는 말: 폐기물 종류·처리 방법, 감리 방식, 입찰 문구
+_SITE_NOISE = re.compile(r"파쇄|소각|매립|처리|운반|수집|수거|가연성|불연성|혼합|임목|지정|폐[가-힣]{1,3}|추가분?|총괄분?|긴급|비상주|상주|책임|입찰|안내|제출|견적|수의|소액|시행\s*구역|구역|구간|공모|당선작?|제안|통합")
+_REGION_HEAD = re.compile(r"[가-힣0-9]{1,4}(?:읍|면|동|(?<!거)리)")        # 읍·면·동·리 이름 하나(위치 표시). '○○시장'·'○○지구'·'원도심'·'문화의거리' 는 현장 이름이다
+# 시설 종류 앞에 흔히 붙는 꾸밈말 — 이것뿐이면 현장을 가리는 말이 아니다('공영 주차타워 건립' 은 '주차타워 건립' 과 다를 바 없다)
+_SITE_QUAL = re.compile(r"공영|공공|공용|공립|시립|군립|구립|도립|국립|시민|군민|구민|도민|종합|복합|통합|다목적|제?\d+")
+
+
+def _only_this_site(masked: str, k: dict) -> bool:
+    """(시설 이름을 '◇' 로 가린) 폐기물 공고명에서 폐기물 말 앞에 이 시설 말고 다른 현장·다른 공사를 가리키는 말이 없는가 — '◇ 건설폐기물 처리용역'.
+    '◇ 및 △△ 건설폐기물'·'◇ 외 2개소'·'◇ 등'(묶음), '◇ 별관'·'◇ 사무실 칸막이 공사'(다른 공사)는 아니다."""
+    m = _K_WASTE.search(masked)
+    head = masked[:m.start()] if m else masked
+    if "◇" not in head or re.search(r"및|[,·ㆍ・/&]|(?<![가-힣])(?:등|외)(?![가-힣])", head):
+        return False
+    own = "".join(works._PUNCT.sub("", x) for x in k["pats"]) + "".join(inst_key(i) for i in k["insts"])
+    rest = _PHASE_WORD.sub("", _SITE_NOISE.sub("", works._GENERIC.sub("", project_core(head.replace("◇", " ")))))
+    return len(rest) < 2 or rest in own
+
+
+def _site_fit(p: Optional[dict], title: str, k: dict) -> str:
+    """(짧은 일반 이름으로 이어진 공고에서) 공고명에 든 사업 이름이 이 프로젝트를 얼마나 가리는가.
+    'foreign'  사업 이름 앞에 이 시설·기관에 없는 다른 현장 말이 있거나('가온역 환승 주차타워 건립공사' ↔ '주차타워 건립'),
+               뒤에 다른 대상 + 건설·건립 말이 이어진다('○○지구 3지구 9단지 아파트 건설공사' ↔ '○○지구 3지구 (조경공사)') — 다른 사업
+    'specific' 사업 이름에 시설 이름·일반어(건립·신축 …) 말고도 현장을 가리는 말이 있다('나래지구 3단지 공공주택 건설') — 시점과 무관하게 이 사업
+    'plain'    사업 이름이 시설 종류 + 건립·신축뿐('주차타워 건립')이거나, 통째로 있지는 않지만 그 사업의 현장 말이 공고명에 그대로 있다 — 시점까지 맞아야 한다
+    ''         공고명에 사업 이름도, 그 사업의 현장을 가리는 말도 없음"""
+    if p is None:
+        return ""
+    core = project_core(_REBID_STAGE.sub(" ", _txt(title)))      # 입찰 단계 말('집행계획 및 … 평가서 제출 안내')은 현장 이름이 아니다
+    best = max((c for c in p["cores"] if len(c) >= 4 and c in core), key=len, default="")
+    names = sorted({works._PUNCT.sub("", x) for x in k["pats"]}, key=len, reverse=True)
+    own = "".join(names) + "".join(inst_key(i) for i in k["insts"])
+    bare = lambda s: _PHASE_WORD.sub("", _SITE_NOISE.sub("", works._GENERIC.sub("", s)))      # 일반어·용역 수식어·차수를 뺀 나머지
+
+    def site_words(s: str) -> str:                 # 시설 이름·일반어(건립·신축·공사 …)를 뺀 나머지 = 현장을 가리는 말
+        for q in names:
+            s = s.replace(q, "")
+        return works._GENERIC.sub("", s)
+    if not best:
+        # 사업 이름이 통째로 있지는 않아도('○○현충원 봉안당 설계용역' ↔ 공사 '○○현충원 봉안당 신축공사'), 그 사업의 현장을 가리는 말('○○현충원')이 공고명에 그대로 있으면 'plain' 과 같이 본다
+        # 지자체 이름('○○군')은 현장을 가리는 말이 아니다(그 군의 어느 사업에나 붙는다). 부처·공사·교육청의 소속기관 이름('국립○○현충원')은 현장 말로 친다
+        region = "".join(names) + "".join(inst_key(i) if inst_sig(i)[0] == "gov" else inst_key(_txt(i).split()[0] if _txt(i).split() else "") for i in k["insts"])
+        mine = site_words(core)
+        if len(bare(mine)) < 2:
+            return "plain"                         # 공고명이 '유리온실 신축 설계용역' 처럼 시설 종류 + 건립·신축뿐(다른 현장을 가리키는 말이 없다) — 시점이 맞으면 이 사업
+        for c in p["cores"]:
+            w = site_words(c)
+            if len(_PHASE_WORD.sub("", w)) >= 2 and w not in region and w in mine:
+                return "plain"
+        return ""
+    at = core.find(best)
+    head = bare(core[:at])
+    if _REGION_HEAD.fullmatch(head):                       # 읍·면·동 이름('임피면 승화원 …')은 다른 현장이 아니라 위치 표시다
+        head = ""
+    if len(head) >= 2 and head not in own:
+        return "foreign"
+    # 사업 이름 뒤에 이 프로젝트의 공사 이름에 없는 다른 대상이 이어지면('○○지구 (A1) 공동주택 전기 설계' ↔ 사업 이름 '○○지구') 그 지구의 다른 사업이다
+    tail = bare(core[at + len(best):])
+    if len(tail) >= 2 and tail not in own and tail not in "".join(p.get("names", ())):
+        return "foreign"
+    rest = best
+    for q in names:
+        rest = rest.replace(q, "")
+    return "specific" if len(_SITE_QUAL.sub("", works._GENERIC.sub("", rest))) >= 2 else "plain"
+
+
+_K_PREP_NOTICE = re.compile(r"철거|해체|석면|지장물")      # 본 공사에 앞서 나는 준비 공사 공고(설계 공고 시점을 재는 기준에서 뺀다)
+
+
 def project_table(latest: pd.DataFrame) -> Dict[str, List[dict]]:
     """시설ID → [{"pid", "type", "first", "last", "cores", "amt", "keys"} …] (대표 공고 기준)."""
     out: Dict[str, List[dict]] = {}
@@ -683,6 +824,7 @@ def project_table(latest: pd.DataFrame) -> Dict[str, List[dict]]:
         cores = [c for c in dict.fromkeys(project_core(n) for n in names) if len(c) >= 4]
         out.setdefault(str(g["시설ID"].iloc[0]), []).append({
             "pid": str(pid), "type": _txt(g["사업유형"].iloc[0]), "first": g["_dt"].min(), "last": g["_dt"].max(), "cores": cores,
+            "first_main": (lambda d: None if pd.isna(d) else d)(g.loc[~g["공고명"].map(_txt).str.contains(_K_PREP_NOTICE), "_dt"].min()),
             "amt": float(g["_amt"].sum()), "keys": set(g["공고번호"].map(_no)), "names": [_ns(n) for n in names]})
     return out
 
@@ -728,20 +870,49 @@ def link(raw: pd.DataFrame, reviewed: pd.DataFrame, hist: pd.DataFrame, latest: 
             why = ""              # '1구역'·'상반기'·'(연간단가)' 가 그 공사의 이름에 든 말일 뿐 — 용역이 여러 사업을 묶은 계약이라는 뜻이 아니다
         if not why and BUNDLE.search(title):
             why = "여러 시설·여러 건을 한 공고로 묶은 용역 — 금액을 나눌 수 없음"
+        if not why and kind in KINDS and p is not None:
+            other = _joint_partner(masked, p["names"], k)
+            if other:             # '○○ 및 △△ … 통합 건설사업관리': 묶인 상대 현장이 DB 에 없어도(한 시설에만 이어져도) 묶음 발주다
+                why = f"여러 현장을 묶은 통합 용역(묶음 발주)으로 보임(공고명의 '{other}' 이(가) 이 프로젝트의 공사 이름에 없음) — 금액을 나눌 수 없음"
+        price = r["추정가격"]
+        if not why and kind in KINDS and p is not None and p["amt"] > 0 and price is not None and not pd.isna(price) and abs(float(price) - p["amt"]) <= p["amt"] * 0.001:
+            why = "용역 추정가격이 이 프로젝트의 공사 추정가격 합과 같음 — 공사비를 용역 금액 칸에 적은 공고로 보임(공고문 확인)"
         flat = _ns(_BR_CHARS.sub("", title))
         hit = lambda names: [x for x in names if _BR_CHARS.sub("", x) in flat]
         found = max((len(x) for x in hit(k["pats"])), default=99)                                  # 느슨한 꼴로만 맞은 줄은 어차피 '추정'
+        # '추정' 연결(대행 기관·느슨한 이름)을 더해도 되는가: 공고명에 든 사업 이름이 이 현장을 가리킬 때만 —
+        # 현장을 가리는 말이 든 사업 이름('○○혁신센터 공영주차장 건립')이 통째로 있거나, 검수한 시설 이름이 그대로 있고 사업 이름 앞뒤에 다른 현장 말이 없을 때.
+        # 접두를 뗀 일반 이름 + '건립' 뿐인 사업 이름('국민체육센터 건립')은 광역 건설본부가 낸 다른 자치구의 같은 이름 사업에도 들어 있다
+        is_named = False
+        if strength != "확실" and lvl >= 3 and p is not None:
+            fit0 = _site_fit(p, title, k)
+            is_named = fit0 == "specific" or (fit0 == "plain" and bool(hit(k.get("full", ()))))
         if found <= _NAME_GENERIC and not hit(k.get("full", ())) and p is not None:
+            # 짧은 일반 이름('공공주택'·'주차타워')은 같은 기관의 어느 사업 공고명에나 들어 있다 → 시점이 아니라 사업 이름으로 가린다:
+            # 공고명에 그 프로젝트의 사업 이름이 통째로 있으면(lvl 3) 공사 공고와 멀어도 더하고, 없으면 시점이 맞아도 더하지 않는다
+            # (2026-11 실자료: 사업 이름 없이 시점만으로 더한 17줄 가운데 10줄이 다른 단지·다른 사업 / 사업 이름이 있는데 시점이 멀다고 뺀 13줄 가운데 11줄은 맞는 용역)
             why_p = f"일반적인 시설 이름({found}글자)으로 이어짐 — " + why_p
-            if not why and kind in KINDS and _nearest(kind, r["_dt"], [p]) is None:
-                why = _GENERIC_WHY + " — 같은 기관의 다른 사업일 수 있음(공고명 확인)"
+            if not why and kind in KINDS and not wide:                  # 같은 계열의 다른 기관이 낸 공고는 아래에서 그 까닭으로 뺀다
+                fit = _site_fit(p, title, k)
+                if not fit:
+                    why = _GENERIC_WHY + " 공고명에 그 프로젝트의 사업 이름이 없음 — 같은 기관의 다른 사업일 수 있음(공고명 확인)"
+                elif fit == "foreign":                                  # '○○역 환승 주차타워 건립공사' ↔ 사업 이름 '주차타워 건립', '3지구 9단지 아파트 건설공사' ↔ '3지구 (조경)'
+                    why = _GENERIC_WHY + " 공고명의 사업 이름 앞뒤에 다른 현장·다른 공사의 이름이 있음 — 같은 기관의 다른 사업일 수 있음(공고명 확인)"
+                elif fit == "plain" and _nearest(kind, r["_dt"], [p]) is None:      # 사업 이름이 '주차타워 건립' 뿐이면 시점까지 맞아야 한다
+                    why = _GENERIC_WHY + " 사업 이름도 시설 종류 + 건립·신축뿐인데 공고 시점이 그 공사와 가깝지 않음 — 같은 기관의 다른 사업일 수 있음(공고명 확인)"
         # 아래 세 가지(유지보수·폐기물 출처·건축 아님)는 공고명에 DB 프로젝트의 사업 이름이 통째로 들어 있으면(lvl 3) 보지 않는다 — 그 사업은 이미 DB 에 실린 공사다.
         # '같은 계열의 다른 기관' 은 lvl 3 이어도 그 사업 이름이 바로 이 프로젝트의 것인지 한 번 더 본다(_names_this_project)
         # (시설 사업에 딸린 '관로 연결공사'·'진입도로 개설공사' 처럼 토목 공종 공고도 프로젝트에 들어 있다)
         if not why and lvl < 3 and kind in KINDS and wtype == "유지보수":
             why = "유지보수 성격의 공사에 딸린 용역으로 보임(이 DB 는 신축·증축·리모델링 공사만 싣는다)"
         if not why and lvl < 3 and kind == "폐기물처리" and wtype not in _TYPE_CODE:
-            why = "어느 공사에서 나온 폐기물인지 공고명으로 알 수 없음(공사 이름·신축·증축·리모델링 말이 없음 — 시설 운영·유지관리 폐기물일 수 있음)"
+            # 공사 이름은 없어도 공고명이 '건설폐기물'·'폐아스콘' 이라고 밝혔고, 그 시설의 프로젝트가 하나뿐이며, 그 공사 공고 무렵(1개월 전~12개월 뒤)에 났으면 그 공사의 폐기물로 본다
+            # (2026-11 실자료: 이 까닭으로 뺀 줄의 22% 가 그 공사의 폐기물이었고, 이 조건에 드는 줄은 대부분 맞았다)
+            lead = _months(r["_dt"], p["first"]) if p is not None else None
+            sole = (p is not None and len(pl) == 1 and _K_WASTE_CONSTR.search(masked) and lead is not None and -WASTE_SOLE_MONTHS[0] <= lead <= WASTE_SOLE_MONTHS[1]
+                    and _only_this_site(masked, k))
+            if not sole:
+                why = "어느 공사에서 나온 폐기물인지 공고명으로 알 수 없음(공사 이름·신축·증축·리모델링 말이 없음 — 시설 운영·유지관리 폐기물일 수 있음)"
         if not why and lvl < 3 and kind in KINDS and _K_NOT_BUILDING.search(masked):
             why = "건축 사업의 용역이 아닌 것으로 보임(산림·하천·상하수도·도로·국가유산 등)"
         if not why and wide and kind in KINDS:
@@ -751,8 +922,14 @@ def link(raw: pd.DataFrame, reviewed: pd.DataFrame, hist: pd.DataFrame, latest: 
                 # 사업 이름이 통째로 있어도: 그 앞뒤에 다른 현장 이름이 있거나('○○지구 스마트팜 온실 신축공사'), 사업 이름이 '접두를 뗀 시설 이름 + 건립·신축' 뿐이면 가릴 수 없다
                 why = (_WIDE_WHY + "이고 공고명의 사업 이름이 이 프로젝트의 것인지 가릴 수 없음(다른 현장 이름이 함께 있거나, 사업 이름이 시설 종류 + 건립·신축뿐) "
                        "— 다른 기관의 같은 이름 시설일 수 있음")
+        if not why and kind == "설계" and lvl < 3 and p is not None:
+            # 설계 용역 공고는 공사 공고보다 여러 달 앞선다. 공고명에 사업 이름도 없는 설계 공고가 공사 공고의 직전·뒤에 났으면 그 공사의 설계가 아니다
+            # (2026-11 실자료: 이런 Y 15줄 가운데 9줄이 같은 시설의 다음 단계·다른 사업의 설계였다). 사업 이름이 통째로 있으면(철거 공고가 먼저 난 사업 등) 그대로 더한다
+            lead = _months(r["_dt"], p.get("first_main"))      # 철거·해체·지장물 공고를 뺀 첫 공사 공고(그런 공고뿐인 프로젝트는 이 규칙을 보지 않는다 — 본 공사는 아직 나지 않았다)
+            if lead is not None and lead > -DESIGN_LEAD_MONTHS:
+                why = (f"설계 공고가 그 공사 공고의 직전이거나 뒤({lead:+.0f}개월)이고 공고명에 그 프로젝트의 사업 이름이 없음 "
+                       "— 그 공사의 설계로 보기 어려움(다음 단계·다른 사업의 설계일 수 있음)")
         ref = p or (min(pl, key=lambda x: (lambda m: 1e9 if m is None else abs(m))(_months(r["_dt"], x["first"]))) if pl else None)
-        price = r["추정가격"]
         gap = _months(r["_dt"], ref["first"]) if ref is not None else None
         rows.append({
             "프로젝트ID": pid, "시설ID": fid, "시설명": k["name"], "용역종류": kind, "용역세부": sub, "합산여부": "", "합산제외_까닭": why,
@@ -762,17 +939,33 @@ def link(raw: pd.DataFrame, reviewed: pd.DataFrame, hist: pd.DataFrame, latest: 
             "공사_최초공고일": (str(ref["first"])[:10] if ref is not None and not pd.isna(ref["first"]) else ""),
             "공사대비_개월": round(gap, 1) if gap is not None else None,
             "공사비대비_비율": (round(float(price) / p["amt"], 4) if (p and p["amt"] > 0 and price is not None and not pd.isna(price)) else None),
-            "상세URL": r["상세URL"], "_dt": r["_dt"], "_prev": r["이전공고번호"], "_lvl": lvl, "_alien": why.startswith((_WIDE_WHY, _GENERIC_WHY)), "_spans": _name_spans(title, k["pats"], tuple(k["loose"]))})
+            "상세URL": r["상세URL"], "_dt": r["_dt"], "_prev": r["이전공고번호"], "_lvl": lvl, "_named": is_named, "_masked": masked, "_alien": why.startswith((_WIDE_WHY, _GENERIC_WHY)), "_spans": _name_spans(title, k["pats"], tuple(k["loose"]))})
     out = pd.DataFrame(rows)
     out = _mark_status(out)
     out = _mark_sum(out, projs)
-    out = out.sort_values(["시설ID", "프로젝트ID", "용역종류", "_dt", "공고번호"], kind="stable").drop(columns=["_dt", "_prev", "_lvl", "_spans", "_alien"])
+    out = out.sort_values(["시설ID", "프로젝트ID", "용역종류", "_dt", "공고번호"], kind="stable").drop(columns=["_dt", "_prev", "_lvl", "_spans", "_alien", "_named", "_masked"])
     return out[LINK_COLS].reset_index(drop=True)
 
 
 REBID_NEAR_DAYS = 120     # 같은 이름으로 이 기간 안에 다시 난 공고는 재공고(유찰·정정 뒤 다시 냄). 폐기물 처리의 차수분(차수 표기와 금액이 모두 다름)은 예외
 REBID_MAX_DAYS = 550      # 그보다 떨어져도 이 기간 안이고 금액이 거의 같거나(±15%) 뒤 공고가 '재공고' 로 표시돼 있거나 같은 프로젝트의 설계·건설사업관리이면 재공고. 그 밖에는 다음 회차·다음 단계의 다른 용역
 REBID_AMT_BAND = 0.15
+REBID_SAME_AMT = 0.01     # '같은 금액' 으로 보는 차이(같은 프로젝트의 설계·건설사업관리/감리가 이 안의 금액으로 REBID_NEAR_DAYS 안에 다시 났으면 이름이 달라도 같은 용역)
+_DUP_TRADE = re.compile(r"전기|통신|소방|기계|건축")
+_DUP_SPECIAL = re.compile(r"토목|조경|무대|전시|석면|해체|철거")
+_DUP_PHASE = re.compile(r"\d+(?:\s*-\s*\d+)?\s*(?:단계|차분|차년도|차|공구|블록|BL|단지|지구|구역|권역|호기|관|동)|[A-Za-z]\s*-?\s*\d+\s*(?:BL|블록)?")
+
+
+def _other_service(a: str, b: str) -> bool:
+    """두 용역 공고명이 서로 다른 용역임을 보이는 표시가 있는가 — 공종('전기공사 감리' ↔ '소방공사 감리')이나 단계·차수·블록('1단계' ↔ '2단계')이 양쪽에 적혀 있고 겹치지 않을 때.
+    한쪽에만 적혀 있으면('… 감리용역' ↔ '… 감리용역(건축)') 다르다고 보지 않는다. 다만 따로 발주되는 일('무대장치 감리'·'석면 해체 감리'·'조경 설계')은 한쪽에만 적혀 있어도 다른 용역이다."""
+    for pat in (_DUP_TRADE, _DUP_PHASE):
+        x, y = {_ns(m) for m in pat.findall(a)}, {_ns(m) for m in pat.findall(b)}
+        if x and y and not (x & y):
+            return True
+    return set(_DUP_SPECIAL.findall(a)) != set(_DUP_SPECIAL.findall(b))
+
+
 _ORD_REBID = re.compile(r"\d+\s*차\s*(?:재\s*)?(?:공고|입찰)")                    # '(2차 공고)' — 다시 낸 공고라는 표시
 _ORD_MARK = re.compile(r"(\d+)\s*차(?!\s*(?:재\s*)?(?:공고|입찰))")          # '(2차)'·'2차분' — '2차 공고'·'2차 입찰' 은 다시 낸 공고라는 표시이므로 뺀다
 
@@ -822,7 +1015,28 @@ def _mark_status(out: pd.DataFrame) -> pd.DataFrame:
             lots = (waste and not same_amt and not again and marks[a] != marks[b] and not _ORD_REBID.search(_txt(out.at[b, "공고명"])))
             if (gap <= REBID_NEAR_DAYS and not lots) or (gap <= REBID_MAX_DAYS and (same_amt or one_off or again)):
                 replaced.add((out.at[a, "시설ID"], out.at[a, "공고번호"]))
-    mask = pd.Series([(f, n) in replaced for f, n in zip(out["시설ID"], out["공고번호"])], index=out.index)
+    # 한 사업에 한 번 하는 용역(설계·건설사업관리/감리)이 같은 프로젝트에 같은 금액으로 가까운 날에 다시 났으면, 이름이 꽤 달라도 같은 용역이다 —
+    # 평가 안내 공고와 본 공고('… 제출 안내 공고' ↔ '(PQ후 가격입찰)'), 머리말·어순을 바꿔 다시 낸 공고. 공종이나 단계·차수 표기가 서로 다르면 다른 용역으로 둔다
+    # 더할 수 있는 줄끼리만 견준다(연간 단가·묶음 따위로 어차피 더하지 않는 줄이 멀쩡한 공고를 '재공고 이전' 으로 만들지 않게). 건설사업관리와 감리는 서로 다른 용역이다
+    one = live[live["용역종류"].isin(("설계", "건설사업관리·감리")) & (live["프로젝트ID"].map(_txt) != "") & (live["합산제외_까닭"].map(_txt) == "")]
+    is_cm = lambda i: _txt(out.at[i, "용역세부"]).startswith("건설사업관리")
+    name_col = "_masked" if "_masked" in out.columns else "공고명"       # 공종·단계 낱말은 시설 이름을 가린 공고명에서 본다('가온소방서 신축공사 전기공사 감리' 의 '소방' 은 공종이 아니다)
+    fset = out.groupby("공고번호")["시설ID"].agg(frozenset).to_dict()       # 이어진 시설이 서로 다른 두 공고('○○ 및 △△ …' ↔ '□□ 및 △△ …')는 같은 용역이 아니다
+    for _, g in one.groupby(["시설ID", "프로젝트ID", "용역종류"], sort=False):
+        if len(g) < 2:
+            continue
+        idx = list(g.sort_values(["_dt", "공고번호"], kind="stable").index)
+        for j in range(1, len(idx)):
+            for a in idx[:j]:
+                b = idx[j]
+                da, db = out.at[a, "_dt"], out.at[b, "_dt"]
+                pa, pb = price.at[a], price.at[b]
+                if pd.isna(da) or pd.isna(db) or not (pa > 0 and pb > 0) or (db - da).days > REBID_NEAR_DAYS or is_cm(a) != is_cm(b) \
+                        or fset.get(out.at[a, "공고번호"]) != fset.get(out.at[b, "공고번호"]):
+                    continue
+                if abs(pb - pa) <= max(pa, pb) * REBID_SAME_AMT and not _other_service(_txt(out.at[a, name_col]), _txt(out.at[b, name_col])):
+                    replaced.add((out.at[a, "시설ID"], out.at[a, "공고번호"]))
+    mask =pd.Series([(f, n) in replaced for f, n in zip(out["시설ID"], out["공고번호"])], index=out.index)
     out.loc[mask & (out["상태"] == "대표"), "상태"] = "재공고 이전"
     return out.drop(columns=["_key"])
 
@@ -878,7 +1092,8 @@ def _mark_sum(out: pd.DataFrame, projs: Dict[str, List[dict]]) -> pd.DataFrame:
             w = "취소 공고" if r["상태"] == "취소" else "재공고로 대체됨(같은 용역이 뒤에 다시 공고됨)"
         if not w and r["용역종류"] not in KINDS:
             w = "세 종류(설계·건설사업관리/감리·폐기물처리)가 아님"
-        if not w and r["연결강도"] != "확실":
+        if not w and r["연결강도"] != "확실" and not r["_named"]:
+            # 어절 사이에 다른 말이 낀 이름·대행 기관의 공고는 '추정' 이지만, 공고명에 든 사업 이름이 이 현장을 가리키면(link 의 _named) 그 사업의 용역으로 본다
             w = "연결이 추정임(" + str(r["연결근거"]).split(" / ")[0] + ")"
         if not w and not _txt(r["프로젝트ID"]):
             w = "프로젝트를 정하지 못함(" + str(r["연결근거"]).split(" / ")[-1] + ")"

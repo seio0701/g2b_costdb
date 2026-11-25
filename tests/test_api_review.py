@@ -751,12 +751,12 @@ def run() -> None:
     logging.disable(logging.CRITICAL)
     try:
         for fn in CHECKS + FIXES:
-            with tempfile.TemporaryDirectory() as tmp:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:      # Windows: 열려 있는 cache.sqlite 가 든 임시 폴더 정리 실패로 뒤 시험이 막히지 않게
                 try:
                     fn(tmp)
                 except BaseException as e:
                     raise AssertionError(f"{fn.__name__}: {type(e).__name__}: {str(e)[:600]}") from e
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:      # Windows: 열려 있는 cache.sqlite 가 든 임시 폴더 정리 실패로 뒤 시험이 막히지 않게
             bad = [(n, info) for n, ok, info in review2_checks(tmp) if not ok]
             assert not bad, bad
     finally:

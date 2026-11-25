@@ -395,6 +395,13 @@ def run():
         assert wb.sheetnames[-1] == "08_용역공고(참고)" and wb["08_용역공고(참고)"].max_row >= 3 and "용역 연결(08) 2줄" in out, (wb.sheetnames, out[-300:])
         h5s = [c.value for c in wb["05_공사비DB_시설합산"][1]]
         assert "용역_설계_추정가격(수식)" in h5s and "용역_폐기물처리_추정가격(수식)" in h5s and h5s.index("용역_공고수(수식)") < h5s.index("시설간_중복")
+        assert h5s.index("발주완료_폐기물용역(수식)") == h5s.index("용역_공고수(수식)") + 1
+        ws8 = wb["08_용역공고(참고)"]; h8 = [c.value for c in ws8[1]]
+        age8 = {ws8.cell(r, h8.index("공고번호") + 1).value: ws8.cell(r, h8.index("공사수집종료까지_일수") + 1).value for r in range(2, 4)}
+        last_cn = str(max(pd.read_parquet(data("notices_hist.parquet"))["공고일시"].astype(str)))[:10]
+        assert last_cn == "2024-03-05", f"이 가짜 자료에서 워크북에 실리는 공사 공고의 가장 늦은 공고일: {last_cn}"
+        # 08 의 일수 = 공사 공고 수집 종료일(= 실린 공사 공고의 가장 늦은 공고일. config 의 수집 종료월 2024-04 말일이 아니다) − 용역 공고일. 음수 = 그 뒤에 난 용역 공고
+        assert age8 == {"R24S00001": -15, "R24S00002": 0}, f"08 의 일수: {age8}"
         from tests.check_excel import check
         rc = check(xlsx)
         assert rc in (0, 2), "Excel 수식 오류"          # 2 = 검증 도구 없음(LibreOffice/formulas) → 건너뜀
@@ -453,6 +460,8 @@ def run():
             assert float(val("05_공사비DB_시설합산", f"{col('용역_건설사업관리·감리_추정가격(수식)')}{r}")) == 1500000000
             assert float(val("05_공사비DB_시설합산", f"{col('용역_폐기물처리_추정가격(수식)')}{r}")) == 129834000
             assert val("05_공사비DB_시설합산", f"{col('용역_설계_추정가격(수식)')}{r}") in ("", None) and int(val("05_공사비DB_시설합산", f"{col('용역_공고수(수식)')}{r}")) == 2
+            assert val("05_공사비DB_시설합산", f"{col('발주완료_폐기물용역(수식)')}{r}") == "발주완료(최근)", "폐기물처리 용역(합산여부 Y)이 있는 프로젝트 — 공고가 마지막 공사 공고일의 6개월 안쪽·그 뒤라 '최근'"
+            assert val("05_공사비DB_시설합산", f"{col('발주완료_폐기물용역(수식)')}{r3}") in ("", None), "용역이 이어지지 않은 프로젝트는 빈칸"
             print("05 시설합산 값 검증 OK")
         except ImportError:
             print("(formulas 패키지 없음 → 05 값 검증 생략)")

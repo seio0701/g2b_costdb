@@ -17,6 +17,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from .dedup import _parse_dt
+
 
 FONT = Font(name="Arial", size=10)
 BLUE = Font(name="Arial", size=10, color="0000FF")
@@ -38,10 +40,15 @@ S_TRADE_DETAIL = "04b_공종세부내역(문서)"
 S_FAC = "05_공사비DB_시설합산"
 S_SERVC = "08_용역공고(참고)"
 SERVC_KINDS = ["설계", "건설사업관리·감리", "폐기물처리"]                       # servc.KINDS 와 같다(05 의 용역 참고 열)
-SERVC5_COLS = [f"용역_{k}_추정가격(수식)" for k in SERVC_KINDS] + ["용역_공고수(수식)"]
+SERVC_DONE_COL, SERVC_DONE_KIND = "발주완료_폐기물용역(수식)", "폐기물처리"       # 05: 이 프로젝트의 폐기물처리 용역(합산여부 Y)이 08 에 있으면 '발주완료'(보조지표)
+SERVC5_COLS = [f"용역_{k}_추정가격(수식)" for k in SERVC_KINDS] + ["용역_공고수(수식)", SERVC_DONE_COL]
 SERVC_COLS = ["프로젝트ID", "시설ID", "시설명", "용역종류", "용역세부", "합산여부", "합산제외_까닭", "연결강도", "연결근거", "공고번호", "공고차수", "공고명", "공고일시",
               "공고기관", "수요기관", "추정가격", "배정예산", "상태", "공고종류", "용역구분", "조달분류", "프로젝트_후보", "공사_최초공고일", "공사대비_개월",
               "공사비대비_비율", "상세URL"]
+# 08: 공사 공고 수집 종료일(= 워크북에 싣는 공사 공고의 가장 늦은 공고일) − 용역 공고일(날수. 음수 = 그 뒤에 난 용역 공고). 워크북을 만들 때 계산해 넣는다(연결 표에는 없는 열).
+# 05: 이 프로젝트의 폐기물처리 용역(Y)이 모두 SERVC_RECENT_DAYS 일(6개월) 안쪽이거나 그 뒤면 '발주완료' 대신 SERVC_DONE_RECENT — 아직 발주 중일 수 있는 사업
+SERVC_AGE_COL, SERVC_RECENT_DAYS, SERVC_DONE_RECENT = "공사수집종료까지_일수", 183, "발주완료(최근)"      # 183일 = 6개월
+SERVC8_COLS = [x for c in SERVC_COLS for x in ((c, SERVC_AGE_COL) if c == "공사대비_개월" else (c,))]      # 08 시트의 열 = 연결 표(SERVC_COLS) + 일수 열
 DETAIL_COLS = ["프로젝트ID", "시설ID", "시설명", "사업유형", "상위공종", "공고번호", "공고차수", "공고키", "세부공종", "항목명_원문",
                "금액_원_문서", "비율(수식)", "배분금액(수식)", "배분적용", "금액기준", "관급자재_포함", "단위", "집계표합계_원_문서", "출처파일", "신뢰도", "근거문구"]
 DETAIL_EXCLUDED = ["공통가설", "간접비", "관급자재", "부가세", "합계", "배분제외"]     # 비율 배분의 분자·분모에서 빼는 행('합계' = 여러 공종을 합친 도급비·총공사비 행, '배분제외' = 이설비·분담금·용역비 등 도급 공사비 밖 항목)
@@ -129,12 +136,20 @@ def bundled_trades_by_project(trade: pd.DataFrame) -> Dict[str, str]:
 def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest: pd.DataFrame,
                    trade: pd.DataFrame, logs: pd.DataFrame, notes: pd.DataFrame, meta: Optional[Dict] = None,
                    trade_detail: Optional[pd.DataFrame] = None, servc: Optional[pd.DataFrame] = None) -> None:
-    """servc = link-servc 의 연결 표(없으면 None). None 이면 워크북은 예전과 똑같이 만들어진다(08 시트·05 의 용역 열 없음)."""
+    """servc = link-servc 의 연결 표(없으면 None). None 이면 워크북은 예전과 똑같이 만들어진다(08 시트·05 의 용역 열 없음).
+    hist(02 시트에 싣는 공사 공고)의 가장 늦은 공고일이 '공사 공고 수집 종료일' 이다 — 08 의 '공사수집종료까지_일수' 와 05 의 '발주완료(최근)' 이 이 날을 기준으로 한다.
+    hist 에서 공고일을 하나도 읽지 못하면 그 칸은 비고 05 는 '발주완료' 로만 적는다."""
     wb = Workbook()
     # ── README ──
     ws = wb.active
     ws.title = "README"
     meta = meta or {}
+    # 공사 공고 수집 종료일 = 이 워크북에 실리는 공사 공고(02 시트) 가운데 가장 늦은 공고일. config 의 수집 기간(period.end)이 아니라 실린 자료에서 읽는다 —
+    # 수집 기간만 늘렸거나 collect 뒤에 discover~dedup 을 아직 다시 돌리지 않았을 때 기준일이 자료보다 앞서가면 '발주완료(최근)' 이 '발주완료' 로 바뀌기 때문이다.
+    # 읽을 공고일이 없으면 NaT → 08 의 일수 칸을 비우고 '최근' 을 가리지 않는다
+    cn_end = _parse_dt(hist["공고일시"].reset_index(drop=True)).max() if (hist is not None and len(hist) and "공고일시" in hist.columns) else pd.NaT
+    cn_end_s = "" if pd.isna(cn_end) else cn_end.date().isoformat()
+    cn_end_def = "공사 공고 수집 종료일 = 이 워크북에 실린 공사 공고 가운데 가장 늦은 공고일(02 시트)"
     lines = [
         ["LIMAC 공사비 DB — 나라장터 발주공고 기반"],
         ["생성일", dt.date.today().isoformat()],
@@ -169,6 +184,13 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
                           "어느 프로젝트의 용역인지는 공고 시점이 맞는 프로젝트 가운데 공고명의 사업 이름·사업유형·공사와의 간격으로 정하고, 가릴 수 없으면 프로젝트ID 를 비워 둔다. "
                           "05 의 '용역_○○_추정가격' = 08 에서 그 프로젝트·그 종류이면서 합산여부가 Y 인 줄의 추정가격 합(부가세 제외. 합산여부 Y 인 공고가 없으면 빈칸 — 0 이 아니다. "
                           "N 으로만 이어진 공고는 08 에 있을 수 있다). "
+                          "05 의 '발주완료_폐기물용역' = 그 프로젝트에 합산여부 Y 인 폐기물처리 용역 공고가 하나라도 있으면 '발주완료'(공사 발주가 끝났다고 보는 보조지표. "
+                          "빈칸은 '미완료' 가 아니라 '판단할 근거 없음' — 폐기물이 적은 공사·수의계약은 용역 공고가 없다. "
+                          + (f"그 폐기물 용역 공고가 모두 공사 공고 수집 종료일({cn_end_s})에서 6개월({SERVC_RECENT_DAYS}일) 안쪽이거나 그 뒤면 '{SERVC_DONE_RECENT}' 으로 따로 적는다"
+                             f"(08 의 '{SERVC_AGE_COL}' 가 모두 {SERVC_RECENT_DAYS} 미만. {cn_end_def}) — 전기·정보통신·소방 공고가 더 나올 수 있다. 발주가 끝난 사업을 고를 때는 '발주완료' 만 고를 것"
+                             "('발주완료' 인 행도 그 사업의 공사 공고가 최근이면 — 01 의 '최종공고일' — 아직 발주 중일 수 있다). "
+                             if cn_end_s else "폐기물 용역 공고가 최근인 사업은 전기·정보통신·소방 공고가 더 나올 수 있다. ") +
+                          "'발주완료' 여도 그 행에 공사비가 모두 들어 있다는 뜻은 아니므로 공종누락경고를 함께 볼 것). "
                           "합산여부 N 의 까닭은 '합산제외_까닭' 열: 취소·재공고로 대체된 공고, 여러 시설을 묶은 공고, 연간·단가 계약, 부대 용역(타당성·VE·공모 관리 등), "
                           "유지보수 성격의 공사에 딸린 용역, 같은 계열의 다른 기관(다른 소속기관·지사·학교)이 낸 공고, 다른 시설에도 이어진 공고, 연결이 추정인 줄, 프로젝트를 정하지 못한 줄. "
                           "노란 칸(합산여부·프로젝트ID)은 고칠 수 있고 05 가 따라 바뀐다 — 프로젝트ID 가 빈 줄은 프로젝트ID 도 적어야 더해지고, 종류가 '기타' 인 줄은 금액 열에 들어가지 않는다"
@@ -350,11 +372,11 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
     f5 = f5[fcols]
     _write_df(ws, f5, money_cols=["연면적_m2"] + [f"{tr}(수식)" for tr in TRADES] + ["건축공종계(수식)"] + TOTAL5_COLS + ADJ5_COLS
               + ["건축_순건축추정(수식)"]
-              + [f"문서배분_{tr}(수식)" for tr in DETAIL_ALLOC_TRADES] + SERVC5_COLS[:-1],
+              + [f"문서배분_{tr}(수식)" for tr in DETAIL_ALLOC_TRADES] + SERVC5_COLS[:len(SERVC_KINDS)],
               blue_cols=["프로젝트ID", "시설ID", "시설명", "세부사업명", "세부사업수", "사업유형", "표2_대분류", "표2_중분류", "수요기관", "연면적_m2", "지상층수", "지하층수", "구조",
                          "공고연도", "공고건수_최신", "통합발주_포함공종", "시설간_중복", "중복_제외권장"],
               yellow_cols=["건설공사비지수_보정계수(입력)", "메모"],
-              widths={"시설명": 30, "세부사업명": 36, "공종누락경고(수식)": 28, "통합발주_포함공종": 34, "시설간_중복": 34})
+              widths={"시설명": 30, "세부사업명": 36, "공종누락경고(수식)": 28, "통합발주_포함공종": 34, "시설간_중복": 34, SERVC_DONE_COL: 16})
     fc = {c: get_column_letter(i + 1) for i, c in enumerate(fcols)}
     sv = None
     if servc is not None:
@@ -363,9 +385,13 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
             if c not in sv.columns:
                 sv[c] = None
         sv = sv[SERVC_COLS]
-        vcol = {c: get_column_letter(i + 1) for i, c in enumerate(SERVC_COLS)}
+        # 공사 공고 수집 종료일까지의 날수(시각은 버리고 날짜끼리 뺀다). 모든 줄에 넣는다 — 08 에서 합산여부·프로젝트ID 를 고쳐도 그 줄의 날수는 그대로 쓰인다.
+        # 종료일을 모르거나 공고일시를 읽지 못한 줄은 빈칸(05 에서 '최근' 으로 치지 않는다)
+        age = [None] * len(sv) if pd.isna(cn_end) else [None if pd.isna(t) else int((cn_end.normalize() - t.normalize()).days) for t in _parse_dt(sv["공고일시"])]
+        sv.insert(SERVC8_COLS.index(SERVC_AGE_COL), SERVC_AGE_COL, pd.Series(age, index=sv.index, dtype=object))
+        vcol = {c: get_column_letter(i + 1) for i, c in enumerate(SERVC8_COLS)}
         n_v = max(len(sv), 1) + 1                    # 행 범위를 지정한다(04b 와 같게)
-        V = {c: f"'{S_SERVC}'!${vcol[c]}$2:${vcol[c]}${n_v}" for c in ("프로젝트ID", "용역종류", "합산여부", "추정가격")}
+        V = {c: f"'{S_SERVC}'!${vcol[c]}$2:${vcol[c]}${n_v}" for c in ("프로젝트ID", "용역종류", "합산여부", "추정가격", SERVC_AGE_COL)}
     tot_rng = f"'{S_TRADE}'!${col['금액합계_기초금액기준(수식)']}:${col['금액합계_기초금액기준(수식)']}"
     tot2_rng = f"'{S_TRADE}'!${col['금액합계_추정가격기준(수식)']}:${col['금액합계_추정가격기준(수식)']}"
     id_rng, tr_rng = f"'{S_TRADE}'!${col['프로젝트ID']}:${col['프로젝트ID']}", f"'{S_TRADE}'!${col['공종']}:${col['공종']}"
@@ -416,6 +442,14 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
                 cond = f'{V["프로젝트ID"]},$A{r},{V["용역종류"]},"{k}",{V["합산여부"]},"Y"'
                 ws[f"{fc[f'용역_{k}_추정가격(수식)']}{r}"] = f'=IF(COUNTIFS({cond})=0,"",SUMIFS({V["추정가격"]},{cond}))'
             ws[f"{fc['용역_공고수(수식)']}{r}"] = f'=COUNTIFS({V["프로젝트ID"]},$A{r},{V["합산여부"]},"Y")'
+            # 발주완료(보조지표): 이 프로젝트에 더한(Y) 폐기물처리 용역이 하나라도 있으면 '발주완료'. 없으면 빈칸('미완료' 가 아니다 — 폐기물이 적은 공사·
+            # 수의계약은 용역 공고가 없다). 08 의 노란 칸을 고치면 따라 바뀐다. 실자료(2026-11): 폐기물 용역 첫 공고는 공사 첫 공고의 3주쯤 뒤(가운데값)이고,
+            # 3건 중 1건꼴로 그 뒤에 전기·정보통신·소방(드물게 건축) 공고가 처음 나왔다 → 공고가 최근인 사업에서는 이른 표시일 수 있다.
+            # 그래서 그 폐기물 용역(Y) 줄이 모두 공사 공고 수집 종료일에서 SERVC_RECENT_DAYS 일 안쪽이거나 그 뒤면(= 가장 이른 공고도 최근) '발주완료(최근)' 으로 따로 적는다.
+            # 08 의 일수 칸이 빈 줄(종료일 모름·끼워 넣은 줄)은 '<183' 조건에 세어지지 않으므로 '최근' 으로 치지 않는다
+            done = f'{V["프로젝트ID"]},$A{r},{V["용역종류"]},"{SERVC_DONE_KIND}",{V["합산여부"]},"Y"'
+            ws[f"{fc[SERVC_DONE_COL]}{r}"] = (f'=IF(COUNTIFS({done})=0,"",IF(COUNTIFS({done},{V[SERVC_AGE_COL]},"<{SERVC_RECENT_DAYS}")=COUNTIFS({done}),'
+                                              f'"{SERVC_DONE_RECENT}","발주완료"))')
         for c in fcols:
             if "(수식)" in c:
                 ws[f"{fc[c]}{r}"].font = FONT
@@ -430,7 +464,19 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
                    "(같은 사업끼리는 세부사업으로 나뉘지 않은 시설의 행을 남김. '일부 겹침' 은 그것만으로는 Y 가 붙지 않음 — Y 행을 뺀 뒤에도 두 번 남는 공고 수는 06_검증로그 '시설 간 중복 프로젝트' 에 표시). 여러 프로젝트의 합계·평균을 낼 때는 Y 행을 필터로 제외할 것. "
                    "㎡당 공사비는 사업유형(신축/증축/리모델링)이 같은 프로젝트끼리만 비교할 것 — 리모델링의 연면적은 공사 대상 연면적임. "
                    + ("용역_*_추정가격(수식)은 08 시트에서 이 프로젝트에 이어진 용역 공고(합산여부 Y)의 추정가격 합(부가세 제외) — 공사비가 아닌 참고값이며 총공사비합계·㎡당 공사비에 들어가지 않는다. "
-                      "빈칸은 '더한(합산여부 Y) 공고 없음' 이지 용역비 0 이 아니다(README '용역(08·05)'). " if servc is not None else "") +
+                      "빈칸은 '더한(합산여부 Y) 공고 없음' 이지 용역비 0 이 아니다(README '용역(08·05)'). "
+                      "발주완료_폐기물용역(수식) = 08 에 이 프로젝트의 폐기물처리 용역 공고(합산여부 Y)가 하나라도 있으면 '발주완료' — 그 사업의 공사 발주가 끝났다고 보는 보조지표다. "
+                      "빈칸은 '판단할 근거 없음' 이지 '미완료' 가 아니다(폐기물이 적은 공사·수의계약은 용역 공고가 없다). "
+                      "폐기물 용역 공고는 대개 건축 공고 무렵에 나고, 그 뒤에 전기·정보통신·소방(드물게 건축) 공고가 처음 나오는 사업이 3건 중 1건꼴이다(넷 중 셋은 석 달 안, 열에 하나는 일곱 달 넘게 뒤). "
+                      + (f"그래서 이 프로젝트의 폐기물 용역 공고(합산여부 Y)가 모두 공사 공고 수집 종료일({cn_end_s})에서 6개월({SERVC_RECENT_DAYS}일) 안쪽이거나 그 뒤면 '{SERVC_DONE_RECENT}' 으로 따로 적는다"
+                         f"(08 의 '{SERVC_AGE_COL}' 가 모두 {SERVC_RECENT_DAYS} 미만. {cn_end_def}). '{SERVC_DONE_RECENT}' 은 아직 발주 중일 수 있으니 발주가 끝난 사업을 고를 때는 '발주완료' 만 고르고, "
+                         "쓰기 전에 08 의 공고일시를 확인할 것(용역 공고는 공사 공고보다 늦은 달까지 수집된다). "
+                         "'발주완료' 인 행도 그 사업의 공사 공고가 최근이면(01 의 '최종공고일' 이 공사 공고 수집 종료일에서 6개월 안쪽) 아직 발주 중일 수 있다. "
+                         if cn_end_s else
+                         "폐기물 용역 공고가 최근인 사업은 아직 발주 중일 수 있으니 08 의 공고일시를 확인할 것(용역 공고는 공사 공고보다 늦은 달까지 수집된다. "
+                         f"이 워크북은 실린 공사 공고에서 공고일을 읽지 못해 '{SERVC_DONE_RECENT}' 을 가리지 않았다). ") +
+                      "'발주완료' 는 이 행에 공사비가 모두 들어 있다는 뜻이 아니다 — 공종누락경고는 따로 본다(통합발주이거나 그 공종 공고가 이 DB 에 없는 경우. 철거·부지 정리 공고만 있는 행도 '발주완료' 가 될 수 있다). "
+                      "같은 사업이 두 행으로 잡힌 경우(시설간_중복) 두 행이 함께 '발주완료' 가 될 수 있다. " if servc is not None else "") +
                    "문서배분_*(수식)은 다른 공종 공고 안에 묶인 그 공종의 참고 배분(04b 비율 × 04 금액합계_기초금액기준, 자기 공종 공고의 몫 제외, 총공사비합계에 미포함), 건축_순건축추정 = 건축(수식) − 건축 공고 안의 비건축 배분(04b 배분적용이 Y 인 건축 공고의 것만 뺀다 — 배분되지 않은 건축 공고가 섞인 프로젝트는 그만큼 덜 빠진 값).")
     ws[f"A{n}"].font = FONT
 
@@ -455,9 +501,9 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
     # ── 08 용역공고(참고) — link-servc 결과가 있을 때만. 05 의 용역 참고 열이 이 시트를 SUMIFS 로 읽는다 ──
     if sv is not None:
         ws = wb.create_sheet(S_SERVC)
-        _write_df(ws, sv, money_cols=["추정가격", "배정예산"], blue_cols=[c for c in SERVC_COLS if c != "합산여부"], yellow_cols=["합산여부", "프로젝트ID"],
+        _write_df(ws, sv, money_cols=["추정가격", "배정예산"], blue_cols=[c for c in SERVC8_COLS if c != "합산여부"], yellow_cols=["합산여부", "프로젝트ID"],
                   widths={"시설명": 26, "공고명": 52, "합산제외_까닭": 44, "연결근거": 50, "용역세부": 22, "수요기관": 24, "공고기관": 20, "프로젝트_후보": 24, "상세URL": 30})
-        rc = get_column_letter(SERVC_COLS.index("공사비대비_비율") + 1)
+        rc = get_column_letter(SERVC8_COLS.index("공사비대비_비율") + 1)
         for r in range(2, ws.max_row + 1):
             ws[f"{rc}{r}"].number_format = "0.0%"
         nv = len(sv) + 3
@@ -465,6 +511,11 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
                         "합산여부 Y 인 줄만 05 의 '용역_○○_추정가격' 에 더해진다 — N 의 까닭은 '합산제외_까닭'. 프로젝트ID 가 빈 줄은 시설까지만 이어진 공고(어느 프로젝트인지 가리지 못함 — '프로젝트_후보'). "
                         "손으로 고칠 때: 05 는 프로젝트ID·용역종류·합산여부 세 칸을 함께 본다 — 프로젝트ID 가 빈 줄은 합산여부를 Y 로 바꾸는 것만으로는 더해지지 않고 프로젝트ID(노란 칸)도 적어야 하며, "
                         "용역종류가 '기타' 인 줄은 Y 로 바꿔도 금액 열에 들어가지 않는다(용역_공고수 에는 세어진다). "
+                        "용역종류가 '폐기물처리' 이고 합산여부가 Y 인 줄이 있는 프로젝트는 05 의 '발주완료_폐기물용역' 이 '발주완료' 가 된다"
+                        + (f"(그 줄들의 '{SERVC_AGE_COL}' 가 모두 {SERVC_RECENT_DAYS} 미만이면 '{SERVC_DONE_RECENT}'). "
+                           f"{SERVC_AGE_COL} = 공사 공고 수집 종료일({cn_end_s}) − 용역 공고일(날수. {cn_end_def}. 음수 = 그날 뒤에 난 용역 공고. "
+                           "이 칸이 빈 줄은 '최근' 으로 치지 않으므로 폐기물처리 줄을 끼워 넣었으면 이 칸도 적을 것). "
+                           if cn_end_s else f". {SERVC_AGE_COL} 는 실린 공사 공고에서 공고일을 읽지 못해 비워 두었다('{SERVC_DONE_RECENT}' 을 가리지 않는다). ") +
                         "표 아래에 새로 적은 줄은 더해지지 않는다(표의 둘째 줄부터 마지막 줄 사이에 행을 끼워 넣을 것 — 머리글 바로 아래 첫 줄 위에 끼운 줄도 더해지지 않는다). "
                         "상태: 대표 / 재공고 이전(같은 용역이 뒤에 다시 공고됨) / 취소. 공사대비_개월 = 용역 공고일 − 그 프로젝트(없으면 가장 가까운 프로젝트) 공사 첫 공고일. "
                         "공사비대비_비율 = 추정가격 ÷ 그 프로젝트 공사 추정가격 합(지나치게 크면 06_검증로그 '용역비 비율'). "

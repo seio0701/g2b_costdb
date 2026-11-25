@@ -434,15 +434,18 @@ def _read_sheets(path: str, cap: int = COST_SHEET_MAX_ROWS) -> List[Tuple[str, l
     try:
         from openpyxl import load_workbook
         wb = load_workbook(path, read_only=True, data_only=True)
-        out = []
-        for ws in wb.worksheets:
-            rows = []
-            for i, row in enumerate(ws.iter_rows(values_only=True)):
-                if i >= cap:
-                    break
-                rows.append(row)
-            out.append((ws.title, rows))
-        return out
+        try:
+            out = []
+            for ws in wb.worksheets:
+                rows = []
+                for i, row in enumerate(ws.iter_rows(values_only=True)):
+                    if i >= cap:
+                        break
+                    rows.append(row)
+                out.append((ws.title, rows))
+            return out
+        finally:
+            wb.close()        # read_only 로 연 통합문서는 닫지 않으면 파일을 잡고 있다 — Windows 에서 그 파일·폴더를 지우거나 옮길 수 없게 된다
     except Exception as e:  # noqa: BLE001
         errors.append(f"openpyxl: {str(e)[:80]}")
     try:

@@ -3622,7 +3622,8 @@ def test_attachments(tmp):
 
 
 def run():
-    with tempfile.TemporaryDirectory() as tmp:
+    # Windows 에서는 열려 있는 파일(수집 캐시 cache.sqlite 등)이 든 임시 폴더를 지우지 못한다 — 정리 실패로 뒤의 시험(test_api_review·test_servc_link)이 돌지 않는 일이 없게 한다
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         test_api_client(tmp)
         test_api_response_shapes_and_windows(tmp)
         test_collector_review(tmp)

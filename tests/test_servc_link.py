@@ -156,19 +156,20 @@ def test_link():
     assert r("S12")["용역종류"] == "기타" and r("S13")["프로젝트ID"] == "" and "시점이 맞는 프로젝트가 없음" in r("S13")["합산제외_까닭"]
     assert r("S16")["합산여부"] == "N" and "어느 공사" in r("S16")["합산제외_까닭"]
     assert r("S17", hid)["프로젝트ID"] == H and r("S17", hid)["합산여부"] == "Y", "같은 군의 사업소"
-    assert r("S18", hid)["연결강도"] == "추정" and r("S18", hid)["합산여부"] == "N" and "대행 기관" in r("S18", hid)["합산제외_까닭"]
+    # 대행 기관이 낸 공고는 '추정' 이지만, 공고명에 그 프로젝트의 사업 이름('예시군 문화예술회관 건립')이 통째로 있으면 더한다(2026-11 실자료 점검. 사업 이름이 없으면 N — test_field_audit ⑥)
+    assert r("S18", hid)["연결강도"] == "추정" and r("S18", hid)["합산여부"] == "Y" and "대행 기관" in r("S18", hid)["연결근거"]
     assert ("S19", hid) in g and ("S19", mid) not in g and r("S19", hid)["용역종류"] == "기타", "기관이 다른 시설에는 잇지 않는다"
     # 05 에 더해지는 금액: 프로젝트·종류별 합
     y = out[out["합산여부"] == "Y"].groupby(["프로젝트ID", "용역종류"])["추정가격"].sum().to_dict()
     assert y == {(N, "건설사업관리·감리"): 950_000_000 + 160_000_000, (N, "설계"): 800_000_000, (N, "폐기물처리"): 52_000_000 + 8_000_000 + 90_000_000,
-                 (R, "건설사업관리·감리"): 40_000_000, (R, "설계"): 200_000_000, (H, "건설사업관리·감리"): 1_500_000_000}, y
+                 (R, "건설사업관리·감리"): 40_000_000, (R, "설계"): 200_000_000, (H, "건설사업관리·감리"): 1_500_000_000, (H, "설계"): 1_200_000_000}, y
     # 비율 점검: 지나치게 큰 용역비만 경고
     big = servc.link(_rows(cfg, [dict(no="B1", name="가상시립미술관 노후시설 개보수공사 설계용역", dt="2025-10-01 10:00:00", price=2_000_000_000)]), reviewed, hist, latest, cfg)
     lg = servc.ratio_logs(big, latest)
     assert len(lg) == 1 and lg[0]["공고번호"] == R and lg[0]["판정"] == "경고" and "용역비 비율(설계)" == lg[0]["항목"] and not servc.ratio_logs(out, latest), lg
     # 요약·진단 글: 건수가 맞고, 공고명은 싣지 않는다(진단)
     txt = servc.summary(out, len(raw), raw[cfg["fields"]["bid_no"]].nunique(), latest)
-    assert "합산여부 Y" in txt and "설계: 2건" in txt and "폐기물처리: 3건" in txt and "더하지 않는 줄" in txt, txt
+    assert "합산여부 Y" in txt and "설계: 3건" in txt and "폐기물처리: 3건" in txt and "더하지 않는 줄" in txt, txt
     prof = servc.profile(raw, cfg)
     assert "공고번호 기준 21건" in prof and "가상시립미술관" not in prof and "묶음 표기" in prof, prof
     assert servc.link(raw.iloc[0:0], reviewed, hist, latest, cfg).empty and servc.summary(out.iloc[0:0], 0, 0, latest).count("\n") == 1
@@ -229,7 +230,8 @@ def test_name_and_project_rules():
     assert "A2" not in g and "A3" not in g and g["A1"]["프로젝트ID"] == "F1-N" and g["A1"]["합산여부"] == "Y" and g["A4"]["프로젝트ID"] == "F1-N", sorted(g)
     assert g["B1"]["프로젝트ID"] == "F2-N-01" and g["B1"]["연결강도"] == "확실", g["B1"].to_dict()
     assert g["B2"]["프로젝트ID"] == "F2-N-02" and "사업 이름" in g["B2"]["연결근거"], "두 프로젝트의 사업 이름이 다 들어 있으면 더 긴(구체적인) 쪽"
-    assert "B3" not in g and g["D1"]["연결강도"] == "추정" and g["D1"]["합산여부"] == "N" and g["D1"]["프로젝트ID"] == "F4-N", g["D1"].to_dict()
+    # 어절 사이에 다른 말이 낀 이름은 '추정' 이지만, 공고명에 그 프로젝트의 사업 이름('다온 복합 문화 체육 회관 건립')이 통째로 있으면 더한다(2026-11 실자료 점검. 사업 이름이 없으면 N — test_field_audit ⑥)
+    assert "B3" not in g and g["D1"]["연결강도"] == "추정" and g["D1"]["합산여부"] == "Y" and g["D1"]["프로젝트ID"] == "F4-N", g["D1"].to_dict()
     assert g["C1"]["프로젝트ID"] == "F3-R-01" and g["C3"]["프로젝트ID"] == "F3-R-02", (g["C1"]["연결근거"], g["C3"]["연결근거"])
     assert g["C2"]["프로젝트ID"] == "" and g["C2"]["프로젝트_후보"] == "F3-R-01, F3-R-02" and g["C2"]["합산여부"] == "N", "좁은 창에 둘 다 들면 정하지 않는다"
     assert g["E1"]["합산여부"] == g["E2"]["합산여부"] == "Y" and g["E1"]["프로젝트ID"] == g["E2"]["프로젝트ID"] == "F5-R", (g["E1"].to_dict(), g["E2"].to_dict())
@@ -258,6 +260,48 @@ def _recalc(path: str):
     return out if os.path.exists(out) else None
 
 
+def _eval_done(wb, ws5, formula, rows=None) -> str:
+    """05 '발주완료_폐기물용역' 수식을 직접 계산한다 — LibreOffice 가 없는 PC 에서도 값이 맞는지 보려고. 수식의 꼴(기본 = 프로젝트ID·용역종류·합산여부 조건):
+    =IF(COUNTIFS(기본)=0,"",IF(COUNTIFS(기본,일수 범위,"<183")=COUNTIFS(기본),"발주완료(최근)","발주완료"))
+    rows 를 주면 조건 범위가 08 의 자료 줄 전체(첫 줄, 마지막 줄)인지도 본다."""
+    import re
+    m = re.fullmatch(r'=IF\(COUNTIFS\((.+?)\)=0,"",IF\(COUNTIFS\((.+?)\)=COUNTIFS\((.+?)\),"발주완료\(최근\)","발주완료"\)\)', str(formula))
+    assert m and m.group(1) == m.group(3) and m.group(2).startswith(m.group(1) + ","), ("세 COUNTIFS 의 기본 조건이 같아야 한다", formula)
+    age = re.fullmatch(r"'([^']+)'!\$([A-Z]+)\$\d+:\$[A-Z]+\$\d+,\"<(\d+)\"", m.group(2)[len(m.group(1)) + 1:])
+    assert age and int(age.group(3)) == build_excel.SERVC_RECENT_DAYS and wb[age.group(1)][f"{age.group(2)}1"].value == build_excel.SERVC_AGE_COL, \
+        ("'최근' 조건은 08 의 일수 열이 기준 날수 미만인지 하나뿐이어야 한다", formula)
+    txt = lambda v: "" if v is None else str(v).casefold()
+    spans = set()
+
+    def count(text) -> int:
+        args = re.findall(r"""'[^']+'!\$[A-Z]+\$\d+:\$[A-Z]+\$\d+|\$[A-Z]+\d+|"[^"]*\"""", text)
+        assert len(args) % 2 == 0 and ",".join(args) == text, (args, formula)
+        conds = []
+        for rng, crit in zip(args[0::2], args[1::2]):
+            sheet, c1, r1, c2, r2 = re.fullmatch(r"'([^']+)'!\$([A-Z]+)\$(\d+):\$([A-Z]+)\$(\d+)", rng).groups()
+            assert c1 == c2, formula
+            spans.add((int(r1), int(r2)))
+            want = crit[1:-1] if crit.startswith('"') else ws5[crit.replace("$", "")].value
+            # Excel 의 COUNTIFS 와 같게: 빈 조건 칸은 빈 줄과 맞지 않고, 글자 조건은 대소문자를 가리지 않는다. '<숫자' 조건은 숫자 칸만 센다(빈칸·글자 칸은 세지 않는다).
+            # 와일드카드와 그 밖의 비교 연산자 조건은 이 도우미가 계산하지 않는다
+            assert crit.startswith('"') or want not in (None, ""), ("조건 칸이 비어 있다", crit, formula)
+            less = re.fullmatch(r"<(\d+)", str(want))
+            assert less or not re.search(r"[*?~]|^[<>=]", str(want)), ("와일드카드·비교 연산자 조건은 계산하지 못한다", crit, formula)
+            if less:
+                vals = [wb[sheet][f"{c1}{r}"].value for r in range(int(r1), int(r2) + 1)]
+                assert all(v is None or type(v) in (int, float) or (isinstance(v, str) and not v.startswith("=")) for v in vals), \
+                    ("일수 칸의 수식·날짜 값은 이 도우미가 계산하지 못한다(Excel 은 그 결과를 숫자로 센다)", formula)
+                conds.append(lambda r, ws=wb[sheet], c=c1, lim=int(less.group(1)): type(ws[f"{c}{r}"].value) in (int, float) and ws[f"{c}{r}"].value < lim)
+            else:
+                conds.append(lambda r, ws=wb[sheet], c=c1, w="" if want is None else str(want).casefold(): txt(ws[f"{c}{r}"].value) == w)
+        assert len(spans) == 1, ("조건 범위의 행이 서로 같아야 한다", spans, formula)
+        (a, b), = spans
+        return sum(all(f(r) for f in conds) for r in range(a, b + 1))
+    n, recent = count(m.group(1)), count(m.group(2))
+    assert rows is None or spans == {rows}, ("조건 범위는 08 의 자료 줄 전체(2행~마지막 자료 줄)여야 한다", spans, rows, formula)
+    return "" if n == 0 else ("발주완료(최근)" if recent == n else "발주완료")
+
+
 def test_excel_and_stage(tmp):
     import openpyxl
     import tests.test_dedup_and_excel as T
@@ -274,13 +318,153 @@ def test_excel_and_stage(tmp):
     h0, h1 = [c.value for c in w0[build_excel.S_FAC][1]], [c.value for c in w1[build_excel.S_FAC][1]]
     assert not any(str(h).startswith("용역_") for h in h0) and [h for h in h1 if h not in h0] == build_excel.SERVC5_COLS
     assert h1.index("문서배분_중복경고(수식)") < h1.index("용역_설계_추정가격(수식)") < h1.index("시설간_중복") and h1[-1] == "메모"
-    assert n_formula(w1) - n_formula(w0) == len(fac) * len(build_excel.SERVC5_COLS), "05 에 프로젝트마다 용역 수식 4개만 늘어난다"
+    assert n_formula(w1) - n_formula(w0) == len(fac) * len(build_excel.SERVC5_COLS) and len(build_excel.SERVC5_COLS) == 5, "05 에 프로젝트마다 용역 수식(금액 3 + 공고수 + 발주완료)만 늘어난다"
     ws8 = w1[build_excel.S_SERVC]
-    assert [c.value for c in ws8[1]] == build_excel.SERVC_COLS and ws8.max_row >= len(linked) + 1
+    assert [c.value for c in ws8[1]] == build_excel.SERVC8_COLS and ws8.max_row >= len(linked) + 1
+    i8 = build_excel.SERVC8_COLS.index(build_excel.SERVC_AGE_COL)
+    assert build_excel.SERVC8_COLS[i8 - 1] == "공사대비_개월" and build_excel.SERVC8_COLS[:i8] + build_excel.SERVC8_COLS[i8 + 1:] == build_excel.SERVC_COLS, "08 = 연결 표의 열 + 일수 열 하나"
+    # 공사 공고 수집 종료일 = 워크북에 실린 공사 공고(02 시트 = hist)의 가장 늦은 공고일. config 의 수집 기간이나 오늘 날짜가 아니다
+    day = lambda v: pd.Timestamp(str(v)[:10])
+    end0 = max(day(v) for v in hist["공고일시"])
+    assert [ws8.cell(r, i8 + 1).value for r in range(2, len(linked) + 2)] == [int((end0 - day(v)).days) for v in linked["공고일시"]], "08 의 일수 = 실린 공사 공고의 가장 늦은 공고일 − 용역 공고일"
+    note_of = lambda ws, start: next(str(r[0].value) for r in ws.iter_rows(min_row=start) if str(r[0].value or "").startswith("주:"))
+    texts_of = lambda wb: (" ".join(str(r[1].value) for r in wb["README"].iter_rows() if r[0].value == "용역(08·05)"), note_of(wb[build_excel.S_FAC], 3), note_of(wb[build_excel.S_SERVC], len(linked) + 2))
+    assert all(f"공사 공고 수집 종료일({end0.date().isoformat()})" in t and "공사 공고 수집 종료일 = 이 워크북에 실린 공사 공고 가운데 가장 늦은 공고일(02 시트)" in t and "읽지 못해" not in t
+               for t in texts_of(w1)), [t[-500:] for t in texts_of(w1)]
     assert [r[0].value for r in w1["README"].iter_rows() if r[0].value in (build_excel.S_SERVC, "용역(08·05)")] == [build_excel.S_SERVC, "용역(08·05)"]
     r5 = {ws.cell(r, 1).value: r for ws in [w1[build_excel.S_FAC]] for r in range(2, ws.max_row + 1)}
     cell = w1[build_excel.S_FAC].cell(r5[linked["프로젝트ID"].iloc[-1] or list(r5)[0]], h1.index("용역_설계_추정가격(수식)") + 1).value
     assert cell.startswith("=IF(COUNTIFS('08_용역공고(참고)'!$A$2:$A$") and '"설계"' in cell and ',"Y")=0,"",SUMIFS(' in cell, cell
+    # 발주완료_폐기물용역(보조지표): 더한(합산여부 Y) 폐기물처리 용역이 있는 프로젝트만 '발주완료', 나머지는 빈칸('미완료' 라고 적지 않는다)
+    pids = set(fac["프로젝트ID"].astype(str))
+
+    def done_values(path):
+        wb = openpyxl.load_workbook(path)
+        ws5, ws8 = wb[build_excel.S_FAC], wb[build_excel.S_SERVC]
+        ci = [c.value for c in ws5[1]].index(build_excel.SERVC_DONE_COL) + 1
+        no = [c.value for c in ws8[1]].index("공고번호") + 1
+        last = max(r for r in range(2, ws8.max_row + 1) if ws8.cell(r, no).value)          # 표 아래 주석 줄에는 공고번호가 없다
+        return {ws5.cell(r, 1).value: _eval_done(wb, ws5, ws5.cell(r, ci).value, rows=(2, last)) for r in range(2, ws5.max_row + 1) if ws5.cell(r, 1).value in pids}
+    assert h1.index(build_excel.SERVC_DONE_COL) == h1.index("용역_공고수(수식)") + 1
+    yes = linked[linked["합산여부"] == "Y"]
+    waste_y = set(yes[yes["용역종류"] == "폐기물처리"]["프로젝트ID"]) - {""}
+    other_y = (set(yes[yes["용역종류"] != "폐기물처리"]["프로젝트ID"]) - {""} - waste_y) & pids
+    got = done_values(p1)
+    assert set(got) == pids and waste_y and waste_y <= pids and {p for p, v in got.items() if v} == waste_y, (got, waste_y)
+    assert other_y and all(got[p] == "" for p in other_y), "설계·건설사업관리 용역만 더해진 프로젝트는 발주완료가 아니다"
+    # 발주완료(최근): 그 프로젝트의 폐기물처리 Y 줄이 모두 공사 공고 수집 종료일에서 6개월(183일) 안쪽이거나 그 뒤일 때만. 가장 이른 Y 줄이 183일 이상 앞이면 '발주완료'
+    wy = linked[(linked["용역종류"] == "폐기물처리") & (linked["합산여부"] == "Y") & linked["프로젝트ID"].isin(waste_y)]
+    wp = sorted(waste_y)[0]
+    wdays = sorted(day(v) for v in wy[wy["프로젝트ID"] == wp]["공고일시"])
+    assert len(wdays) >= 2 and wdays[0] < wdays[-1] and build_excel.SERVC_RECENT_DAYS == 183 and build_excel.SERVC_DONE_RECENT == "발주완료(최근)"
+    assert (end0 - wdays[0]).days >= 183 and got[wp] == "발주완료", ("가장 이른 폐기물 Y 줄이 마지막 공사 공고일의 183일 넘게 앞", got)
+
+    def hist_until(end):
+        """공사 공고의 가장 늦은 공고일이 end 인 이력: 그 뒤의 공고일은 end 로 당기고, 한 줄은 그 날 밤(23:30)으로 둔다 — 기준일은 시각을 버린 날짜다. (이 표는 02 시트와 기준일에만 쓰인다)"""
+        h = hist.copy()
+        cut = pd.Timestamp(end) + pd.Timedelta(hours=9)
+        h["공고일시"] = [min(pd.Timestamp(str(v)), cut).strftime("%Y-%m-%d %H:%M") for v in h["공고일시"]]
+        h.loc[h.index[-1], "공고일시"] = (pd.Timestamp(end) + pd.Timedelta(hours=23, minutes=30)).strftime("%Y-%m-%d %H:%M")
+        return h
+    with_end = lambda name, end, sv=linked: build_excel.build_workbook(os.path.join(tmp, name), fac, hist_until(end), latest, trade, pd.DataFrame(), pd.DataFrame(),
+                                                                       meta={"period": "x"}, servc=sv) or os.path.join(tmp, name)
+    iso = lambda t: t.date().isoformat()
+    p_old = with_end("sv5.xlsx", iso(wdays[0] + pd.Timedelta(days=183)))          # 가장 이른 줄이 꼭 183일 앞(나머지 줄은 그보다 가깝거나 종료일 뒤) → 최근이 아니다
+    p_new = with_end("sv6.xlsx", iso(wdays[0] + pd.Timedelta(days=182)))          # 가장 이른 줄도 182일 앞 → 모두 최근
+    p_aft = with_end("sv7.xlsx", iso(wdays[0] - pd.Timedelta(days=30)))           # 폐기물 용역 공고가 모두 공사 공고 수집 종료일 뒤(음수) → 최근
+    assert done_values(p_old)[wp] == "발주완료" and done_values(p_new)[wp] == "발주완료(최근)" and done_values(p_aft)[wp] == "발주완료(최근)", \
+        (done_values(p_old), done_values(p_new), done_values(p_aft))
+    assert all({p for p, v in done_values(p).items() if v} == waste_y for p in (p_old, p_new, p_aft)), "'최근' 을 가려도 표시가 붙는 프로젝트는 그대로다"
+    wbo = openpyxl.load_workbook(p_old)
+    ws8o, ws5o = wbo[build_excel.S_SERVC], wbo[build_excel.S_FAC]
+    h8o = [c.value for c in ws8o[1]]
+    c8 = lambda name: h8o.index(name) + 1
+    end_old = wdays[0] + pd.Timedelta(days=183)
+    assert all(f"공사 공고 수집 종료일({iso(end_old)})" in t for t in texts_of(wbo)), "가장 늦은 공사 공고가 밤(23:30)에 났어도 설명에 찍히는 날짜는 그 날(02 시트의 가장 늦은 공고일)"
+    ages = [ws8o.cell(r, c8(build_excel.SERVC_AGE_COL)).value for r in range(2, len(linked) + 2)]
+    assert ages == [int((end_old - day(v)).days) for v in linked["공고일시"]] and all(type(a) is int for a in ages), "일수 = 종료일 − 용역 공고일(날짜끼리, 모든 줄에 숫자로)"
+    assert min(ages) < 0 and 183 in ages, "종료일 뒤에 난 공고는 음수, 가장 이른 폐기물 Y 줄은 꼭 183"
+    assert ws8o.cell(2, c8("공사비대비_비율")).number_format == "0.0%" and ws8o.cell(2, c8(build_excel.SERVC_AGE_COL)).number_format != "0.0%", "일수 열이 끼어도 비율 서식은 비율 열에"
+    age2 = ws8o.cell(2, c8(build_excel.SERVC_AGE_COL))
+    assert age2.font.color is not None and str(age2.font.color.rgb).endswith("0000FF") and age2.number_format == "General" \
+        and not str(age2.fill.fgColor.rgb).endswith("FFFF00"), "일수 열도 값 열이다: 파란 글자·일반 서식, 노란(고치는) 칸이 아니다"
+    h2o = [c.value for c in wbo["02_공고목록_전체"][1]]
+    assert max(day(r[h2o.index("공고일시")].value) for r in wbo["02_공고목록_전체"].iter_rows(min_row=2) if r[h2o.index("공고일시")].value) == end_old, "기준일은 02 시트에서 확인할 수 있다"
+    cio = [c.value for c in ws5o[1]].index(build_excel.SERVC_DONE_COL) + 1
+    evo = lambda: {ws5o.cell(r, 1).value: _eval_done(wbo, ws5o, ws5o.cell(r, cio).value) for r in range(2, ws5o.max_row + 1) if ws5o.cell(r, 1).value in pids}[wp]
+    row_of = lambda no: next(r for r in range(2, len(linked) + 2) if ws8o.cell(r, c8("공고번호")).value == no)
+    first_no = wy[(wy["프로젝트ID"] == wp) & (wy["공고일시"].map(day) == wdays[0])]["공고번호"].iloc[0]
+    assert evo() == "발주완료"
+    ws8o.cell(row_of(first_no), c8("합산여부")).value = "N"                      # 08 에서 183일 앞의 줄을 N 으로 바꾸면 남은 Y 줄은 모두 최근
+    assert evo() == "발주완료(최근)"
+    ws8o.cell(row_of(first_no), c8("합산여부")).value = "Y"
+    ws8o.cell(row_of(first_no), c8(build_excel.SERVC_AGE_COL)).value = 182     # 경계: 182 는 최근, 183 은 아니다
+    assert evo() == "발주완료(최근)"
+    ws8o.cell(row_of(first_no), c8(build_excel.SERVC_AGE_COL)).value = None    # 일수 칸이 빈 줄(끼워 넣은 줄)은 '최근' 으로 치지 않는다
+    assert evo() == "발주완료"
+    ws8o.cell(row_of(first_no), c8(build_excel.SERVC_AGE_COL)).value = "10"    # 글자로 적힌 숫자도 Excel 의 '<183' 조건에 세어지지 않는다
+    assert evo() == "발주완료"
+    bad = linked.copy()
+    bad.loc[bad["공고번호"] == first_no, "공고일시"] = "알 수 없음"                  # 공고일시를 읽지 못한 줄은 일수가 비고, 그 줄 때문에 '최근' 이 되지는 않는다
+    assert done_values(with_end("sv8.xlsx", iso(wdays[0] - pd.Timedelta(days=30)), bad))[wp] == "발주완료"
+    ws8b = openpyxl.load_workbook(os.path.join(tmp, "sv8.xlsx"))[build_excel.S_SERVC]
+    assert [ws8b.cell(r, c8(build_excel.SERVC_AGE_COL)).value for r in range(2, len(bad) + 2)] == \
+        [None if no == first_no else int((wdays[0] - pd.Timedelta(days=30) - day(v)).days) for no, v in zip(bad["공고번호"], bad["공고일시"])], \
+        "공고일시를 읽지 못한 줄의 일수 칸만 빈칸(다른 값으로 채우지 않는다), 나머지 줄은 그대로"
+    mix = linked.copy()
+    mix.index = range(100, 100 + len(mix))                                         # 인덱스가 0 부터가 아닌 표여도 일수가 제 줄에 들어간다
+    mix.loc[mix["공고번호"] == first_no, "공고일시"] = wdays[0].strftime("%Y%m%d") + "2359"   # 원문 형식이 섞여 있어도(dedup._parse_dt), 밤늦게 난 공고여도 같은 날수(날짜끼리 뺀다 — 반올림하지 않는다)
+    ws8m = openpyxl.load_workbook(with_end("sv9.xlsx", iso(end_old), mix))[build_excel.S_SERVC]
+    assert [ws8m.cell(r, c8(build_excel.SERVC_AGE_COL)).value for r in range(2, len(mix) + 2)] == ages, "형식이 다른 공고일시·오후에 난 공고·0 부터가 아닌 인덱스"
+    # 실린 공사 공고에서 공고일을 하나도 읽지 못하면(또는 공사 공고가 없으면) 일수 칸을 비우고 '최근' 을 가리지 않는다 — 설명도 날짜 없는 글로('종료일()' 같은 빈 괄호가 찍히지 않는다)
+    # 가장 늦은 공고일은 글자 순서나 줄 위치가 아니라 읽은 날짜로 고른다: 형식이 섞이고(가장 늦은 줄만 원래 형식) 줄 순서가 뒤집힌 이력에서도 같은 기준일
+    hmix = hist.assign(공고일시=[v if day(v) == end0 else pd.Timestamp(str(v)).strftime("%Y%m%d%H%M") for v in hist["공고일시"]]).iloc[::-1]
+    build_excel.build_workbook(os.path.join(tmp, "sv13.xlsx"), fac, hmix, latest, trade, pd.DataFrame(), pd.DataFrame(), meta={"period": "x"}, servc=linked)
+    ws13 = openpyxl.load_workbook(os.path.join(tmp, "sv13.xlsx"))[build_excel.S_SERVC]
+    assert [ws13.cell(r, i8 + 1).value for r in range(2, len(linked) + 2)] == [int((end0 - day(v)).days) for v in linked["공고일시"]], "형식이 섞이고 순서가 뒤집힌 이력"
+    for name, h in (("sv10.xlsx", hist.assign(공고일시="")), ("sv11.xlsx", hist.iloc[0:0]), ("sv12.xlsx", hist.drop(columns=["공고일시"]))):
+        pn = os.path.join(tmp, name)
+        build_excel.build_workbook(pn, fac, h, latest, trade, pd.DataFrame(), pd.DataFrame(), meta={"period": "x"}, servc=linked)
+        wn = openpyxl.load_workbook(pn)
+        assert {wn[build_excel.S_SERVC].cell(r, i8 + 1).value for r in range(2, len(linked) + 2)} == {None}, name
+        gn = done_values(pn)
+        assert {p for p, v in gn.items() if v} == waste_y and set(gn.values()) == {"", "발주완료"}, (name, gn)
+        tn = texts_of(wn)
+        assert all("종료일()" not in t for t in tn) and all("읽지 못해" in t and "'발주완료(최근)'" in t for t in tn[1:]) and "공고가 더 나올 수 있다" in tn[0], (name, [t[-400:] for t in tn])
+    # 폐기물 용역이 N 뿐이면(취소·재공고 이전·출처 모름) 빈칸이고, '기타' 용역을 Y 로 바꿔도 빈칸
+    alt = linked.copy()
+    alt.loc[alt["용역종류"] == "폐기물처리", "합산여부"] = "N"
+    alt.loc[(alt["용역종류"] == "기타") & alt["프로젝트ID"].isin(waste_y), "합산여부"] = "Y"
+    assert ((alt["용역종류"] == "기타") & (alt["합산여부"] == "Y")).any() and ((alt["용역종류"] == "폐기물처리") & alt["프로젝트ID"].isin(waste_y)).any()
+    p2 = os.path.join(tmp, "sv2.xlsx")
+    build_excel.build_workbook(p2, fac, hist, latest, trade, pd.DataFrame(), pd.DataFrame(), meta={"period": "x"}, servc=alt)
+    assert set(done_values(p2).values()) == {""}, done_values(p2)
+    # 폐기물처리 줄의 프로젝트ID 가 다른 프로젝트로 바뀌고 Y 가 되면 그 프로젝트가 발주완료로 바뀐다
+    alt2 = alt.copy()
+    tgt = sorted(other_y)[0]
+    i = alt2.index[alt2["용역종류"] == "폐기물처리"][0]
+    alt2.loc[i, ["프로젝트ID", "합산여부"]] = [tgt, "Y"]
+    p3 = os.path.join(tmp, "sv3.xlsx")
+    build_excel.build_workbook(p3, fac, hist, latest, trade, pd.DataFrame(), pd.DataFrame(), meta={"period": "x"}, servc=alt2)
+    assert {p for p, v in done_values(p3).items() if v} == {tgt}, done_values(p3)
+    # 08 을 손으로 고치는 경우를 그대로: 프로젝트ID 가 빈(시설까지만 이어진) 폐기물처리 줄 — 합산여부만 Y 로 바꿔서는 안 되고 프로젝트ID 도 적어야 그 프로젝트가 발주완료
+    alt3 = alt.copy()
+    alt3.loc[i, ["프로젝트ID", "합산여부"]] = ["", "N"]
+    p4 = os.path.join(tmp, "sv4.xlsx")
+    build_excel.build_workbook(p4, fac, hist, latest, trade, pd.DataFrame(), pd.DataFrame(), meta={"period": "x"}, servc=alt3)
+    wb4 = openpyxl.load_workbook(p4)
+    ws8h, ws5h = wb4[build_excel.S_SERVC], wb4[build_excel.S_FAC]
+    h8h, row8 = [c.value for c in ws8h[1]], 2 + list(alt3.index).index(i)
+    assert ws8h.cell(row8, h8h.index("공고번호") + 1).value == alt3.loc[i, "공고번호"] and not ws8h.cell(row8, h8h.index("프로젝트ID") + 1).value
+    cih = [c.value for c in ws5h[1]].index(build_excel.SERVC_DONE_COL) + 1
+    ev = lambda: {ws5h.cell(r, 1).value: _eval_done(wb4, ws5h, ws5h.cell(r, cih).value) for r in range(2, ws5h.max_row + 1) if ws5h.cell(r, 1).value in pids}
+    assert set(ev().values()) == {""}, ev()
+    ws8h.cell(row8, h8h.index("합산여부") + 1).value = "Y"                      # 합산여부만 Y: 아직 어느 프로젝트의 것도 아니다
+    assert set(ev().values()) == {""}, ev()
+    ws8h.cell(row8, h8h.index("프로젝트ID") + 1).value = tgt                    # 프로젝트ID 를 적으면 그 프로젝트만 발주완료
+    assert {p for p, v in ev().items() if v} == {tgt}, ev()
+    ws8h.cell(row8, h8h.index("합산여부") + 1).value = "y"                      # 소문자로 적어도 Excel 은 센다
+    assert {p for p, v in ev().items() if v} == {tgt}, ev()
     calc = _recalc(p1)
     if calc:                                           # LibreOffice 가 있으면 다시 계산한 값을 판다스 합과 견준다
         wc = openpyxl.load_workbook(calc, data_only=True)
@@ -302,8 +486,15 @@ def test_excel_and_stage(tmp):
                 v = ws.cell(r, h1.index(f"용역_{k}_추정가격(수식)") + 1).value
                 assert (v in (None, "")) if (pid, k) not in want else float(v) == float(want[(pid, k)]), (pid, k, v, want.get((pid, k)))
             assert int(ws.cell(r, h1.index("용역_공고수(수식)") + 1).value or 0) == int((y["프로젝트ID"] == pid).sum())
+            assert (ws.cell(r, h1.index(build_excel.SERVC_DONE_COL) + 1).value or "") == ("발주완료" if (pid, "폐기물처리") in want else ""), pid
             if tot0:
                 assert ws.cell(r, h1.index("총공사비합계_기초금액기준(수식)") + 1).value == tot0[pid], "용역 금액은 총공사비 합계에 들어가지 않는다"
+        for pth in (p_new, p_aft):                     # '발주완료(최근)' 도 다시 계산한 값이 위의 직접 계산과 같아야 한다(p_old 는 위에서 08 을 고치지 않은 파일 그대로)
+            cq = _recalc(pth)
+            if cq:
+                wq = openpyxl.load_workbook(cq, data_only=True)[build_excel.S_FAC]
+                gotq = {wq.cell(r, 1).value: (wq.cell(r, h1.index(build_excel.SERVC_DONE_COL) + 1).value or "") for r in range(2, wq.max_row + 1) if wq.cell(r, 1).value in pids}
+                assert gotq == done_values(pth), (gotq, done_values(pth))
         print("용역 참고 열 값 검증 OK(LibreOffice 재계산)")
     else:
         print("(LibreOffice 없음 → 용역 참고 열의 값 검증 생략)")
@@ -538,6 +729,8 @@ def test_stage_more(tmp):
     import openpyxl
     import tests.test_dedup_and_excel as T
     cfg = dict(load_config())
+    # 사용자의 config 수집 기간에 기대지 않는다: '발주완료(최근)' 기준일이 config 의 공사·용역 수집 기간이나 오늘이 아니라 실린 공사 공고에서 온다는 것을 가릴 수 있게 서로 다른 달로 둔다
+    cfg["period"], cfg["servc"] = dict(cfg["period"], end="2025-08"), dict(cfg.get("servc") or {}, period_end="2026-03")
     reviewed, hist, latest, _ = _world(cfg)
     mid = reviewed.loc[reviewed["검수_시설명"] == "가상시립미술관", "시설ID"].iloc[0]
     cfg["paths"] = dict(cfg["paths"], data_dir=os.path.join(tmp, "sm", "data"), out_dir=os.path.join(tmp, "sm", "out"))
@@ -600,7 +793,36 @@ def test_stage_more(tmp):
     for kind in build_excel.SERVC_KINDS:
         cond = f'{rng("프로젝트ID")},$A2,{rng("용역종류")},"{kind}",{rng("합산여부")},"Y"'
         assert ws5.cell(2, h5.index(f"용역_{kind}_추정가격(수식)") + 1).value == f'=IF(COUNTIFS({cond})=0,"",SUMIFS({rng("추정가격")},{cond}))', kind
+        assert ws5.cell(2, h5.index(f"용역_{kind}_추정가격(수식)") + 1).number_format == build_excel.MONEY, kind
     assert ws5.cell(2, h5.index("용역_공고수(수식)") + 1).value == f'=COUNTIFS({rng("프로젝트ID")},$A2,{rng("합산여부")},"Y")' and ws8.max_row >= len(sl) + 1
+    done = f'{rng("프로젝트ID")},$A2,{rng("용역종류")},"폐기물처리",{rng("합산여부")},"Y"'
+    assert ws5.cell(2, h5.index(build_excel.SERVC_DONE_COL) + 1).value == \
+        f'=IF(COUNTIFS({done})=0,"",IF(COUNTIFS({done},{rng("공사수집종료까지_일수")},"<183")=COUNTIFS({done}),"발주완료(최근)","발주완료"))', \
+        "발주완료 = 더한(Y) 폐기물처리 용역이 있음. 그 줄이 모두 공사 공고 수집 종료일에서 6개월(183일) 안쪽·그 뒤면 발주완료(최근)"
+    assert ws5.cell(2, h5.index(build_excel.SERVC_DONE_COL) + 1).number_format != build_excel.MONEY and build_excel.SERVC_DONE_KIND in build_excel.SERVC_KINDS
+    assert "발주완료_폐기물용역(수식) =" in note5 and "'미완료' 가 아니다" in note5 and "'발주완료_폐기물용역' 이 '발주완료' 가 된다" in note8, (note5[-400:], note8[-300:])
+    # 보조지표의 한계를 주석에 적는다: 최근 공고는 아직 발주 중일 수 있음 / 공사비가 다 들어 있다는 뜻이 아님 / 빈칸은 미완료가 아님(README 시트에도)
+    assert "08 의 공고일시를 확인할 것" in note5 and "공종누락경고는 따로 본다" in note5 and "공사비가 모두 들어 있다는 뜻이 아니다" in note5, note5[-800:]
+    readme = " ".join(str(r[1].value) for r in wb["README"].iter_rows() if r[0].value == "용역(08·05)")
+    assert "'발주완료_폐기물용역' =" in readme and "'미완료' 가 아니라 '판단할 근거 없음'" in readme and "공고가 더 나올 수 있다" in readme and "공종누락경고를 함께 볼 것" in readme, readme
+    assert build_excel.SERVC_DONE_COL == "발주완료_폐기물용역(수식)", "05·08 의 주석과 README 가 이 열 이름을 글자 그대로 적는다"
+    # 발주완료(최근)의 기준일 = 공사 공고 수집 종료일 = 이 워크북에 실린 공사 공고(notices_hist → 02 시트)의 가장 늦은 공고일. config 의 공사·용역 수집 기간이나 오늘 날짜가 아니다
+    # (수집 기간만 늘리고 excel 을 다시 돌려도 공사 공고가 그대로면 기준일도 그대로여야 한다). 그 날이 08 의 일수·세 곳의 설명에 그대로 실린다
+    import datetime as _dt
+    end = dedup._parse_dt(pd.read_parquet(data("notices_hist.parquet"))["공고일시"]).max().date().isoformat()
+    assert end == "2026-05-03" and _dt.date.today().isoformat() > end and cfg["period"]["end"] == "2025-08" and cfg["servc"]["period_end"] == "2026-03", (end, cfg["period"], cfg["servc"])
+    h2 = [c.value for c in wb["02_공고목록_전체"][1]]
+    assert max(str(r[h2.index("공고일시")].value)[:10] for r in wb["02_공고목록_전체"].iter_rows(min_row=2) if r[h2.index("공고일시")].value) == end, "기준일은 02 시트의 가장 늦은 공고일"
+    for txt_, where in ((note5, "05 주석"), (note8, "08 주석"), (readme, "README 시트")):
+        assert f"공사 공고 수집 종료일({end})" in txt_ and "'발주완료(최근)'" in txt_ and "읽지 못해" not in txt_, (where, txt_[-900:])
+        assert "공사 공고 수집 종료일 = 이 워크북에 실린 공사 공고 가운데 가장 늦은 공고일(02 시트)" in txt_, (where, txt_[-900:])
+    assert "6개월(183일) 안쪽이거나 그 뒤면" in note5 and "'공사수집종료까지_일수' 가 모두 183 미만" in note5 and "발주가 끝난 사업을 고를 때는 '발주완료' 만 고르고" in note5 and "음수 = 그날 뒤에 난 용역 공고" in note8
+    assert "6개월(183일) 안쪽이거나 그 뒤면" in readme and "'공사수집종료까지_일수' 가 모두 183 미만이면" in note8, "README·08 주석도 같은 기준 날수(183)를 적는다"
+    # '발주완료' 인 행도 공사 공고가 최근이면 아직 발주 중일 수 있다는 한계(05 주석·README), 08 에 폐기물 줄을 끼워 넣으면 일수 칸도 적어야 한다는 안내(08 주석)
+    assert "01 의 '최종공고일' 이 공사 공고 수집 종료일에서 6개월 안쪽" in note5 and "01 의 '최종공고일'" in readme and "폐기물처리 줄을 끼워 넣었으면 이 칸도 적을 것" in note8, (note5[-900:], note8[-600:])
+    assert "최종공고일" in [c.value for c in wb["01_시설마스터"][1]], "주석이 가리키는 열이 01 에 있다"
+    assert build_excel.SERVC_AGE_COL == "공사수집종료까지_일수" and [ws8.cell(r, h8.index(build_excel.SERVC_AGE_COL) + 1).value for r in range(2, len(sl) + 2)] == \
+        [int((pd.Timestamp(end) - pd.Timestamp(str(ws8.cell(r, h8.index("공고일시") + 1).value)[:10])).days) for r in range(2, len(sl) + 2)], "08 의 일수 = 종료일 − 용역 공고일"
     # 연결 결과를 지우면(= link-servc 를 돌리지 않은 상태) 남아 있는 logs_servc.parquet 의 경고도 06 에 싣지 않는다
     os.remove(data("servc_linked.parquet"))
     run(pipeline.stage_excel)
@@ -659,8 +881,9 @@ def test_review_fixes():
                        ("M3", "가온회관 외벽 도장공사 건설폐기물 처리용역", "2025-06-01", I, 13_000_000), ("M4", "가온회관 승강기 교체공사 건설사업관리용역", "2026-02-01", I, 14_000_000),
                        ("M5", "가온회관 폐기물 처리용역", "2024-01-10", I, 15_000_000), ("M6", "가온회관 건설폐기물 처리용역", "2024-01-11", I, 16_000_000),
                        ("M7", "가온회관 건립공사 건설폐기물 처리용역", "2023-09-01", I, 17_000_000), ("M8", "가온회관 건립공사 건설사업관리용역", "2023-02-01", I, 18_000_000)], cfg)
-    assert [g[(n, "F1")]["합산여부"] for n in ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8")] == ["N"] * 6 + ["Y", "Y"], out[["공고번호", "합산여부", "합산제외_까닭"]].to_dict("records")
-    assert g[("M2", "F1")]["합산제외_까닭"].startswith("유지보수") and g[("M6", "F1")]["합산제외_까닭"].startswith("어느 공사에서 나온 폐기물인지")
+    # (M6 '가온회관 건설폐기물 처리용역' 은 2026-11 실자료 점검 뒤 Y — 프로젝트가 하나뿐인 시설에서 공사 공고 10개월 뒤에 난 '건설폐기물' 공고. test_field_audit ⑩)
+    assert [g[(n, "F1")]["합산여부"] for n in ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8")] == ["N"] * 5 + ["Y", "Y", "Y"], out[["공고번호", "합산여부", "합산제외_까닭"]].to_dict("records")
+    assert g[("M2", "F1")]["합산제외_까닭"].startswith("유지보수") and g[("M5", "F1")]["합산제외_까닭"].startswith("어느 공사에서 나온 폐기물인지")
     assert g[("M8", "F1")]["합산제외_까닭"] == "" and "일반적인 시설 이름" not in g[("M8", "F1")]["연결근거"], "검수한 이름이 원래 네 글자인 시설은 '일반적인 이름' 규칙에 걸리지 않는다"
     # ── 한 공고가 두 시설에: 가리키는 시설에서 프로젝트를 못 정했다고 이름이 짧은 다른 시설이 가져가지 않는다 ──
     g, out, _ = _mini([("FA", "가온 체육관", "FA-E", "C1", "가온 체육관 증축공사", "2024-06-03", I, "증축"),
@@ -767,7 +990,7 @@ def test_review_round2():
     # ── 한 번짜리 용역 규칙은 같은 프로젝트일 때만: 같은 이름의 두 프로젝트(2022, 2025)의 설계가 16개월 간격으로 났으면 둘 다 남긴다 ──
     D = "가온회관 건립공사 실시설계용역"
     g, out, _ = _mini([("F1", "가온회관", "F1-N-01", "C1", "가온회관 건립공사", "2022-03-02", I), ("F1", "가온회관", "F1-N-02", "C2", "가온회관 건립공사", "2025-03-03", I)], [("F1", "가온회관", I)],
-                      [("D1", D, "2021-06-01", I, 1_000_000_000), ("D2", D, "2022-10-04", I, 600_000_000)], cfg)
+                      [("D1", D, "2021-06-01", I, 900_000_000), ("D2", D, "2022-10-04", I, 600_000_000)], cfg)   # (금액이 공사 추정가격 합 10억과 같으면 '공사비를 적은 공고' 로 빠진다 — test_field_audit ⑦)
     assert [(g[(n, "F1")]["프로젝트ID"], g[(n, "F1")]["합산여부"]) for n in ("D1", "D2")] == [("F1-N-01", "Y"), ("F1-N-02", "Y")], out[["공고번호", "프로젝트ID", "상태", "합산여부", "합산제외_까닭"]].to_dict("records")
     # ── 유사도: 사업 이름이 비워진 프로젝트(시설 이름 + 공종뿐)가 후보에 있으면, 공고명에 사업을 가리는 말이 있어도 유사도로 정하지 않는다 ──
     g, out, _ = _mini([("F1", "가온회관", "F1-E-01", "C1", "가온회관 별관 증축공사", "2021-03-02", I, "증축"), ("F1", "가온회관", "F1-E-02", "C2", "가온회관 전기공사", "2023-10-04", I, "증축", 3e8)],
@@ -798,7 +1021,7 @@ def test_merge_rules():
     assert got == ["W2"] and g_[("W1", "F1")]["상태"] == "재공고 이전", "금액이 한쪽에 없으면 같은 금액으로 본다"
     # 설계·건설사업관리의 '금액이 달라도 같은 용역' 은 같은 프로젝트일 때만: 같은 이름의 두 프로젝트(다시 지은 시설)에 하나씩 이어진 설계는 둘 다 남는다
     D = "나래 도서관 건립공사 기본 및 실시설계용역"
-    got, g_, out_ = ys([("D1", D, "2020-06-01", 10e8), ("D2", D, "2021-09-01", 14e8)],
+    got, g_, out_ = ys([("D1", D, "2020-06-01", 9e8), ("D2", D, "2021-09-01", 14e8)],
                        hist=[("F3", "나래 도서관", "F3-N-01", "C3", "나래 도서관 건립공사", "2021-03-02", I), ("F3", "나래 도서관", "F3-N-02", "C4", "나래 도서관 건립공사", "2023-06-01", I)],
                        rev=[("F3", "나래 도서관", I)])
     assert got == ["D1", "D2"] and g_[("D1", "F3")]["프로젝트ID"] == "F3-N-01" and g_[("D2", "F3")]["프로젝트ID"] == "F3-N-02", out_[["공고번호", "프로젝트ID", "상태"]].to_dict("records")
@@ -873,7 +1096,7 @@ def test_review_stage(tmp):
     wb = book()
     assert "[주의] dedup 을 link-servc 보다 나중에 실행했습니다" in out and "싣지 않습니다" in out and build_excel.S_SERVC not in wb.sheetnames, out
     assert "python -m g2b_costdb.pipeline link-servc 를 실행한 뒤 excel 을 다시" in out, "무엇을 실행할지 알린다"
-    assert not any("용역_" in str(c.value) for c in wb[build_excel.S_FAC][1]), "05 의 용역 참고 열도 만들지 않는다"
+    assert not any("용역_" in str(c.value) or c.value in build_excel.SERVC5_COLS for c in wb[build_excel.S_FAC][1]), "05 의 용역 참고 열(발주완료 포함)도 만들지 않는다"
 
 
 # ── 2차 검토(2026-11-23)에서 고친 자리: 고치기 전 코드에서는 실패한다. 모든 공고·기관·시설은 가상의 예시 ──
@@ -977,6 +1200,323 @@ def test_review_round2_fixes():
     _test_R6_demolition()
 
 
+def test_field_audit():
+    """실제 용역 공고 41만 건으로 한 점검(2026-11-24~25, 연결 3,771줄 가운데 2,400여 줄을 읽어 판정)에서 나온 결함의 재현 사례. 모든 이름은 가상."""
+    cfg = load_config()
+    k, rk, I = servc.classify_kind, servc.rebid_key, "경기도 가온시"
+    yn = lambda g, nos, f="F1": [g[(n, f)]["합산여부"] for n in nos]
+    dump = lambda out: out[["공고번호", "프로젝트ID", "합산여부", "합산제외_까닭", "상태", "연결근거"]].to_dict("records")
+
+    # ── ① 평가 안내(PQ) 공고와 본 공고(가격입찰·지명경쟁), 수의시담 공고가 같은 프로젝트에 둘 다 더해짐(실자료 110쌍·1,292억) ──
+    base = rk("◇ 건립공사 건설사업관리용역")
+    for t in ("◇ 건립공사 감독권한대행 등 건설사업관리용역 사업수행능력평가서 제출 안내 공고", "◇ 건립공사 건설사업관리용역(PQ후 가격입찰)", "[P.Q 후 가격입찰]◇ 건립공사 건설사업관리용역",
+              "◇ 건립공사 건설사업관리용역 전자 수의시담 공고", "용역사업 집행계획 및 사업수행능력평가서 제출 안내 공고(긴급)[◇ 건립공사 건설사업관리용역]", "[PQ제출안내]◇ 건립공사 건설사업관리용역(긴급)",
+              "◇ 건립공사 건설사업관리용역(P. Q, 후 가격입찰)", "◇ 건립공사 건설사업관리용역[지명경쟁]", "◇ 건립공사 건설사업관리용역 (사업수행능력 평가자료 제출)"):
+        assert rk(t) == base, (t, rk(t), base)
+    assert rk("◇ 건립공사 전기공사 감리용역(PQ)") != rk("◇ 건립공사 소방공사 감리용역(PQ)") and rk("◇ 건립공사 설계용역(PQ)") != rk("◇ 증축공사 설계용역(PQ)")
+    g, out, _ = _mini([("F1", "가온미술관", "F1-N", "C1", "가온미술관 건립공사", "2023-03-02", I, "신축", 20_000_000_000)], [("F1", "가온미술관", I)],
+                      [("P1", "가온미술관 건립공사 감독권한대행 등 건설사업관리용역 사업수행능력평가서 제출 안내 공고", "2023-01-05", I, 1_680_000_000),
+                       ("P2", "가온미술관 건립공사 감독권한대행 등 건설사업관리용역(PQ후 가격입찰)", "2023-02-01", I, 1_680_000_000),
+                       ("P3", "가온미술관 건립공사 건설사업관리용역 전자 수의시담 공고", "2023-02-20", I, 1_680_000_000),
+                       ("P4", "[P.Q제출안내] 가온미술관 건립 기본 및 실시설계용역", "2021-03-02", I, 500_000_000),
+                       ("P5", "가온미술관 건립 기본 및 실시설계용역[지명경쟁]", "2021-04-01", I, 500_000_000),
+                       ("P6", "용역사업 집행계획 및 사업수행능력평가서 제출 안내 공고(긴급)[가온미술관 건립공사 전기공사 감리용역]", "2023-02-10", I, 90_000_000),
+                       ("P7", "가온미술관 건립공사 전기공사 감리용역(긴급)", "2023-03-15", I, 90_000_000),
+                       ("P8", "가온미술관 건립공사 소방공사 감리용역", "2023-03-16", I, 90_000_000),                     # 금액이 같아도 공종이 다르면 다른 용역
+                       ("Q1", "가온미술관 본관 건립사업 건축감리 용역", "2023-03-20", I, 300_000_000),                   # 이름을 조금 바꿔 다시 낸 공고(같은 금액·20일 뒤)
+                       ("Q2", "가온미술관 건립공사 건축 감리용역", "2023-04-09", I, 300_000_000),
+                       ("Q3", "가온미술관 건립공사(1단계) 통신공사 감리용역", "2023-05-01", I, 40_000_000),             # 단계가 다르면 금액이 같아도 다른 용역
+                       ("Q4", "가온미술관 건립공사(2단계) 통신공사 감리용역", "2023-05-20", I, 40_000_000)], cfg)
+    assert yn(g, ("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "Q1", "Q2", "Q3", "Q4")) == ["N", "N", "Y", "N", "Y", "N", "Y", "Y", "N", "Y", "Y", "Y"], dump(out)
+    assert all(g[(n, "F1")]["상태"] == "재공고 이전" for n in ("P1", "P2", "P4", "P6", "Q1")), dump(out)
+    y = out[out["합산여부"] == "Y"].groupby("용역종류")["추정가격"].sum().to_dict()
+    assert y == {"건설사업관리·감리": 1_680_000_000 + 90_000_000 * 2 + 300_000_000 + 40_000_000 * 2, "설계": 500_000_000}, y
+
+    # ── ② 지자체·기관 접두를 뗀 짧은 이름('공공주택')으로만 이어진 공고: 공고명에 그 프로젝트의 사업 이름이 통째로 있을 때만 더한다 ──
+    #    (실자료: 사업 이름 없이 시점만으로 더한 17줄 가운데 10줄이 다른 단지·다른 사업, 사업 이름이 있는데 시점이 멀다고 뺀 13줄 가운데 11줄은 맞는 용역)
+    S = "가온주택도시공사"
+    g, out, _ = _mini([("F1", "가온주택도시공사 공공주택", "F1-N-01", "C1", "나래지구 3단지 공공주택 건설공사", "2023-03-02", S, "신축", 30_000_000_000),
+                       ("F1", "가온주택도시공사 공공주택", "F1-N-02", "C2", "다솜지구 공공주택 건설공사", "2020-03-02", S, "신축", 30_000_000_000)],
+                      [("F1", "가온주택도시공사 공공주택", S)],
+                      [("G1", "마루지구 9단지 공공주택 건설공사 건설폐기물 처리용역", "2023-04-01", S, 30_000_000),          # 다른 단지 — 시점만 맞음
+                       ("G2", "나래지구 3단지 공공주택 건설공사 건설폐기물 처리용역", "2023-05-01", S, 40_000_000),
+                       ("G3", "다솜지구 공공주택 건설공사 감독권한대행 등 건설사업관리용역", "2022-06-01", S, 900_000_000)], cfg)   # 사업 이름이 통째로 — 공사 공고 27개월 뒤여도
+    assert yn(g, ("G1", "G2", "G3")) == ["N", "Y", "Y"], dump(out)
+    assert "일반적인 시설 이름" in g[("G1", "F1")]["합산제외_까닭"] and g[("G2", "F1")]["프로젝트ID"] == "F1-N-01" and g[("G3", "F1")]["프로젝트ID"] == "F1-N-02", dump(out)
+
+    # ── ③ 'A 및 B … 통합 건설사업관리·감리': 묶인 상대(A)가 이 프로젝트의 공사 이름에 없으면 금액을 나눌 수 없다 ──
+    g, out, _ = _mini([("F1", "가온동 공영주차장", "F1-N", "C1", "가온동 공영주차장 건립공사", "2023-03-02", I, "신축", 10_000_000_000),
+                       ("F2", "나래체육관", "F2-E", "C2", "나래체육관 및 급식소 증축공사", "2023-03-02", I, "증축", 5_000_000_000)],
+                      [("F1", "가온동 공영주차장", I), ("F2", "나래체육관", I)],
+                      [("B1", "마루공원 및 가온동 공영주차장 건립공사 통합건설사업관리용역", "2023-02-01", I, 2_000_000_000),
+                       ("B2", "가온동 공영주차장 건립공사 통합건설사업관리용역(전기·통신·소방)", "2023-02-10", I, 300_000_000),     # '통합' 만으로는 묶음이 아니다
+                       ("B3", "다솜동·가온동 공영주차장 전기공사 통합감리용역", "2023-04-01", I, 100_000_000),
+                       ("B4", "나래체육관 및 급식소 증축공사 통합건설사업관리용역", "2023-02-01", I, 400_000_000)], cfg)          # 공사 이름 자체가 '○○ 및 △△'
+    assert [g[("B1", "F1")]["합산여부"], g[("B2", "F1")]["합산여부"], g[("B3", "F1")]["합산여부"], g[("B4", "F2")]["합산여부"]] == ["N", "Y", "N", "Y"], dump(out)
+    assert "묶" in g[("B1", "F1")]["합산제외_까닭"] and "묶" in g[("B3", "F1")]["합산제외_까닭"], dump(out)
+
+    # ── ④ 조달분류가 '폐기물재활용서비스'·'생활폐기물처리서비스' 로 붙은 공사 폐기물이 운영 폐기물로 읽혀 빠짐 ──
+    for t, c in (("◇ 리모델링사업(건축) 폐기물처리 용역", "폐기물재활용서비스"), ("◇ 개보수 공사 가연성폐기물 처리용역", "생활폐기물처리서비스"),
+                 ("◇ 조성사업 폐목재재활용 처리용역", "폐기물재활용서비스"), ("◇ 건립공사 폐판넬 처리용역", "폐기물재활용서비스"),
+                 ("◇ 건립사업 매립폐기물 처리용역", "생활폐기물처리서비스"), ("◇ 조성사업 인조잔디재활용처리 용역", "폐기물재활용서비스")):
+        assert k(t, c)[0] == "폐기물처리" and not k(t, c)[2], (t, c, k(t, c))
+    for t, c in (("2026년 ◇ 폐기물 수집·운반·처리 용역", "생활폐기물처리서비스"), ("◇ 사업장일반폐기물 수거 용역", "생활폐기물처리서비스"),
+                 ("◇ 인조잔디 분리회수 및 재활용 처리용역", "폐기물재활용서비스"), ("◇ 신축공사 현장 생활폐기물 처리용역", "생활폐기물처리서비스")):
+        assert k(t, c)[0] == "기타", (t, c, k(t, c))
+
+    # ── ⑤ 설계 용역에 딸린 일(측량·기본계획·컨설팅)이 함께 적힌 설계, 조달분류가 설계인 제안공모가 기타로 빠짐 ──
+    for t in ("◇ 조성사업 조사측량 및 실시설계 용역", "◇ 건립공사 기본계획 및 실시설계 용역", "◇ 조성 공간컨설팅, 실시설계 및 용도변경 용역"):
+        assert k(t)[0] == "설계" and not k(t)[2], (t, k(t))
+    for t in ("◇ 건립 기본계획 수립 용역", "◇ 실시설계 안전성검토 용역", "◇ 건립사업 설계VE 용역", "◇ 건립 타당성조사 및 기본계획 수립 용역", "◇ 건립공사 기본계획 및 실시설계 VE 용역"):
+        assert k(t)[0] == "기타", (t, k(t))
+    assert k("◇ 리모델링 제안공모 공고", "건축설계용역")[:2] == ("설계", "설계공모") and k("◇ 위탁운영 수탁기관 선정 제안공모", "기타사업지원서비스")[0] == "기타"
+    # 부대 용역 낱말이 시설 이름·지명 속의 말('홍보관'·'시험인증센터'·'적산가옥'·'재해예방센터')이나 '(공모 대행)' 머리말에 걸려 설계·감리가 기타로 빠짐
+    for t, kind in (("가온 홍보관 건립공사 설계용역", "설계"), ("가온시험인증센터 신축공사 감독권한대행 등 건설사업관리용역", "건설사업관리·감리"), ("가온 적산가옥 보수복원공사 실시설계용역", "설계"),
+                    ("(공모 대행) ◇ 증축공사 건축설계 제안공모", "설계"), ("◇ 다목적체육관 건축기획 설계용역", "설계"), ("가온 산림재해예방센터 신축공사 감리용역", "건설사업관리·감리")):
+        assert k(t)[0] == kind and not k(t)[2], (t, k(t))
+    for t in ("◇ 건립 홍보영상 제작 및 설계 용역", "◇ 녹색건축 인증 용역(설계단계)", "◇ 건립 설계공모 관리용역", "◇ 신축공사 적산 용역(설계)", "◇ 건립 설계공모 대행 용역", "◇ 신축공사 감리용역(BF인증)"):
+        assert k(t)[0] == "기타", (t, k(t))
+    # 기관: '○○광역시 동구청' 은 자치구다(광역 사업소가 아니다)
+    assert servc.inst_same("인천광역시 동구청", "인천광역시 동구") and not servc.inst_same("인천광역시 문화예술회관", "인천광역시 동구청") and servc.inst_same("수원시청", "경기도 수원시")
+
+    # ── ⑥ '추정' 연결(어절 사이에 다른 말이 낀 이름 / 그 지자체의 대행 기관)이라도 공고명에 프로젝트의 사업 이름이 통째로 있으면 더한다 ──
+    g, out, _ = _mini([("F1", "가온 센터 공영주차장", "F1-N", "C1", "가온혁신센터 공영주차장 건립사업", "2023-03-02", I, "신축", 3_000_000_000),
+                       ("F2", "나래동 지하 공영주차장", "F2-N", "C2", "나래동 지하 공영주차장 건립공사", "2023-03-02", "가온도시공사", "신축", 9_000_000_000)],
+                      [("F1", "가온 센터 공영주차장", I), ("F2", "나래동 지하 공영주차장", "가온도시공사")],
+                      [("E1", "가온혁신센터 공영주차장 건립사업 건설사업관리용역", "2023-04-01", I, 170_000_000),
+                       ("E2", "가온나눔센터 뒤편 공영주차장 조성 실시설계용역", "2022-04-01", I, 20_000_000),                # 느슨한 이름뿐 — 다른 주차장일 수 있다
+                       ("E3", "나래동 지하 공영주차장 건립 실시설계용역", "2021-06-01", I, 430_000_000),                    # 대행 관계의 기관이 낸, 사업 이름이 같은 공고
+                       ("E4", "나래동 지하 공영주차장 주변 보도 정비 실시설계용역", "2021-07-01", I, 30_000_000)], cfg)
+    assert [g[("E1", "F1")]["합산여부"], g[("E2", "F1")]["합산여부"], g[("E3", "F2")]["합산여부"], g[("E4", "F2")]["합산여부"]] == ["Y", "N", "Y", "N"], dump(out)
+    assert g[("E1", "F1")]["연결강도"] == "추정" and g[("E3", "F2")]["연결강도"] == "추정" and "추정" in g[("E2", "F1")]["합산제외_까닭"], dump(out)
+
+    # ── ⑦ 용역 추정가격이 그 프로젝트의 공사 추정가격 합과 같다(공사비를 잘못 적은 공고) ──
+    g, out, _ = _mini([("F1", "가온복합청사", "F1-N", "C1", "가온복합청사 건립공사", "2023-12-01", I, "신축", 15_191_000_000)], [("F1", "가온복합청사", I)],
+                      [("A1", "가온복합청사 건립사업 설계용역", "2021-05-31", I, 15_192_000_000), ("A2", "가온복합청사 건립공사 건설사업관리용역", "2023-11-01", I, 1_200_000_000)], cfg)
+    assert yn(g, ("A1", "A2")) == ["N", "Y"] and "공사 추정가격" in g[("A1", "F1")]["합산제외_까닭"], dump(out)
+
+    # ── ⑧ 공고명에 사업 이름이 없는 설계 공고가 그 공사 공고의 직전·뒤에 났다 — 그 공사의 설계일 수 없다(다음 단계·다른 사업의 설계) ──
+    g, out, _ = _mini([("F1", "가온체육공원", "F1-R", "C1", "가온체육공원 롤러경기장 개보수공사", "2024-03-17", I, "리모델링", 800_000_000)], [("F1", "가온체육공원", I)],
+                      [("T1", "가온체육공원 시설물 개보수사업 실시설계용역", "2024-02-20", I, 52_000_000),                  # 공사 25일 전
+                       ("T2", "가온체육공원 롤러경기장 개보수공사 실시설계용역", "2023-08-01", I, 40_000_000),              # 사업 이름이 통째로
+                       ("T3", "가온체육공원 개보수 설계용역", "2023-06-01", I, 30_000_000),                             # 사업 이름은 없지만 공사 9개월 전 — 프로젝트 하나
+                       ("T4", "가온체육공원 관리동 개보수 실시설계용역", "2024-06-01", I, 20_000_000)], cfg)               # 공사 뒤
+    assert yn(g, ("T1", "T2", "T3", "T4")) == ["N", "Y", "Y", "N"] and "설계 공고" in g[("T1", "F1")]["합산제외_까닭"], dump(out)
+
+    # ── ⑨ 공고명의 사업유형 말('건립' = 신축)이 공사 쪽 분류(증축)와 달라 프로젝트를 정하지 못함: 후보가 하나뿐이고 사업 이름이 거의 같으면 그 프로젝트 ──
+    g, out, _ = _mini([("F1", "가온 시민주차타워", "F1-E", "C1", "가온 시민주차타워 확장 건립사업 건축공사", "2023-03-02", I, "증축", 5_000_000_000)], [("F1", "가온 시민주차타워", I)],
+                      [("X1", "가온 시민주차타워 건립사업 전기공사 감리용역", "2023-03-10", I, 33_000_000),
+                       ("X2", "가온 시민주차타워 리모델링 실시설계용역", "2022-06-01", I, 20_000_000)], cfg)                   # 사업 이름이 다르면(유사도 0.8 미만) 그대로 정하지 않는다
+    assert yn(g, ("X1", "X2")) == ["Y", "N"] and g[("X1", "F1")]["프로젝트ID"] == "F1-E" and "유사도" in g[("X1", "F1")]["연결근거"] and g[("X2", "F1")]["프로젝트ID"] == "", dump(out)
+
+    # ── ⑩ 공사 이름 없는 '건설폐기물' 공고: 그 시설의 프로젝트가 하나뿐이고 공사 공고 무렵이면 그 공사의 폐기물(실자료: 이 까닭으로 뺀 줄의 22% 가 맞는 용역) ──
+    g, out, _ = _mini([("F1", "가온회관", "F1-N", "C1", "가온회관 건립공사", "2023-03-02", I, "신축", 8_000_000_000)], [("F1", "가온회관", I)],
+                      [("W1", "가온회관 건설폐기물 처리용역", "2023-06-01", I, 30_000_000), ("W2", "가온회관 폐기물 처리용역", "2023-06-02", I, 15_000_000),          # 무슨 폐기물인지 모름
+                       ("W3", "가온회관 폐아스콘 처리용역", "2025-12-01", I, 16_000_000)], cfg)                                                           # 공사 공고 33개월 뒤
+    assert yn(g, ("W1", "W2", "W3")) == ["Y", "N", "N"] and g[("W2", "F1")]["합산제외_까닭"].startswith("어느 공사에서 나온 폐기물인지"), dump(out)
+    g, out, _ = _mini([("F1", "가온회관", "F1-N", "C1", "가온회관 건립공사", "2023-03-02", I), ("F1", "가온회관", "F1-R", "C2", "가온회관 리모델링공사", "2023-09-01", I, "리모델링")], [("F1", "가온회관", I)],
+                      [("W1", "가온회관 건설폐기물 처리용역", "2023-06-01", I, 30_000_000)], cfg)                                                         # 프로젝트가 둘이면 가릴 수 없다
+    assert yn(g, ("W1",)) == ["N"], dump(out)
+
+
+def test_field_audit_edges():
+    """test_field_audit 의 규칙들이 놓인 테두리(변이 시험에서 살아남은 변이를 잡는 사례 — 2026-11-25 독립 검토). 모든 이름은 가상."""
+    cfg = load_config()
+    k, rk, I, S = servc.classify_kind, servc.rebid_key, "경기도 가온시", "가온주택도시공사"
+    yn = lambda g, nos, f="F1": [g[(n, f)]["합산여부"] for n in nos]
+    C = {}
+    ART = ([("F1", "가온미술관", "F1-N", "C1", "가온미술관 건립공사", "2023-03-02", I, "신축", 20_000_000_000)], [("F1", "가온미술관", I)])
+    TOWER = ([("F4", "가온시 주차타워", "F4-N", "C5", "주차타워 건립공사", "2024-03-01", I)], [("F4", "가온시 주차타워", I)])
+    LOT = ([("F1", "가온동 공영주차장", "F1-N", "C1", "가온동 공영주차장 건립공사", "2023-03-02", I, "신축", 10_000_000_000)], [("F1", "가온동 공영주차장", I)])
+    HALL = ([("F1", "가온복합청사", "F1-N", "C1", "가온복합청사 건립공사", "2023-12-01", I, "신축", 15_191_000_000)], [("F1", "가온복합청사", I)])
+    PARK = ([("F1", "가온체육공원", "F1-R", "C1", "가온체육공원 롤러경기장 개보수공사", "2024-03-17", I, "리모델링", 800_000_000)], [("F1", "가온체육공원", I)])
+    CLUB = ([("F1", "가온회관", "F1-N", "C1", "가온회관 건립공사", "2023-03-02", I, "신축", 8_000_000_000)], [("F1", "가온회관", I)])
+    PT = ([("F1", "가온 시민주차타워", "F1-E", "C1", "가온 시민주차타워 확장 건립사업 건축공사", "2023-03-02", I, "증축", 5_000_000_000)], [("F1", "가온 시민주차타워", I)])
+
+    # ── ① rebid_key: 입찰 단계 말의 나머지 갈래 ──
+    base = rk("◇ 건립공사 건설사업관리용역")
+    same = lambda *ts: all(rk(t) == base for t in ts)
+    C["F1f"] = lambda: same("◇ 건립공사 건설사업관리용역(가격입찰)", "◇ 건립공사 건설사업관리용역 (평가 후 가격입찰)")
+    C["F1g"] = lambda: same("◇ 건립공사 건설사업관리용역 평가자료 제출 안내 공고", "◇ 건립공사 건설사업관리용역 (평가자료(PQ) 제출)")
+    C["F1h"] = lambda: same("◇ 건립공사 건설사업관리용역(지명)", "◇ 건립공사 건설사업관리용역 지명공고", "[지명] ◇ 건립공사 건설사업관리용역")
+    C["F1j"] = lambda: same("◇ 건립공사 건설사업관리용역(PQ 후 입찰)", "◇ 건립공사 건설사업관리용역(PQ, 가격)", "◇ 건립공사 건설사업관리용역(PQ 입찰)")
+
+
+    def _pq_pair():      # 금액을 고쳐(1% 넘게) 다시 낸 본 공고: 이름 열쇠가 같아야만 앞 공고가 '재공고 이전' 이 된다(같은 금액 규칙으로는 못 잡는다)
+        g, out, _ = _mini(*ART, [("P1", "가온미술관 건립공사 건설사업관리용역 사업수행능력평가서 제출 안내 공고", "2023-01-05", I, 1_680_000_000),
+                                 ("P2", "가온미술관 건립공사 건설사업관리용역(가격입찰)", "2023-02-01", I, 1_720_000_000)], cfg)
+        return yn(g, ("P1", "P2")) == ["N", "Y"] and g[("P1", "F1")]["상태"] == "재공고 이전"
+
+
+    C["F1f_e2e"] = _pq_pair
+
+
+    # ── ② _mark_status 의 '같은 금액·120일' 규칙의 테두리 ──
+    def two(raw, world=ART, f="F1"):
+        g, out, _ = _mini(*world, raw, cfg)
+        return [(g[(x[0], f)]["합산여부"], g[(x[0], f)]["상태"]) for x in raw]
+
+
+    YY, NY = [("Y", "대표"), ("Y", "대표")], [("N", "재공고 이전"), ("Y", "대표")]
+    C["F2b"] = lambda: two([("D1", "가온미술관 건립 기본 및 실시설계용역", "2021-03-02", I, 500_000_000), ("D2", "가온미술관 건립 수장고 실시설계용역", "2021-04-01", I, 450_000_000)]) == YY      # 금액이 10% 다르면 다른 용역
+    C["F2c"] = lambda: two([("Q1", "가온미술관 본관 건립사업 건축감리 용역", "2023-03-20", I, 300_000_000), ("Q2", "가온미술관 건립공사 건축 감리용역", "2023-10-20", I, 300_000_000)]) == YY   # 214일 뒤(120일 밖)
+    C["F2d"] = lambda: two([("K1", "가온미술관 건립공사 건설사업관리용역", "2023-02-01", I, 300_000_000), ("K2", "가온미술관 건립공사 감리용역", "2023-02-20", I, 300_000_000)]) == YY           # 건설사업관리 ↔ 감리
+    C["F2f"] = lambda: two([("A1", "가온미술관 건립공사 전기공사 감리용역", "2023-03-15", I, 90_000_000), ("A2", "가온미술관 외 2개소 건립공사 전기공사 감리용역", "2023-04-01", I, 90_000_000)]) \
+        == [("Y", "대표"), ("N", "대표")]                                                                                                                                              # 묶음 공고(N)가 멀쩡한 공고를 대체하지 않는다
+    C["F2i"] = lambda: two([("D1", "가온미술관 건립공사 실시설계용역", "2021-03-02", I, 40_000_000), ("D2", "가온미술관 건립공사 조경 실시설계용역", "2021-03-22", I, 40_000_000)]) == YY          # 조경 설계는 한쪽에만 적혀 있어도 다른 용역
+    C["F2k"] = lambda: two([("D1", "가온회관 건립공사 실시설계용역", "2022-03-01", I, 50_000_000), ("D2", "가온회관 별관 리모델링공사 실시설계용역", "2022-04-01", I, 50_000_000)],
+                           world=([("F1", "가온회관", "F1-N", "C1", "가온회관 건립공사", "2023-03-02", I, "신축", 8_000_000_000),
+                                   ("F1", "가온회관", "F1-R", "C2", "가온회관 별관 리모델링공사", "2023-06-01", I, "리모델링", 2_000_000_000)], [("F1", "가온회관", I)])) == YY      # 프로젝트가 다르면 같은 금액이어도 따로
+    C["F2l"] = lambda: two([("Q1", "가온미술관 본관 건립사업 감리 용역", "2023-03-20", I, 300_000_000), ("Q2", "가온미술관 건립공사 건축 감리용역", "2023-04-09", I, 300_000_000)]) == NY         # 공종이 한쪽에만 적혀 있으면 같은 용역
+
+
+    # ── ③ 짧은 일반 이름(_site_fit) ──
+    def one(raw, world, f):
+        g, out, _ = _mini(*world, [raw], cfg)
+        r = g[(raw[0], f)]
+        return r["합산여부"], r["프로젝트ID"], r["합산제외_까닭"]
+
+
+    C["F3d"] = lambda: (lambda y, p, w: y == "N" and "다른 현장" in w)(*one(("G1", "가온역 환승 주차타워 건립공사 건설사업관리용역", "2024-02-10", I, 50_000_000), TOWER, "F4"))      # 시점이 가까워도 다른 현장
+    C["F3e"] = lambda: (lambda y, p, w: y == "N" and "다른 현장" in w)(*one(
+        ("G1", "나래지구 공공주택 9단지 아파트 건설공사 건설사업관리용역", "2023-03-10", S, 900_000_000),
+        ([("F1", "가온주택도시공사 공공주택", "F1-N", "C1", "나래지구 공공주택 조경공사", "2023-03-02", S, "신축", 3_000_000_000)], [("F1", "가온주택도시공사 공공주택", S)]), "F1"))
+    C["F3j"] = lambda: (lambda y, p, w: y == "N" and "사업 이름이 없음" in w)(*one(
+        ("G1", "가온 다솜지구 주차타워 조성 실시설계용역", "2023-03-01", I, 50_000_000),
+        ([("F4", "가온시 주차타워", "F4-N", "C5", "가온 주차타워 건립공사", "2024-03-01", I)], [("F4", "가온시 주차타워", I)]), "F4"))                                     # 지자체 이름('가온')만 같은 것은 현장 말이 아니다
+    C["F3k"] = lambda: one(("G1", "나래동 주차타워 건립공사 건설사업관리용역", "2024-02-10", I, 50_000_000), TOWER, "F4")[0] == "Y"                                    # 읍·면·동 이름은 위치 표시
+    C["F3q"] = lambda: one(("G1", "가온 주차타워 건립공사 건설사업관리용역", "2024-02-10", I, 50_000_000), TOWER, "F4")[0] == "Y"                                      # 제 기관 이름('가온')은 다른 현장이 아니다
+    C["F3o"] = lambda: one(("G1", "용역사업 집행계획 및 사업수행능력평가서 제출 안내 공고[주차타워 건립공사 건설사업관리용역]", "2024-02-10", I, 50_000_000), TOWER, "F4")[0] == "Y"   # 입찰 단계 말은 현장 이름이 아니다
+    C["F3p"] = lambda: one(("G1", "주차타워 신축 임목폐기물 처리용역", "2024-05-10", I, 5_000_000), TOWER, "F4")[0] == "Y"                                              # 폐기물 종류 말은 현장 이름이 아니다
+
+    # ── ④ _joint_partner ──
+    C["F4b"] = lambda: one(("B6", "가온동 공영주차장 건립 기본 및 실시설계 통합용역", "2021-04-01", I, 300_000_000), LOT, "F1")[0] == "Y"                               # '기본 및 실시설계' 는 현장 이름이 아니다
+    C["F4g"] = lambda: one(("B5", "가온동 공영주차장 건립공사 전기·통신 통합감리용역", "2023-04-01", I, 100_000_000), LOT, "F1")[0] == "Y"                             # '전기·통신 통합감리' 는 묶음이 아니다
+    C["F4e"] = lambda: one(("B7", "가온동 공영주차장 건립공사 기본 및 실시설계용역(건축·구조)", "2021-06-01", I, 300_000_000), LOT, "F1")[0] == "Y"                     # '통합' 이 없으면 보지 않는다
+    C["F4f"] = lambda: one(("B8", "가온동 공영주차장 건립공사 통합건설사업관리용역(건축·구조·토목)", "2023-02-10", I, 300_000_000), LOT, "F1")[0] == "Y"                # '통합' 뒤의 어절은 보지 않는다
+    C["F4h"] = lambda: (lambda y, p, w: y == "N" and "묶" in w)(*one(("B9", "마루공원 및 가온동 공영주차장 건립공사 통합 실시설계용역", "2021-06-01", I, 300_000_000), LOT, "F1"))   # 설계도 묶음 발주면 N
+    C["F4i"] = lambda: one(("B1", "가온 문화·체육센터 건립 통합건설사업관리용역", "2023-02-10", I, 300_000_000),
+                           ([("F1", "가온 문화·체육센터", "F1-N", "C1", "가온복합센터 건립공사", "2023-03-02", I, "신축", 10_000_000_000)], [("F1", "가온 문화·체육센터", I)]), "F1")[0] == "Y"   # 시설 이름 속의 '·'
+
+    # ── ⑤ 공사비와 같은 금액 / 설계 공고 시점 ──
+    C["F5c"] = lambda: (lambda y, p, w: y == "N" and "공사 추정가격" in w)(*one(("A3", "가온복합청사 건립사업 설계용역", "2021-05-31", I, 15_200_000_000), HALL, "F1"))          # 0.06% 차이
+    C["F5b"] = lambda: one(("A5", "가온복합청사 건립공사 건설사업관리용역", "2023-11-01", I, 15_000_000_000), HALL, "F1")[0] == "Y"                                      # 1.3% 차이(테두리 고정용 — 본문 참고)
+    C["F5h"] = lambda: (lambda y, p, w: y == "N" and "공사 추정가격" in w)(*one(("A6", "가온복합청사 건립공사 건설사업관리용역", "2023-11-01", I, 15_191_000_000), HALL, "F1"))   # 건설사업관리에도 적용
+    C["F5e"] = lambda: (lambda y, p, w: y == "N" and "설계 공고" in w)(*one(("T5", "가온체육공원 시설물 개보수사업 실시설계용역", "2024-02-01", I, 52_000_000), PARK, "F1"))     # 공사 45일 전
+    C["F5f"] = lambda: one(("T6", "가온체육공원 개보수 설계용역", "2023-12-01", I, 30_000_000), PARK, "F1")[0] == "Y"                                                   # 공사 3.5개월 전
+    C["F5g"] = lambda: one(("T7", "가온체육공원 롤러경기장 개보수공사 실시설계용역", "2024-03-01", I, 40_000_000), PARK, "F1")[0] == "Y"                                 # 사업 이름이 통째로 있으면 공사 직전이어도
+
+    # ── ⑥ 공사 이름 없는 건설폐기물 공고의 시점 테두리 ──
+    C["F6d"] = lambda: (lambda y, p, w: y == "N" and w.startswith("어느 공사"))(*one(("W4", "가온회관 건설폐기물 처리용역", "2024-06-01", I, 30_000_000), CLUB, "F1"))          # 15개월 뒤
+    C["F6e"] = lambda: (lambda y, p, w: y == "N" and w.startswith("어느 공사"))(*one(("W5", "가온회관 건설폐기물 처리용역", "2022-12-01", I, 30_000_000), CLUB, "F1"))          # 3개월 전
+    C["F6h"] = C["F6e"]
+
+    # ── ⑧ 사업유형 불일치 구제 ──
+    C["F8c"] = lambda: (lambda y, p, w: y == "N" and p == "")(*one(
+        ("X3", "가온 시민주차타워 건립사업 전기공사 감리용역", "2023-03-10", I, 33_000_000),
+        (PT[0] + [("F1", "가온 시민주차타워", "F1-E-02", "C2", "가온 시민주차타워 별관 증축공사", "2023-09-01", I, "증축", 2_000_000_000)], PT[1]), "F1"))               # 후보가 둘이면 정하지 않는다
+    C["F8e"] = lambda: (lambda y, p, w: y == "N" and p == "F1-E" and "설계 공고" in w)(*one(("X4", "가온 시민주차타워 건립사업 실시설계용역", "2023-03-10", I, 20_000_000), PT, "F1"))   # 구제된 줄도 사업 이름이 통째로 있는 줄(lvl 3)은 아니다
+    C["F8f"] = lambda: (lambda y, p, w: y == "N" and p == "")(*one(("X5", "가온 시민주차타워 부설 관리동 건립 감리용역", "2023-03-10", I, 33_000_000), PT, "F1"))               # 유사도 0.74
+    C["F8g"] = lambda: (lambda y, p, w: y == "N" and p == "")(*one(
+        ("X6", "가온 시민주차타워 건립 감리용역", "2023-03-10", I, 33_000_000),
+        ([("F1", "가온 시민주차타워", "F1-E", "C1", "가온 시민주차타워 증축공사", "2023-03-02", I, "증축", 5_000_000_000)], PT[1]), "F1"))                                  # 유사도는 0.80 이지만 사업유형 말만 다른 이름('건립' ↔ '증축')은 다른 사업
+
+    # ── ⑨ 종류 판정의 나머지 갈래 ──
+    is_ = lambda kind, *a: k(*a)[0] == kind and (kind == "기타" or not k(*a)[2])
+    C["F9c"] = lambda: is_("폐기물처리", "◇ 철거 폐기물 처리용역", "폐기물재활용서비스") and is_("폐기물처리", "◇ 해체에 따른 폐기물 처리용역", "생활폐기물처리서비스")
+    C["F9f"] = lambda: is_("폐기물처리", "◇ 내진보강공사 폐기물 처리용역", "폐기물재활용서비스") and is_("폐기물처리", "◇ 외벽 보수공사 폐기물처리 용역", "생활폐기물처리서비스")
+    C["F9k"] = lambda: is_("설계", "◇ 건립공사 지반조사 및 실시설계 용역") and is_("설계", "◇ 건립공사 지질조사 및 기본설계 용역")
+    C["F9m"] = lambda: is_("설계", "◇ 조성사업 기본구상 및 기본설계 용역")
+    C["F9n"] = lambda: is_("설계", "◇ 건립 기본계획 수립 및 실시설계 용역")
+    C["F9o"] = lambda: is_("설계", "◇ 조성사업 측량 및 기본 및 실시설계 용역")
+    C["F9p"] = lambda: is_("설계", "◇ 건립공사 기본계획 및 기본설계 용역")
+    C["F9v"] = lambda: is_("설계", "◇ 다목적체육관 건축기획 및 기본설계 용역") and is_("설계", "◇ 다목적체육관 건축기획 및 실시설계 용역")
+    C["F9w"] = lambda: is_("설계", "◇ 시험인증 지원동 신축공사 설계용역") and is_("건설사업관리·감리", "가온 시험인증 클러스터 건립공사 감리용역")
+    C["F9x"] = lambda: is_("설계", "가온 탄소인증센터 신축공사 설계용역") and is_("건설사업관리·감리", "가온 인증지원센터 건립공사 감리용역") and is_("설계", "가온 종자인증동 증축공사 설계용역")
+    C["F9z"] = lambda: (is_("설계", "가온 농산물 홍보판매장 건립공사 설계용역") and is_("설계", "가온 안전 홍보체험관 건립공사 설계용역")
+                        and is_("건설사업관리·감리", "가온 홍보전시관 리모델링공사 감리용역") and is_("설계", "가온홍보원 청사 신축공사 설계용역"))
+    C["F9B"] = lambda: is_("기타", "◇ 건립 홍보관리 및 설계 용역") and is_("기타", "◇ 건립사업 홍보관련 영상 설계 용역")
+
+    # ── ⑩ 기관: '○군청' ──
+    C["F10b"] = lambda: (servc.inst_same("전라남도 가온군청", "전라남도 가온군") and servc.inst_same("가온군청", "전라남도 가온군")
+                         and not servc.inst_same("전라남도 문화예술회관", "전라남도 가온군청"))
+    bad = [lab for lab, fn in C.items() if fn() is not True]
+    assert not bad, bad
+
+
+def test_field_audit_review():
+    """독립 검토(2026-11-25)가 실행으로 재현한 반례 — test_field_audit 의 규칙을 처음 넣었을 때의 결함. 모든 이름은 가상."""
+    cfg = load_config()
+    k, I, S, G = servc.classify_kind, "경기도 가온시", "가온주택도시공사", "서울특별시 가온구"
+    dump = lambda out: out[["공고번호", "시설ID", "프로젝트ID", "합산여부", "합산제외_까닭", "상태"]].to_dict("records")
+    yn = lambda g, nos, f="F1": [g[(n, f)]["합산여부"] for n in nos]
+    # ── ① '추정'(대행 기관·느슨한 이름) + 사업 이름 통째: 접두를 뗀 일반 이름 + '건립' 뿐인 사업 이름('국민체육센터 건립')은 광역 건설본부가 낸 다른 자치구의 같은 이름 사업에도 들어 있다 ──
+    g, out, _ = _mini([("F1", "가온구 국민체육센터", "F1-N", "C1", "가온구 국민체육센터 건립공사", "2023-03-02", G, "신축", 10_000_000_000),
+                       ("F1", "가온구 국민체육센터", "F1-N", "C2", "국민체육센터 건립 전기공사", "2023-03-10", G, "신축", 1_000_000_000)], [("F1", "가온구 국민체육센터", G)],
+                      [("E1", "나래구 국민체육센터 건립공사 건설사업관리용역", "2023-02-01", "서울특별시 도시기반시설본부", 900_000_000),
+                       ("E2", "서남권 국민체육센터 건립 기본 및 실시설계용역", "2021-02-01", "서울특별시 도시기반시설본부", 700_000_000),
+                       ("E3", "가온구 국민체육센터 건립공사 건설사업관리용역", "2023-02-05", "서울특별시 도시기반시설본부", 950_000_000)], cfg)   # 검수한 이름이 그대로 — 더한다
+    assert yn(g, ("E1", "E2", "E3")) == ["N", "N", "Y"] and "추정" in g[("E1", "F1")]["합산제외_까닭"], dump(out)
+    g, out, _ = _mini([("F1", "가온 센터 공영주차장", "F1-N", "C1", "가온혁신센터 공영주차장 건립사업", "2023-03-02", I, "신축", 3_000_000_000),
+                       ("F1", "가온 센터 공영주차장", "F1-N", "C2", "공영주차장 조성 전기공사", "2023-03-12", I, "신축", 300_000_000)], [("F1", "가온 센터 공영주차장", I)],
+                      [("E2", "가온나눔센터 뒤편 공영주차장 조성 실시설계용역", "2022-04-01", I, 20_000_000)], cfg)             # 짧은 공종 공고명('공영주차장 조성')이 통째로 들어 있을 뿐
+    assert yn(g, ("E2",)) == ["N"], dump(out)
+    # ── ② 짧은 일반 이름: '○○시장'·'○○지구' 는 위치 표시가 아니라 다른 현장 이름 / 꾸밈말('공영')뿐인 사업 이름은 현장을 가리지 못한다 / 사업 이름 뒤의 다른 대상 ──
+    T = ([("F1", "가온시 주차타워", "F1-N", "C1", "가온시 주차타워 건립공사", "2023-03-02", I, "신축", 8_000_000_000),
+          ("F1", "가온시 주차타워", "F1-N", "C2", "주차타워 건립 전기공사", "2023-03-12", I, "신축", 500_000_000)], [("F1", "가온시 주차타워", I)])
+    g, out, _ = _mini(*T, [("A2", "중앙시장 주차타워 건립공사 건설사업관리용역", "2023-02-02", I, 410_000_000), ("A3", "나래지구 주차타워 건립공사 감리용역", "2023-02-03", I, 420_000_000),
+                           ("A4", "원도심 주차타워 건립 기본 및 실시설계용역", "2021-06-03", I, 430_000_000), ("A6", "나래동 주차타워 건립공사 전기공사 감리용역", "2023-03-03", I, 45_000_000),
+                           ("A9", "문화의거리 주차타워 건립공사 통신공사 감리용역", "2023-03-05", I, 47_000_000)], cfg)
+    assert yn(g, ("A2", "A3", "A4", "A6", "A9")) == ["N", "N", "N", "Y", "N"] and "다른 현장" in g[("A2", "F1")]["합산제외_까닭"], dump(out)
+    g, out, _ = _mini([("F1", "가온시 주차타워", "F1-N", "C1", "공영 주차타워 건립공사", "2023-03-02", I, "신축", 8_000_000_000)], [("F1", "가온시 주차타워", I)],
+                      [("B1", "중앙시장 공영 주차타워 건립공사 건설사업관리용역", "2025-03-02", I, 400_000_000), ("B3", "공영 주차타워 건립공사 건설사업관리용역", "2023-02-02", I, 380_000_000),
+                       ("B4", "공영 주차타워 건립공사 건설폐기물 처리용역", "2026-03-02", I, 30_000_000)], cfg)                   # 사업 이름이 '공영 주차타워 건립' 뿐 — 시점까지 맞아야(36개월 뒤는 N)
+    assert yn(g, ("B1", "B3", "B4")) == ["N", "Y", "N"], dump(out)
+    g, out, _ = _mini([("F1", "가온주택도시공사 공공주택", "F1-N", "C1", "나래지구 공공주택 전기공사", "2023-03-02", S, "신축", 3_000_000_000)], [("F1", "가온주택도시공사 공공주택", S)],
+                      [("S1", "나래지구 공공주택(A1) 공동주택 전기 설계용역", "2022-03-02", S, 300_000_000),                     # 그 지구의 다른 대상(A1 공동주택)
+                       ("S2", "나래지구 공공주택 건설폐기물(소각) 처리용역", "2023-06-02", S, 40_000_000)], cfg)
+    assert yn(g, ("S1", "S2")) == ["N", "Y"] and "다른 현장" in g[("S1", "F1")]["합산제외_까닭"], dump(out)
+    # ── ③ 통합 용역의 묶음 판정: 사업 이름 자리(시설 이름 앞, 또는 시설 이름과 짝을 이뤄 첫 공사 말 앞)에 놓인 어절만 상대 현장으로 본다 ──
+    M = ([("F1", "가온미술관", "F1-N", "C1", "가온미술관 건립공사", "2023-03-02", I, "신축", 20_000_000_000)], [("F1", "가온미술관", I)])
+    g, out, _ = _mini(*M, [("J1", "가온미술관 건립공사 전력시설물·정보통신공사 통합감리용역", "2023-03-10", I, 90_000_000), ("J4", "가온미술관 건립공사 건축·태양광 통합감리용역", "2023-03-12", I, 70_000_000),
+                           ("J8", "가온미술관 전시동·수장고동 건립공사 통합건설사업관리용역", "2023-02-01", I, 800_000_000),
+                           ("J9", "가온미술관 건립공사 통합건설사업관리용역(PQ, SOQ 제출 안내)", "2023-01-10", I, 810_000_000),
+                           ("K1", "가온미술관 및 나래문학관 건립공사 통합건설사업관리용역", "2023-02-02", I, 1_500_000_000),
+                           ("K2", "가온미술관 및 주차복합빌딩 건립사업 통합 건설사업관리용역", "2023-02-03", I, 1_600_000_000)], cfg)
+    assert yn(g, ("J1", "J4", "J8", "J9", "K1", "K2")) == ["Y", "Y", "Y", "Y", "N", "N"], dump(out)
+    g, out, _ = _mini([("F1", "가온 통합수장고", "F1-N", "C1", "가온 통합수장고 건립공사", "2023-03-02", I, "신축", 9_000_000_000)], [("F1", "가온 통합수장고", I)],
+                      [("Q2", "가온 통합수장고 건립공사 전기·통신 감리용역", "2023-03-10", I, 80_000_000)], cfg)                     # 시설 이름 속의 '통합'
+    assert yn(g, ("Q2",)) == ["Y"], dump(out)
+    # ── ④ '같은 금액' 규칙의 공종 비교는 시설 이름을 가린 공고명으로('○○소방서' 의 '소방', '주차전용건축물' 의 '건축') ──
+    for fac in ("가온소방서", "가온 정보통신센터", "가온동 주차전용건축물"):
+        g, out, _ = _mini([("F1", fac, "F1-N", "C1", fac + " 신축공사", "2023-03-02", I, "신축", 8_000_000_000)], [("F1", fac, I)],
+                          [("D1", fac + " 신축공사 전기공사 감리용역", "2023-03-10", I, 22_000_000), ("D2", fac + " 신축공사 소방공사 감리용역", "2023-03-20", I, 22_000_000),
+                           ("D3", fac + " 신축공사 정보통신공사 감리용역", "2023-03-25", I, 22_000_000)], cfg)
+        assert yn(g, ("D1", "D2", "D3")) == ["Y", "Y", "Y"], (fac, dump(out))
+    # ── ⑤ 공사 이름 없는 '건설폐기물' 공고: 폐기물 말 앞에 다른 시설·다른 공사 말이 있으면 그 시설의 하나뿐인 프로젝트에 더하지 않는다 ──
+    g, out, _ = _mini([("F1", "가온회관", "F1-N", "C1", "가온회관 건립공사", "2023-03-02", I, "신축", 8_000_000_000)], [("F1", "가온회관", I)],
+                      [("W1", "가온회관 및 나래복지관 건설폐기물 처리용역", "2023-06-01", I, 30_000_000), ("W6", "가온회관 사무실 칸막이 공사 건설폐기물 처리용역", "2023-06-06", I, 35_000_000),
+                       ("W7", "가온회관 등 건설폐기물 처리용역", "2023-06-07", I, 36_000_000), ("W8", "가온회관, 나래도서관 건설폐기물 처리용역", "2023-06-08", I, 37_000_000),
+                       ("WB", "가온회관 건설폐기물(폐콘크리트) 처리용역", "2023-06-11", I, 40_000_000)], cfg)
+    assert yn(g, ("W1", "W6", "W7", "W8", "WB")) == ["N", "N", "N", "N", "Y"], dump(out)
+    # ── ⑥ 종류 판정: 공사 말과 폐기물 말이 떨어져 있으면 그 공사의 폐기물이 아니다 / 기관 이름 속의 '공사' / 설계 뒤의 지반조사 / 건축 설계 분류가 아닌 제안공모 ──
+    for t, c in (("◇ 신축 이전에 따른 구청사 사무집기 폐기물 처리용역", "생활폐기물처리서비스"), ("◇ 증축공사 준공 청소 및 폐기물 처리용역", "건물청소서비스"),
+                 ("가온도시공사 ◇ 사업장폐기물 처리용역", "생활폐기물처리서비스"), ("가온주택도시공사 ◇ 입주민 폐기물 수거 용역", "생활폐기물처리서비스"), ("폐목재 재활용시설 운영 용역", "폐기물재활용서비스"),
+                 ("◇ 리모델링 실감콘텐츠 제안공모", "소프트웨어설계서비스"), ("◇ 운영 수탁자 제안공모", "건축설계서비스"), ("◇ 건립공사 녹색건축 인증 시설 설계용역", "")):
+        assert k(t, c)[0] == "기타", (t, c, k(t, c))
+    for t, c, kind in (("◇ 시설물 해체 폐기물 처리용역", "생활폐기물처리서비스", "폐기물처리"), ("◇조성사업혼합(가연성)폐기물처리용역(긴급)", "폐기물재활용서비스", "폐기물처리"),
+                       ("◇ 공공주택지구(△△ 시행구역) 폐목재재활용 처리용역", "폐기물재활용서비스", "폐기물처리"), ("◇ 건립공사 실시설계 및 지반조사 용역", "", "설계")):
+        assert k(t, c)[0] == kind and not k(t, c)[2], (t, c, k(t, c))
+    # ── ⑦ 설계 공고 시점 규칙은 철거·해체 공고를 기준에서 뺀다: 철거 공고만 먼저 난 사업의 설계를 잘못 빼지 않게 ──
+    g, out, _ = _mini([("F1", "가온문화센터", "F1-N", "C1", "가온문화센터 건립부지 기존 건축물 철거공사", "2023-03-02", I, "신축", 300_000_000)], [("F1", "가온문화센터", I)],
+                      [("T1", "가온문화센터 건립 기본 및 실시설계용역", "2023-02-10", I, 500_000_000)], cfg)
+    assert yn(g, ("T1",)) == ["Y"], dump(out)
+    g, out, _ = _mini([("F1", "가온문화센터", "F1-N", "C1", "가온문화센터 건립부지 기존 건축물 철거공사", "2023-03-02", I, "신축", 300_000_000),
+                       ("F1", "가온문화센터", "F1-N", "C2", "가온문화센터 신축공사", "2023-04-02", I, "신축", 9_000_000_000)], [("F1", "가온문화센터", I)],
+                      [("T1", "가온문화센터 건립 기본 및 실시설계용역", "2023-03-20", I, 500_000_000)], cfg)                       # 본 공사 공고 13일 전
+    assert yn(g, ("T1",)) == ["N"] and "설계 공고" in g[("T1", "F1")]["합산제외_까닭"], dump(out)
+
+
 def run():
     test_kinds()
     test_institutions()
@@ -986,6 +1526,9 @@ def run():
     test_review_round2()
     test_merge_rules()
     test_review_round2_fixes()
+    test_field_audit()
+    test_field_audit_edges()
+    test_field_audit_review()
     with tempfile.TemporaryDirectory() as tmp:
         test_excel_and_stage(tmp)          # test_link 를 안에서 함께 실행
         test_stage_more(tmp)
