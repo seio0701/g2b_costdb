@@ -3531,6 +3531,179 @@ def _hwp_record(tag: int, payload: bytes, level: int = 0) -> bytes:
     return struct.pack("<I", tag | (level << 10) | (0xFFF << 20)) + struct.pack("<I", size) + payload
 
 
+def test_missing_trades_excluding_bundled(tmp):
+    """05 '공종누락_통합발주제외' = 공종누락경고의 '누락' 가운데 통합발주_포함공종에 적힌(다른 공고에 묶인) 공종을 뺀 것. 수식 글자를 고정하고, 같은 수식을 직접 계산해 값을 본다."""
+    import re
+    import openpyxl
+    from g2b_costdb import build_excel
+    from g2b_costdb.build_excel import build_workbook
+    MAIN = ("건축", "전기", "정보통신", "소방")
+    # (프로젝트, [(공종, 포함공종(종합))]) → 기대값
+    cases = {"P1": ([("건축", "건축·전기·토목"), ("소방", "소방")], "정보통신 누락"),                 # 전기는 건축 공고에 묶임 → 뺀다. 정보통신은 공고도 묶음 기록도 없다
+             "P2": ([("건축", "건축")], "전기 정보통신 소방 누락"),                                  # 통합발주가 아니면 공종누락경고와 같은 공종
+             "P3": ([("기타", "기타·건축·전기·정보통신·소방")], ""),                                # 네 공종이 모두 한 공고에 묶임 → 빈칸
+             "P4": ([(t, t) for t in MAIN], ""),                                                    # 네 공종 공고가 다 있다
+             "P5": ([("토목", "토목·조경")], "건축 전기 정보통신 소방 누락"),                        # 묶인 것이 주요 공종이 아니면 그대로
+             "P6": ([("건축", "건축·기계설비"), ("전기", "전기·소방")], "정보통신 누락")}             # 두 공고에 나뉘어 묶인 경우('건축(+기계설비); 전기(+소방)')
+    fac = pd.DataFrame([{"프로젝트ID": p, "시설ID": "F" + p[1:], "시설명": "s", "사업유형": "신축", "표2_대분류": "a", "표2_중분류": "b", "수요기관": "d",
+                         "공고건수_최신": len(v[0]), "최종공고일": "2025-01-01", "연면적_m2": 1000} for p, v in cases.items()])
+    rows = [{"프로젝트ID": p, "시설ID": "F" + p[1:], "시설명": "s", "사업유형": "신축", "공고명": "n", "공고일시": "2025-01-01", "수요기관": "d", "공고차수": "000",
+             "공고번호": f"{p}{i}", "공고키": f"{p}{i}-000", "공종": t, "기초금액": 100, "기초금액_API": 100, "포함공종(종합)": inc}
+            for p, v in cases.items() for i, (t, inc) in enumerate(v[0])]
+    latest, trade = pd.DataFrame(rows).drop(columns=["기초금액_API", "포함공종(종합)"]), pd.DataFrame(rows).drop(columns=["기초금액"])
+    out = os.path.join(tmp, "miss_real.xlsx")
+    build_workbook(out, fac, latest, latest, trade, pd.DataFrame(), pd.DataFrame(), meta={"period": "t"})
+    wb = openpyxl.load_workbook(out)
+    ws5, ws4 = wb[build_excel.S_FAC], wb[build_excel.S_TRADE]
+    h5, h4 = [c.value for c in ws5[1]], [c.value for c in ws4[1]]
+    L = lambda h, name: openpyxl.utils.get_column_letter(h.index(name) + 1)
+    assert build_excel.MISS_REAL_COL == "공종누락_통합발주제외(수식)" and h5.index(build_excel.MISS_REAL_COL) == h5.index("통합발주_포함공종") + 1 == h5.index("공종누락경고(수식)") + 2
+    idr, trr = f"'{build_excel.S_TRADE}'!${L(h4, '프로젝트ID')}:${L(h4, '프로젝트ID')}", f"'{build_excel.S_TRADE}'!${L(h4, '공종')}:${L(h4, '공종')}"
+    by4 = {}
+    for r in range(2, ws4.max_row + 1):
+        if ws4.cell(r, h4.index("프로젝트ID") + 1).value:
+            by4.setdefault(ws4.cell(r, h4.index("프로젝트ID") + 1).value, set()).add(ws4.cell(r, h4.index("공종") + 1).value)
+    got, bundled, seen = {}, {}, set()
+    for r in range(2, ws5.max_row + 1):
+        pid = ws5.cell(r, 1).value
+        if pid not in cases:
+            continue
+        seen.add(pid)
+        real = "&".join(f'IF(AND(COUNTIFS({idr},$A{r},{trr},"{t}")=0,ISERROR(SEARCH("{t}",${L(h5, "통합발주_포함공종")}{r}))),"{t} ","")' for t in MAIN)
+        cell = ws5.cell(r, h5.index(build_excel.MISS_REAL_COL) + 1)
+        assert cell.value == f'=IF(TRIM({real})="","",TRIM({real})&" 누락")', (pid, cell.value)
+        assert cell.font.color is None or not str(cell.font.color.rgb).endswith("0000FF"), "수식 칸은 파란(원천값) 글자가 아니다"
+        # 같은 수식을 직접 계산: 공고가 없고(04 에 그 프로젝트·그 공종 줄이 없음) 통합발주_포함공종 글에도 없는 공종만
+        bundled[pid] = ws5.cell(r, h5.index("통합발주_포함공종") + 1).value
+        left = [t for t in MAIN if t not in by4.get(pid, set()) and t not in str(bundled[pid] or "")]
+        got[pid] = " ".join(left) + " 누락" if left else ""
+        warn = ws5.cell(r, h5.index("공종누락경고(수식)") + 1).value
+        assert all(f'COUNTIFS({idr},$A{r},{trr},"{t}")=0' in warn for t in MAIN), "공종누락경고와 같은 '공고 없음' 조건을 쓴다"
+    assert seen == set(cases) and got == {p: v[1] for p, v in cases.items()}, got
+    assert bundled["P1"] == "건축(+전기·토목)" and bundled["P6"] == "건축(+기계설비); 전기(+소방)" and bundled["P2"] in (None, "") and bundled["P4"] in (None, ""), bundled
+    note5 = next(str(r[0].value) for r in ws5.iter_rows(min_row=len(cases) + 2) if str(r[0].value or "").startswith("주:"))
+    assert "공종누락_통합발주제외 = 공종누락경고의 '누락' 가운데 통합발주_포함공종에 적힌 공종" in note5 and "거기 적히지 않은 통합발주는 그대로 누락으로 남는다" in note5, note5[:900]
+    readme = " ".join(str(r[1].value) for r in wb["README"].iter_rows() if r[0].value == build_excel.S_FAC)
+    assert "공종누락_통합발주제외 = 그 가운데 통합발주로 다른 공고에 묶인 공종을 뺀 것" in readme, readme
+
+
+def test_missing_count_sheets(tmp):
+    """05 '실제누락_공종수' 와, 그 수별 프로젝트 목록 시트(05-0 … 05-4)·유형별 요약 시트(05-요약). 모든 값은 05 를 읽는 수식 — 글자를 고정하고 요약의 COUNTIFS 를 직접 계산해 본다."""
+    import re
+    import openpyxl
+    from openpyxl.utils import get_column_letter as GL
+    from g2b_costdb import build_excel
+    from g2b_costdb.build_excel import build_workbook
+    MAIN = ("건축", "전기", "정보통신", "소방")
+    # 프로젝트: (대표 공고 [(공종, 포함공종(종합))], 사업유형, 대분류, 중분류, 중복_제외권장, 실제 누락)
+    cases = {"P1": ([("건축", "건축·전기·토목"), ("소방", "소방")], "신축", "가", "-", "", ["정보통신"]),
+             "P2": ([("건축", "건축")], "리모델링", "가", "x", "", ["전기", "정보통신", "소방"]),
+             "P3": ([("기타", "기타·건축·전기·정보통신·소방")], "신축", "가", "-", "", []),         # 네 공종이 한 공고에 묶임 → 0개
+             "P4": ([(t, t) for t in MAIN], "증축", "나", "x", "", []),
+             "P5": ([("토목", "토목·조경")], "신축", "나", "x", "", list(MAIN)),
+             "P6": ([("건축", "건축·기계설비"), ("전기", "전기·소방")], "리모델링", "나", "x", "Y", ["정보통신"])}
+    fac = pd.DataFrame([{"프로젝트ID": p, "시설ID": "F" + p[1:], "시설명": "s" + p, "사업유형": v[1], "표2_대분류": v[2], "표2_중분류": v[3], "수요기관": "d",
+                         "공고건수_최신": len(v[0]), "최종공고일": "2025-01-01", "연면적_m2": 1000, "중복_제외권장": v[4] or None} for p, v in cases.items()])
+    rows = [{"프로젝트ID": p, "시설ID": "F" + p[1:], "시설명": "s" + p, "사업유형": v[1], "공고명": "n", "공고일시": "2025-01-01", "수요기관": "d", "공고차수": "000",
+             "공고번호": f"{p}{i}", "공고키": f"{p}{i}-000", "공종": t, "기초금액": 100, "기초금액_API": 100, "포함공종(종합)": inc}
+            for p, v in cases.items() for i, (t, inc) in enumerate(v[0])]
+    latest, trade = pd.DataFrame(rows).drop(columns=["기초금액_API", "포함공종(종합)"]), pd.DataFrame(rows).drop(columns=["기초금액"])
+    out = os.path.join(tmp, "miss_sheets.xlsx")
+    build_workbook(out, fac, latest, latest, trade, pd.DataFrame(), pd.DataFrame(), meta={"period": "t"})
+    wb = openpyxl.load_workbook(out)
+    names = [build_excel.S_MISS_SUM] + [build_excel.S_MISS_N.format(k=k) for k in range(5)]
+    assert names == ["05-요약_실제누락_유형별", "05-0_실제누락0개", "05-1_실제누락1개", "05-2_실제누락2개", "05-3_실제누락3개", "05-4_실제누락4개"]
+    i5 = wb.sheetnames.index(build_excel.S_FAC)
+    assert wb.sheetnames[i5 + 1:i5 + 8] == names + ["06_검증로그"], wb.sheetnames
+    ws5 = wb[build_excel.S_FAC]
+    h5 = [c.value for c in ws5[1]]
+    L5 = lambda name: GL(h5.index(name) + 1)
+    n5 = len(cases) + 1
+    R5 = lambda name: f"'{build_excel.S_FAC}'!${L5(name)}$2:${L5(name)}${n5}"
+    assert build_excel.MISS_CNT_COL == "실제누락_공종수(수식)" and h5.index(build_excel.MISS_CNT_COL) == h5.index(build_excel.MISS_REAL_COL) + 1
+    row5 = {ws5.cell(r, 1).value: r for r in range(2, n5 + 1)}
+    assert list(row5) == list(cases)
+    for p, r in row5.items():
+        mr = f"${L5(build_excel.MISS_REAL_COL)}{r}"
+        assert ws5[f"{L5(build_excel.MISS_CNT_COL)}{r}"].value == f'=IF({mr}="",0,LEN({mr})-LEN(SUBSTITUTE({mr}," ","")))', p
+    # 05 의 수식이 내는 값(앞 테스트가 공종누락_통합발주제외의 수식을 고정한다): 남은 공종 글과 그 수
+    real = {p: " ".join(v[5]) + " 누락" if v[5] else "" for p, v in cases.items()}
+    count = {p: (0 if not s else len(s) - len(s.replace(" ", ""))) for p, s in real.items()}
+    assert count == {"P1": 1, "P2": 3, "P3": 0, "P4": 0, "P5": 4, "P6": 1}
+    # ── 누락 수별 시트: 프로젝트ID 는 값, 나머지는 05 의 그 프로젝트 행을 읽는 수식 ──
+    want_cols = ["프로젝트ID", "시설명", "세부사업명", "사업유형", "표2_대분류", "표2_중분류", "수요기관", "공고연도", "연면적_m2", "지상층수", "지하층수", "구조"] \
+        + [f"{t}(수식)" for t in build_excel.TRADES] + ["건축공종계(수식)"] + build_excel.TOTAL5_COLS \
+        + ["공종누락경고(수식)", "통합발주_포함공종", build_excel.MISS_REAL_COL, build_excel.MISS_CNT_COL, "중복_제외권장", "공고건수_최신", build_excel.MISS_ROW_COL]
+    for k in range(5):
+        ws = wb[names[1 + k]]
+        ids = [p for p in cases if count[p] == k]
+        assert [c.value for c in ws[1]] == want_cols, (k, [c.value for c in ws[1]])
+        assert [ws.cell(r, 1).value for r in range(2, len(ids) + 2)] == ids and ws.cell(len(ids) + 2, 1).value is None, (k, ids)
+        H = GL(len(want_cols))
+        for r in range(2, len(ids) + 2):
+            assert ws[f"{H}{r}"].value == f"=MATCH($A{r},{R5('프로젝트ID')},0)"
+            for j, name in enumerate(want_cols[1:-1], 2):
+                assert ws.cell(r, j).value == f'=IF(INDEX({R5(name)},${H}{r})="","",INDEX({R5(name)},${H}{r}))', (k, r, name)
+                assert not str(ws.cell(r, j).font.color.rgb if ws.cell(r, j).font.color else "").endswith("0000FF"), "수식 칸은 검은 글자"
+            assert str(ws.cell(r, 1).font.color.rgb).endswith("0000FF"), "프로젝트ID 는 값(파란 글자)"
+        note = str(ws.cell(len(ids) + 3, 1).value)
+        assert note.startswith(f"주: 실제 누락 공종이 {k}개인 프로젝트") and "워크북을 만들 때 정해진다" in note and "중복_제외권장 Y 행을 빼고" in note, note[:200]
+        assert ("누락 0개에는 통합발주로 묶인 공종이 있는 프로젝트도 들어 있다" in note) == (k == 0) and ("누락된 공종의 금액이 들어 있지 않다" in note) == (k > 0)
+    # ── 유형별 요약: 칸마다 COUNTIFS(05) — 같은 조건을 직접 세어 본다 ──
+    vals = {L5(name): [ws5[f"{L5(name)}{r}"].value for r in range(2, n5 + 1)] for name in ("사업유형", "표2_대분류", "표2_중분류", "중복_제외권장")}
+    vals[L5(build_excel.MISS_REAL_COL)], vals[L5(build_excel.MISS_CNT_COL)] = [real[p] for p in cases], [count[p] for p in cases]
+
+    def one(v, cr):
+        if not cr.startswith('"'):
+            return v == int(cr)
+        s = cr[1:-1]
+        if s == ">=0":
+            return isinstance(v, int) and v >= 0
+        if s == "<>Y":
+            return v != "Y"
+        if s.startswith("*"):
+            assert s.endswith("*") and s[1:-1] in MAIN, s
+            return s[1:-1] in str(v or "")
+        assert s.startswith("="), s
+        return str(v or "") == s[1:]
+
+    def countifs(f):
+        parts = re.findall(r"('[^']+'!\$([A-Z]+)\$2:\$[A-Z]+\$(\d+)),(\"[^\"]*\"|\d+)", f)
+        assert f == "=COUNTIFS(" + ",".join(f"{rng},{cr}" for rng, _, _, cr in parts) + ")" and all(int(n) == n5 for _, _, n, _ in parts), f
+        return sum(all(one(vals[col][i], cr) for _, col, _, cr in parts) for i in range(len(cases)))
+
+    ws = wb[names[0]]
+    key = {}
+    for r in range(1, ws.max_row + 1):
+        key.setdefault((ws.cell(r, 1).value, ws.cell(r, 2).value), r)
+    head = ["사업 수"] + [f"실제 누락 {k}개" for k in range(5)] + ["누락 없음 비율"] + [f"{t} 실제 누락" for t in MAIN]
+    hr = key[("구분", "세부 구분")]
+    assert [ws.cell(hr, c).value for c in range(3, 26)] == head + [None] + head and ws.cell(hr - 1, 3).value == "전체" and ws.cell(hr - 1, 15).value == "중복_제외권장 Y 제외"
+    assert [ws.cell(r, 1).value for r in range(1, ws.max_row + 1) if str(ws.cell(r, 1).value or "")[:2] in ("1.", "2.", "3.", "4.")] == \
+        ["1. 사업유형별", "2. 시설 유형별(표2_대분류)", "3. 시설 유형별(표2_대분류 · 표2_중분류)", "4. 시설 유형 · 사업유형별"]
+
+    def line(label, c0):
+        r = key[label]
+        got = [countifs(ws.cell(r, c0 + i).value) for i in (0, 1, 2, 3, 4, 5, 7, 8, 9, 10)]
+        a, b, ratio = GL(c0), GL(c0 + 1), ws.cell(r, c0 + 6)
+        assert ratio.value == f'=IF({a}{r}=0,"",{b}{r}/{a}{r})' and ratio.number_format == "0.0%"
+        return got
+
+    #                                     사업수 0개 1개 2개 3개 4개 건축 전기 정보통신 소방
+    assert line(("신축", None), 3) == [3, 1, 1, 0, 0, 1, 1, 1, 2, 1]                  # P1(1개) P3(0개) P5(4개)
+    assert line(("리모델링", None), 3) == [2, 0, 1, 0, 1, 0, 0, 1, 2, 1] and line(("리모델링", None), 15) == [1, 0, 0, 0, 1, 0, 0, 1, 1, 1]   # 오른쪽은 P6(중복 Y) 빠짐
+    assert line(("증축", None), 3) == [1, 1, 0, 0, 0, 0, 0, 0, 0, 0]
+    assert line(("가", None), 3) == [3, 1, 1, 0, 1, 0, 0, 1, 2, 1] and line(("나", None), 15) == [2, 1, 0, 0, 0, 1, 1, 1, 1, 1]
+    assert line(("가", "-"), 3) == [2, 1, 1, 0, 0, 0, 0, 0, 1, 0] and line(("가", "x"), 3) == [1, 0, 0, 0, 1, 0, 0, 1, 1, 1]      # 중분류 '-' 도 글자 그대로 센다
+    assert line(("나", "리모델링"), 3) == [1, 0, 1, 0, 0, 0, 0, 0, 1, 0] and line(("나", "리모델링"), 15) == [0] * 10 and ("가", "증축") not in key
+    assert line(("계", None), 3) == [6, 2, 2, 0, 1, 1, 1, 2, 4, 2] and line(("계", None), 15) == [5, 2, 1, 0, 1, 1, 1, 2, 3, 2]
+    assert [ws.cell(r, 1).value for r in range(key[("구분", "세부 구분")] + 1, key[("계", None)])] == ["신축", "증축", "리모델링"], "사업유형은 정해 둔 순서로"
+    readme = {r[0].value: str(r[1].value) for r in wb["README"].iter_rows() if r[0].value}
+    assert "모든 칸이 05 를 세는 수식" in readme[names[0]] and "워크북을 만들 때 정해진다" in readme[f"{names[1]} ~ {names[5]}"]
+    note5 = next(str(r[0].value) for r in ws5.iter_rows(min_row=n5 + 1) if str(r[0].value or "").startswith("주:"))
+    assert f"실제누락_공종수 = 공종누락_통합발주제외에 남은 공종의 수(0~4). 이 수별 프로젝트 목록은 '{names[1]}' ~ '{names[5]}' 시트, 유형별 건수는 '{names[0]}' 시트." in note5
+
+
 def test_attachments(tmp):
     assert attachments.safe_name("a" * 200 + ".hwp").endswith(".hwp") and attachments.safe_name("None") == ""
     assert attachments.sniff_ext(b"%PDF-1.7") == ".pdf" and attachments.sniff_ext(b"\xd0\xcf\x11\xe0\xa1") == ".hwp"
@@ -3655,6 +3828,8 @@ def run():
         test_work_split_review2(tmp)
         test_work_split_review3(tmp)
         test_trade_run_feedback(tmp)
+        test_missing_trades_excluding_bundled(tmp)
+        test_missing_count_sheets(tmp)
         test_attachments(tmp)
     from tests import test_api_review          # 수집기·응답 해석·check-raw·probe 독립 검토의 확인 항목(가짜 응답만 사용)
     test_api_review.run()

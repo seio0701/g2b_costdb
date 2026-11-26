@@ -318,7 +318,10 @@ def test_excel_and_stage(tmp):
     h0, h1 = [c.value for c in w0[build_excel.S_FAC][1]], [c.value for c in w1[build_excel.S_FAC][1]]
     assert not any(str(h).startswith("용역_") for h in h0) and [h for h in h1 if h not in h0] == build_excel.SERVC5_COLS
     assert h1.index("문서배분_중복경고(수식)") < h1.index("용역_설계_추정가격(수식)") < h1.index("시설간_중복") and h1[-1] == "메모"
-    assert n_formula(w1) - n_formula(w0) == len(fac) * len(build_excel.SERVC5_COLS) and len(build_excel.SERVC5_COLS) == 5, "05 에 프로젝트마다 용역 수식(금액 3 + 공고수 + 발주완료)만 늘어난다"
+    assert n_formula(w1) - n_formula(w0) == len(fac) * (len(build_excel.SERVC5_COLS) + 1) and len(build_excel.SERVC5_COLS) == 5, \
+        "05 에 프로젝트마다 용역 수식(금액 3 + 공고수 + 발주완료), 그리고 실제 누락 수별 시트(05-k)의 그 프로젝트 줄에 발주완료를 읽는 칸 하나만 늘어난다"
+    miss_names = [build_excel.S_MISS_SUM] + [build_excel.S_MISS_N.format(k=k) for k in range(5)]
+    assert all(build_excel.SERVC_DONE_COL in [c.value for c in w1[s][1]] and build_excel.SERVC_DONE_COL not in [c.value for c in w0[s][1]] for s in miss_names[1:])
     ws8 = w1[build_excel.S_SERVC]
     assert [c.value for c in ws8[1]] == build_excel.SERVC8_COLS and ws8.max_row >= len(linked) + 1
     i8 = build_excel.SERVC8_COLS.index(build_excel.SERVC_AGE_COL)

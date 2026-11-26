@@ -1,6 +1,7 @@
 """S7 Excel DB 생성 (openpyxl, 수식 기반).
 
 시트: README / 01_시설마스터 / 02_공고목록_전체 / 03_공고목록_최신 / 04_공사비DB_공종별 / 05_공사비DB_시설합산 / 06_검증로그 / 07_추출노트
+      (+ 05 뒤에 05-요약_실제누락_유형별 / 05-0_실제누락0개 … 05-4_실제누락4개: 실제 누락 공종 수별 프로젝트 목록과 유형별 요약 — 05 를 읽는 수식)
       (+ 08_용역공고(참고): link-servc 결과가 있을 때만 — 05 에 용역 참고 열이 함께 생긴다)
 색상: 파란 글자 = 원천값(API/문서), 검은 글자 = 수식, 노란 배경 = 사용자 입력·검수 셀
 """
@@ -40,7 +41,12 @@ S_TRADE_DETAIL = "04b_공종세부내역(문서)"
 S_FAC = "05_공사비DB_시설합산"
 S_SERVC = "08_용역공고(참고)"
 SERVC_KINDS = ["설계", "건설사업관리·감리", "폐기물처리"]                       # servc.KINDS 와 같다(05 의 용역 참고 열)
-SERVC_DONE_COL, SERVC_DONE_KIND = "발주완료_폐기물용역(수식)", "폐기물처리"       # 05: 이 프로젝트의 폐기물처리 용역(합산여부 Y)이 08 에 있으면 '발주완료'(보조지표)
+MISS_REAL_COL = "공종누락_통합발주제외(수식)"       # 05: 공종누락경고의 '누락' 가운데 통합발주_포함공종에 적힌(다른 공고에 묶인) 공종을 뺀 것
+MISS_TRADES = ("건축", "전기", "정보통신", "소방")     # 공종 누락을 보는 주요 공종
+MISS_CNT_COL = "실제누락_공종수(수식)"              # 05: MISS_REAL_COL 에 남은 공종의 수(0~4)
+S_MISS_SUM, S_MISS_N = "05-요약_실제누락_유형별", "05-{k}_실제누락{k}개"    # 05 의 실제누락_공종수별 프로젝트 목록(05-0 … 05-4)과 유형별 요약. 값은 모두 05 를 읽는 수식
+MISS_ROW_COL = "05시트_행(수식)"                    # 05-k: 그 프로젝트가 05 시트에서 몇째 자료 행인지(MATCH) — 같은 행의 다른 칸이 이 번호로 05 를 읽는다
+SERVC_DONE_COL, SERVC_DONE_KIND = "발주완료_폐기물용역(수식)", "폐기물처리"      # 05: 이 프로젝트의 폐기물처리 용역(합산여부 Y)이 08 에 있으면 '발주완료'(보조지표)
 SERVC5_COLS = [f"용역_{k}_추정가격(수식)" for k in SERVC_KINDS] + ["용역_공고수(수식)", SERVC_DONE_COL]
 SERVC_COLS = ["프로젝트ID", "시설ID", "시설명", "용역종류", "용역세부", "합산여부", "합산제외_까닭", "연결강도", "연결근거", "공고번호", "공고차수", "공고명", "공고일시",
               "공고기관", "수요기관", "추정가격", "배정예산", "상태", "공고종류", "용역구분", "조달분류", "프로젝트_후보", "공사_최초공고일", "공사대비_개월",
@@ -172,7 +178,12 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
         ["03_공고목록_최신", "대표 공고(합산 대상): 세부사업·공종별로 재공고에 대체된 공고를 뺀 모든 공고"],
         ["04_공사비DB_공종별", "대표 공고 기준 금액 구성(API+문서): 원천값(파란 글자) → 채택값 수식(추정가격·부가세·도급자관급비·추정금액 계ⓐ·관급자관급비ⓑ·기타금액ⓒ) → 금액합계 2종(추정가격 기준·기초금액 기준). 관급자재는 API 값 우선, 없으면 문서 추출값"],
         ["04b_공종세부내역(문서)", "건축·통합발주 공고의 첨부 내역서 집계표(또는 공고문 공사금액 표)에서 읽은 공종별 금액(2차 추출, extract-trades). 비율 = 금액 / 공종 행 합(공통가설·간접비·관급자재·부가세·합계·배분제외 행 제외), 배분금액 = 비율 × 04 금액합계(기초금액 기준). '합계' = 여러 공종을 합친 도급비·총공사비 행, '배분제외' = 이설비·분담금·용역비 등 도급 공사비 밖 항목(둘 다 배분 안 함). 배분적용 'N(사유)' 공고(공종 행 합이 집계표의 30% 미만 등 일부 행만 읽힌 의심)는 비율을 비운다. 참고용이며 05 총공사비합계에는 더하지 않는다"],
-        ["05_공사비DB_시설합산", "시설 단위 공종 합산(SUMIFS, 공종별 열은 기초금액 기준), 건축공종계, 총공사비합계 2종(기초금액 기준·추정가격 기준)과 각각의 ㎡당 공사비, 보정계수 입력, 공종 누락 경고. 행 단위 = 프로젝트(시설ID×사업유형, 여러 사업이 묶인 시설 후보는 세부사업별로 나눈 행 — 세부사업명·세부사업수). 문서배분_*(수식) = 다른 공종 공고 안에 묶인 그 공종의 배분금액 합(해당 공종 공고 자신의 몫은 제외, 참고), 건축_순건축추정 = 건축(수식) − 건축 공고 안의 비건축 배분, 문서배분_중복경고 = 건축 집계표에 전기·정보통신·소방 금액이 있는데 분리발주 공고도 있음. 시설간_중복 = 다른 시설 후보의 프로젝트와 대표 공고가 겹치는 경우 그 관계, 중복_제외권장 = Y 인 행을 빼면 같은 공고가 두 번 합산되지 않는다(합계·평균을 낼 때는 Y 행을 필터로 제외. '일부 겹침' 은 그것만으로는 Y 가 붙지 않는다 — Y 행을 뺀 뒤에도 두 번 남는 공고가 있는지는 06_검증로그 '시설 간 중복 프로젝트' 의 남은 건수로 확인하고, 남아 있을 때만 검수에서 판단)"],
+        ["05_공사비DB_시설합산", "시설 단위 공종 합산(SUMIFS, 공종별 열은 기초금액 기준), 건축공종계, 총공사비합계 2종(기초금액 기준·추정가격 기준)과 각각의 ㎡당 공사비, 보정계수 입력, 공종 누락 경고(공종누락경고 = 그 공종 공고가 없음, 공종누락_통합발주제외 = 그 가운데 통합발주로 다른 공고에 묶인 공종을 뺀 것). 행 단위 = 프로젝트(시설ID×사업유형, 여러 사업이 묶인 시설 후보는 세부사업별로 나눈 행 — 세부사업명·세부사업수). 문서배분_*(수식) = 다른 공종 공고 안에 묶인 그 공종의 배분금액 합(해당 공종 공고 자신의 몫은 제외, 참고), 건축_순건축추정 = 건축(수식) − 건축 공고 안의 비건축 배분, 문서배분_중복경고 = 건축 집계표에 전기·정보통신·소방 금액이 있는데 분리발주 공고도 있음. 시설간_중복 = 다른 시설 후보의 프로젝트와 대표 공고가 겹치는 경우 그 관계, 중복_제외권장 = Y 인 행을 빼면 같은 공고가 두 번 합산되지 않는다(합계·평균을 낼 때는 Y 행을 필터로 제외. '일부 겹침' 은 그것만으로는 Y 가 붙지 않는다 — Y 행을 뺀 뒤에도 두 번 남는 공고가 있는지는 06_검증로그 '시설 간 중복 프로젝트' 의 남은 건수로 확인하고, 남아 있을 때만 검수에서 판단)"],
+        [S_MISS_SUM, f"실제 누락 공종 수(05 '{MISS_CNT_COL}' — 건축·전기·정보통신·소방 가운데 공고도 없고 통합발주로 묶였다는 기록도 없는 공종의 수)별 프로젝트 수를 "
+                     "사업유형·시설 유형(표2 분류)별로 센 표. 왼쪽 = 전체, 오른쪽 = 중복_제외권장 Y 를 뺀 것. 모든 칸이 05 를 세는 수식"],
+        [f"{S_MISS_N.format(k=0)} ~ {S_MISS_N.format(k=len(MISS_TRADES))}",
+         "실제 누락 공종 수별 프로젝트 목록(시트 하나 = 누락 0개 … 4개). 공종별 금액·총공사비합계·㎡당 공사비·연면적 등은 05 의 그 프로젝트 행을 읽는 수식이라 05 와 늘 같은 값이다. "
+         "어느 프로젝트가 어느 시트에 오는지는 워크북을 만들 때 정해진다(04 를 고쳐 누락 수가 달라졌으면 excel 단계를 다시 실행)"],
         ["06_검증로그", "API-문서 교차검증, 재발주 금액변동, 정합성 점검 결과"],
         ["07_추출노트", "첨부파일별 다운로드·텍스트 추출 결과"],
     ]
@@ -356,7 +367,7 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
     ws = wb.create_sheet(S_FAC)
     fcols = ["프로젝트ID", "시설ID", "시설명", "세부사업명", "세부사업수", "사업유형", "표2_대분류", "표2_중분류", "수요기관", "연면적_m2", "지상층수", "지하층수", "구조",
              "공고연도"] + [f"{tr}(수식)" for tr in TRADES] + ["건축공종계(수식)"] + TOTAL5_COLS + ["건설공사비지수_보정계수(입력)"] + ADJ5_COLS \
-        + ["공종누락경고(수식)", "통합발주_포함공종"] \
+        + ["공종누락경고(수식)", "통합발주_포함공종", MISS_REAL_COL, MISS_CNT_COL] \
         + [f"문서배분_{tr}(수식)" for tr in DETAIL_ALLOC_TRADES] + ["건축_순건축추정(수식)", "문서배분_중복경고(수식)"] \
         + (SERVC5_COLS if servc is not None else []) + ["시설간_중복", "중복_제외권장", "공고건수_최신", "메모"]
     f5 = pd.DataFrame({c: facility[c] if c in facility.columns else None for c in
@@ -376,7 +387,7 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
               blue_cols=["프로젝트ID", "시설ID", "시설명", "세부사업명", "세부사업수", "사업유형", "표2_대분류", "표2_중분류", "수요기관", "연면적_m2", "지상층수", "지하층수", "구조",
                          "공고연도", "공고건수_최신", "통합발주_포함공종", "시설간_중복", "중복_제외권장"],
               yellow_cols=["건설공사비지수_보정계수(입력)", "메모"],
-              widths={"시설명": 30, "세부사업명": 36, "공종누락경고(수식)": 28, "통합발주_포함공종": 34, "시설간_중복": 34, SERVC_DONE_COL: 16})
+              widths={"시설명": 30, "세부사업명": 36, "공종누락경고(수식)": 28, "통합발주_포함공종": 34, MISS_REAL_COL: 28, MISS_CNT_COL: 12, "시설간_중복": 34, SERVC_DONE_COL: 16})
     fc = {c: get_column_letter(i + 1) for i, c in enumerate(fcols)}
     sv = None
     if servc is not None:
@@ -424,6 +435,14 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
                         for tr in ("건축", "전기", "정보통신", "소방"))
         ws[f"{fc['공종누락경고(수식)']}{r}"] = (f'=TRIM(IF(TRIM({miss})="","",TRIM({miss})&"누락 ")'
                                             f'&IF(TRIM({zero})="","",TRIM({zero})&"금액없음"))')
+        # 통합발주로 다른 공고에 묶인 공종은 '정보가 없는' 것이 아니다 → 공고가 없고(누락) 이 행의 통합발주_포함공종에도 적혀 있지 않은 공종만 남긴다.
+        # (묶인 공종의 금액은 묶은 공고의 공종 열에 들어 있다. 통합발주_포함공종이 빈 행은 SEARCH 가 오류 → 누락 그대로)
+        bund = f"${fc['통합발주_포함공종']}{r}"
+        real = "&".join(f'IF(AND(COUNTIFS({id_rng},$A{r},{tr_rng},"{tr}")=0,ISERROR(SEARCH("{tr}",{bund}))),"{tr} ","")' for tr in ("건축", "전기", "정보통신", "소방"))
+        ws[f"{fc[MISS_REAL_COL]}{r}"] = f'=IF(TRIM({real})="","",TRIM({real})&" 누락")'
+        # 실제 누락 공종의 수 = 위 칸의 공종 낱말 수('정보통신 소방 누락' → 빈칸 2개 → 2). 빈칸이면 0. 05-요약·05-k 시트가 이 수로 나눈다
+        mr = f"${fc[MISS_REAL_COL]}{r}"
+        ws[f"{fc[MISS_CNT_COL]}{r}"] = f'=IF({mr}="",0,LEN({mr})-LEN(SUBSTITUTE({mr}," ","")))'
         # 04b 참고 배분: 프로젝트·세부공종별 배분금액 합(총공사비합계에는 더하지 않음)
         # 다른 공종 공고 안에 묶인 금액만 합산(상위공종<>세부공종) — 해당 공종 공고 자신의 몫은 이미 그 공종(수식)에 전액 들어 있으므로 제외
         for tr in DETAIL_ALLOC_TRADES:
@@ -457,6 +476,10 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
     ws[f"A{n}"] = ("주: 건설공사비지수 보정계수는 사용자 입력(기준연도 지수/공고연도 지수). 공종별 열과 '총공사비합계_기초금액기준' = 04 금액합계_기초금액기준(기초금액 + 관급 + 기타금액)의 합, "
                    "'총공사비합계_추정가격기준' = 04 금액합계_추정가격기준(추정가격 + 부가세 + 관급 + 기타금액)의 합 — 두 대표값을 함께 제시한다. 건축공종계 = 건축 + 기계설비 + 토목 + 조경. "
                    "연면적은 01_시설마스터 값을 참조(01 에서 수정). 공종누락경고: '누락'=해당 공종 공고 없음, '금액없음'=공고는 있으나 금액 0. "
+                   "공종누락_통합발주제외 = 공종누락경고의 '누락' 가운데 통합발주_포함공종에 적힌 공종(다른 공고에 묶여 발주된 공종)을 뺀 것 — 공고도 없고 묶였다는 기록도 없는 공종만 남는다"
+                   "(빈칸 = 그런 공종 없음. 묶인 공종의 금액은 묶은 공고의 공종 열에 들어 있고 따로 나뉘지 않는다 — 04b 에 내역이 있으면 문서배분_*. "
+                   "통합발주_포함공종은 나라장터의 부공종과 공고문에서 읽은 것이라, 거기 적히지 않은 통합발주는 그대로 누락으로 남는다). "
+                   f"실제누락_공종수 = 공종누락_통합발주제외에 남은 공종의 수(0~4). 이 수별 프로젝트 목록은 '{S_MISS_N.format(k=0)}' ~ '{S_MISS_N.format(k=len(MISS_TRADES))}' 시트, 유형별 건수는 '{S_MISS_SUM}' 시트. "
                    "세부사업명·세부사업수: 한 시설 후보(시설ID×사업유형)의 공고가 여러 사업(다른 단지·구역·연도·별개 공사)이면 세부사업으로 나눠 행을 따로 둔다"
                    "(프로젝트ID 끝 번호 -01, -02 …, 세부사업수 = 그 시설 후보가 나뉜 개수). 같은 세부사업·같은 공종의 공고가 여럿이면 모두 합산(06 '같은 공종 합산'). "
                    "시설간_중복: 같은 공고가 여러 시설 후보에 걸려 같은 사업이 두 행 이상으로 집계된 경우 — '같은 사업: X'(대표 공고가 모두 같음), 'X 의 일부'(이 행의 공고가 모두 X 에 있음), "
@@ -479,6 +502,106 @@ def build_workbook(path: str, facility: pd.DataFrame, hist: pd.DataFrame, latest
                       "같은 사업이 두 행으로 잡힌 경우(시설간_중복) 두 행이 함께 '발주완료' 가 될 수 있다. " if servc is not None else "") +
                    "문서배분_*(수식)은 다른 공종 공고 안에 묶인 그 공종의 참고 배분(04b 비율 × 04 금액합계_기초금액기준, 자기 공종 공고의 몫 제외, 총공사비합계에 미포함), 건축_순건축추정 = 건축(수식) − 건축 공고 안의 비건축 배분(04b 배분적용이 Y 인 건축 공고의 것만 뺀다 — 배분되지 않은 건축 공고가 섞인 프로젝트는 그만큼 덜 빠진 값).")
     ws[f"A{n}"].font = FONT
+
+    # ── 05-요약 / 05-0 … 05-4 — 실제 누락 공종 수(05 '실제누락_공종수')별 프로젝트 목록과 유형별 요약 ──
+    # 값은 모두 05 를 읽는 수식이다(01·04 를 고치면 따라 바뀐다). 어느 프로젝트가 어느 시트에 오는지만 만들 때 정한다 — 05 의 수식과 같은 조건
+    # (04 에 그 프로젝트·그 공종 줄이 없고, 통합발주_포함공종 글에도 그 공종 이름이 없음)을 여기서 한 번 계산한다.
+    n5 = max(len(f5), 1) + 1
+    R5 = lambda c: f"'{S_FAC}'!${fc[c]}$2:${fc[c]}${n5}"
+    txt5 = lambda c: ["" if _clean(v) is None else str(_clean(v)) for v in f5[c]]
+    have: Dict[str, set] = {}
+    for pid, tr in zip(t["프로젝트ID"], t["공종"]):
+        have.setdefault(str(pid), set()).add(str(tr))
+    pids5 = txt5("프로젝트ID")
+    nmiss = [sum(1 for tr in MISS_TRADES if tr not in have.get(p, set()) and tr not in b) for p, b in zip(pids5, txt5("통합발주_포함공종"))]
+    ks = list(range(len(MISS_TRADES) + 1))
+    # 유형별 요약: 왼쪽 = 전체, 오른쪽 = 중복_제외권장 Y 를 뺀 것. 한 줄 = 유형, 칸 = COUNTIFS(05)
+    ws = wb.create_sheet(S_MISS_SUM)
+    crit = lambda v: '"=' + re.sub(r"([~*?])", r"~\1", v).replace('"', '""') + '"'     # COUNTIFS 조건 글자('=' 를 붙여 글자 그대로 견준다. 빈 값은 "=" → 빈 칸)
+    typ, big, mid = txt5("사업유형"), txt5("표2_대분류"), txt5("표2_중분류")
+    def _order(vals, first=()):                      # 건수가 많은 순(같으면 이름순). first 에 적힌 값은 그 순서로 앞에
+        cnt: Dict[str, int] = {}
+        for v in vals:
+            cnt[v] = cnt.get(v, 0) + 1
+        return [v for v in first if v in cnt] + sorted((v for v in cnt if v not in first), key=lambda v: (-cnt[v], v))
+    o_typ, o_big = _order(typ, ("신축", "증축", "리모델링", "증축·리모델링")), _order(big)
+    pairs_mid, pairs_typ = set(zip(big, mid)), set(zip(big, typ))
+    blocks = [("1. 사업유형별", [((v, ""), [("사업유형", v)]) for v in o_typ]),
+              ("2. 시설 유형별(표2_대분류)", [((v, ""), [("표2_대분류", v)]) for v in o_big]),
+              ("3. 시설 유형별(표2_대분류 · 표2_중분류)", [((b, m), [("표2_대분류", b), ("표2_중분류", m)]) for b in o_big
+                                                 for m in _order([m for bb, m in zip(big, mid) if bb == b]) if (b, m) in pairs_mid]),
+              ("4. 시설 유형 · 사업유형별", [((b, v), [("표2_대분류", b), ("사업유형", v)]) for b in o_big for v in o_typ if (b, v) in pairs_typ])]
+    sum_head = ["사업 수"] + [f"실제 누락 {k}개" for k in ks] + ["누락 없음 비율"] + [f"{tr} 실제 누락" for tr in MISS_TRADES]
+    c_all, c_nodup = 3, 3 + len(sum_head) + 1          # 두 표의 첫 열(C, 그리고 한 칸 띄운 뒤)
+    ws.append([f"실제 누락 공종 수 — 유형별 프로젝트 수 (05 '{MISS_CNT_COL}')"])
+    ws["A1"].font = Font(name="Arial", size=12, bold=True)
+    ws.append(["실제 누락 = 건축·전기·정보통신·소방 가운데 그 공종 공고가 없고, 통합발주로 다른 공고에 묶였다는 기록(05 '통합발주_포함공종')도 없는 공종. "
+               "모든 칸은 05 시트를 세는 수식이다. 오른쪽 표는 같은 사업이 두 번 잡힌 행(05 '중복_제외권장' = Y)을 뺀 것."])
+    ws["A2"].font = FONT
+
+    def _sum_row(label, conds):
+        ws.append([x or None for x in label])
+        r = ws.max_row
+        for c0, dup in ((c_all, ""), (c_nodup, f",{R5('중복_제외권장')},\"<>Y\"")):
+            base = "".join(f"{R5(c)},{crit(v)}," for c, v in conds)
+            L = [get_column_letter(c0 + i) for i in range(len(sum_head))]
+            ws[f"{L[0]}{r}"] = f'=COUNTIFS({base}{R5(MISS_CNT_COL)},">=0"{dup})'
+            for k in ks:
+                ws[f"{L[1 + k]}{r}"] = f"=COUNTIFS({base}{R5(MISS_CNT_COL)},{k}{dup})"
+            ws[f"{L[2 + len(ks) - 1]}{r}"] = f'=IF({L[0]}{r}=0,"",{L[1]}{r}/{L[0]}{r})'
+            ws[f"{L[2 + len(ks) - 1]}{r}"].number_format = "0.0%"
+            for i, tr in enumerate(MISS_TRADES):
+                ws[f"{L[2 + len(ks) + i]}{r}"] = f'=COUNTIFS({base}{R5(MISS_REAL_COL)},"*{tr}*"{dup})'
+        for c in range(1, c_nodup + len(sum_head)):
+            ws.cell(row=r, column=c).font = BOLD if label[0] == "계" else FONT
+
+    for title, rows in blocks:
+        ws.append([])
+        ws.append([title] + [None] * (c_all - 2) + ["전체"] + [None] * len(sum_head) + ["중복_제외권장 Y 제외"])
+        ws.append(["구분", "세부 구분"] + sum_head + [None] + sum_head)
+        for r in (ws.max_row - 1, ws.max_row):
+            for c in range(1, c_nodup + len(sum_head)):
+                cell = ws.cell(row=r, column=c)
+                cell.font = BOLD
+                if r == ws.max_row and cell.value:
+                    cell.fill, cell.alignment = HEAD, Alignment(wrap_text=True, vertical="center")
+        for label, conds in rows:
+            _sum_row(tuple("(빈칸)" if (x == "" and i < len(conds)) else x for i, x in enumerate(label)), conds)
+        _sum_row(("계", ""), [])
+    ws.append([])
+    ws.append(["주: '실제 누락 k개' = 실제 누락 공종이 k개인 프로젝트 수(프로젝트 목록은 "
+               f"'{S_MISS_N.format(k=0)}' ~ '{S_MISS_N.format(k=ks[-1])}' 시트). '○○ 실제 누락' = 그 공종이 실제 누락인 프로젝트 수(한 프로젝트가 여러 공종에 세어진다). "
+               "누락 없음 비율 = 실제 누락 0개 ÷ 사업 수. 통합발주 기록은 나라장터의 부공종과 공고문에서 읽은 것이라, 기록되지 않은 통합발주는 누락으로 세어진다. "
+               "누락 공종이 있다고 그 공사가 없었다는 뜻은 아니다 — 수집 기간 밖에 공고됐거나, 소액이라 공고 없이 집행됐거나, 아직 발주 전일 수 있다."])
+    ws.cell(row=ws.max_row, column=1).font = FONT
+    ws.column_dimensions["A"].width, ws.column_dimensions["B"].width = 26, 18
+    for c in range(c_all, c_nodup + len(sum_head)):
+        ws.column_dimensions[get_column_letter(c)].width = 4 if c == c_nodup - 1 else 12
+    ws.freeze_panes = "C3"
+    # 누락 수별 프로젝트 목록: 프로젝트ID(값) + 05 의 그 프로젝트 행을 읽는 수식
+    mcols = ["프로젝트ID", "시설명", "세부사업명", "사업유형", "표2_대분류", "표2_중분류", "수요기관", "공고연도", "연면적_m2", "지상층수", "지하층수", "구조"] \
+        + [f"{tr}(수식)" for tr in TRADES] + ["건축공종계(수식)"] + TOTAL5_COLS + ["공종누락경고(수식)", "통합발주_포함공종", MISS_REAL_COL, MISS_CNT_COL] \
+        + ([SERVC_DONE_COL] if servc is not None else []) + ["중복_제외권장", "공고건수_최신", MISS_ROW_COL]
+    mc = {c: get_column_letter(i + 1) for i, c in enumerate(mcols)}
+    for k in ks:
+        ws = wb.create_sheet(S_MISS_N.format(k=k))
+        ids = [p for p, m in zip(pids5, nmiss) if m == k]
+        _write_df(ws, pd.DataFrame({c: (ids if c == "프로젝트ID" else [None] * len(ids)) for c in mcols}),
+                  money_cols=["연면적_m2"] + [f"{tr}(수식)" for tr in TRADES] + ["건축공종계(수식)"] + TOTAL5_COLS, blue_cols=["프로젝트ID"],
+                  widths={"시설명": 30, "세부사업명": 36, "수요기관": 24, "공종누락경고(수식)": 28, "통합발주_포함공종": 34, MISS_REAL_COL: 28, MISS_CNT_COL: 12, SERVC_DONE_COL: 16})
+        for r in range(2, len(ids) + 2):
+            H = f"${mc[MISS_ROW_COL]}{r}"
+            ws[f"{mc[MISS_ROW_COL]}{r}"] = f"=MATCH($A{r},{R5('프로젝트ID')},0)"
+            for c in mcols[1:-1]:
+                ws[f"{mc[c]}{r}"] = f'=IF(INDEX({R5(c)},{H})="","",INDEX({R5(c)},{H}))'
+        nk = len(ids) + 3
+        ws[f"A{nk}"] = (f"주: 실제 누락 공종이 {k}개인 프로젝트(05 '{MISS_CNT_COL}' = {k}). 실제 누락 = 건축·전기·정보통신·소방 가운데 그 공종 공고가 없고 통합발주_포함공종에도 적히지 않은 공종. "
+                        "프로젝트ID 를 뺀 칸은 모두 05 시트의 그 프로젝트 행을 읽는 수식이다(공종별 금액·총공사비합계는 05 와 같은 값, 연면적은 01 의 값) — 값을 고치려면 01·04 에서 고칠 것. "
+                        f"어느 프로젝트가 이 시트에 오는지는 워크북을 만들 때 정해진다: 04 를 고쳐 누락 수가 달라지면 '{MISS_CNT_COL}' 열이 {k} 이 아닌 값으로 보이고, excel 단계를 다시 실행하면 맞는 시트로 옮겨진다. "
+                        + ("누락 0개에는 통합발주로 묶인 공종이 있는 프로젝트도 들어 있다 — 그 공종의 금액은 묶은 공고의 공종 열(주로 건축)에 들어 있어 그 공종 열은 0 으로 보인다. " if k == 0 else
+                           "이 시트의 총공사비합계·㎡당 공사비에는 누락된 공종의 금액이 들어 있지 않다. ") +
+                        "합계·평균을 낼 때는 중복_제외권장 Y 행을 빼고, ㎡당 공사비는 사업유형이 같은 프로젝트끼리 비교할 것.")
+        ws[f"A{nk}"].font = FONT
 
     # ── 06 / 07 ──
     ws = wb.create_sheet("06_검증로그")
